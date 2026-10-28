@@ -1,0 +1,2575 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type SeriesMarker,
+  type Time,
+  type UTCTimestamp,
+} from "lightweight-charts";
+import {
+  age,
+  clock,
+  compactQty,
+  fetchAll,
+  fetchCandles,
+  fetchEquity,
+  fetchReports,
+  fetchRiskLimits,
+  fetchStrategies,
+  flattenPositions,
+  METRIC_LABELS,
+  metricText,
+  num,
+  pct,
+  reducePosition,
+  runBacktest,
+  runOptimize,
+  setKillSwitch,
+  stamp,
+  type AlertRow,
+  type BacktestResponse,
+  type CandlesResponse,
+  type EngineResponse,
+  type EquityPoint,
+  type EquityResponse,
+  type FillRow,
+  type KillSwitchState,
+  type MetricMap,
+  type OptimizeResponse,
+  type OrderRow,
+  type Overview,
+  type PnlResponse,
+  type ReportItem,
+  type ReportsResponse,
+  type PositionRow,
+  type RiskLimitRule,
+  type RiskLimitsResponse,
+  type StrategyInfo,
+} from "./api";
+import "./styles.css";
+
+const POLL_MS = 5000;
+const BAR_OPTIONS = ["1H", "4H", "1D"];
+// 与后端 /api/equity 的 hours 上限（720）保持一致
+const EQUITY_RANGES = [
+  { hours: 24, label: "24h" },
+  { hours: 168, label: "7d" },
+  { hours: 720, label: "30d" },
+];
+const METRIC_ORDER = [
+  "total_return",
+  "max_drawdown",
+  "sharpe",
+  "win_rate",
+  "profit_factor",
+  "trade_count",
+];
+const OPTIMIZE_METRICS = ["total_return", "sharpe", "max_drawdown", "trade_count"];
+const METRIC_SELECT = [
+  "sharpe",
+  "total_return",
+  "max_drawdown",
+  "win_rate",
+  "profit_factor",
+  "trade_count",
+  "avg_holding_bars",
+];
+const METRIC_HINTS: Record<string, string> = {
+  total_return: "区间累计收益",
+  max_drawdown: "相对权益峰值",
+  sharpe: "按日收益年化",
+  win_rate: "盈利平仓占比",
+  profit_factor: "总盈利 / 总亏损",
+  trade_count: "买卖合计笔数",
+};
+const ENGINE_STATUS: Record<string, string> = {
+  signal: "已出信号",
+  no_signal: "无信号",
+  duplicate: "已处理",
+  waiting_data: "等待行情",
+  skipped: "已跳过",
+  error: "出错",
+};
+const ALERT_LEVELS = [
+  { key: "ALL", label: "全部" },
+  { key: "ERROR", label: "ERROR" },
+  { key: "WARNING", label: "WARN" },
+  { key: "INFO", label: "INFO" },
+];
+const ALERT_LEVEL_RANK: Record<string, number> = {
+  ERROR: 3,
+  WARNING: 2,
+  INFO: 1,
+};
+
+// 回测历史只存指标摘要（不存权益曲线与成交），避免撑爆 localStorage
+const HISTORY_KEY = "quant.backtest.history.v1";
+const HISTORY_LIMIT = 20;
+const COMPARE_LIMIT = 4;
+// 越小越好的指标，其余按越大越好比较
+const LOWER_IS_BETTER = new Set(["max_drawdown"]);
+// 交易次数没有优劣之分，不参与高亮
+const NO_BEST = new Set(["trade_count"]);
+
+type HistoryEntry = {
+  id: string;
+  saved_at: number;
+  strategy: string;
+  inst: string;
+  bar: string;
+  start: string;
+  end: string;
+  params: string;
+  bar_count: number;
+  trade_count: number;
+  final_equity: string;
+  metrics: MetricMap;
+};
+
+function historySignature(entry: HistoryEntry): string {
+  return [entry.strategy, entry.inst, entry.bar, entry.start, entry.end, entry.params].join("|");
+}
+
+function loadHistory(): HistoryEntry[] {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item): item is HistoryEntry =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as HistoryEntry).id === "string" &&
+          typeof (item as HistoryEntry).metrics === "object",
+      )
+      .slice(0, HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function persistHistory(entries: HistoryEntry[]): void {
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+  } catch {
+    // 隐私模式或配额不足时静默降级：本次仍然可用，只是不持久化
+  }
+}
+
+function bestValue(entries: HistoryEntry[], key: string): number | null {
+  if (NO_BEST.has(key)) return null;
+  const values = entries
+    .map((entry) => entry.metrics[key])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length < 2) return null;
+  return LOWER_IS_BETTER.has(key) ? Math.min(...values) : Math.max(...values);
+}
+
+type Bundle = Awaited<ReturnType<typeof fetchAll>>;
+
+type Tone = "ok" | "warn" | "bad" | "idle";
+
+export default function App() {
+  const [data, setData] = useState<Bundle | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [pulse, setPulse] = useState(0);
+  const [equityHours, setEquityHours] = useState(24);
+  const [equity, setEquity] = useState<EquityResponse | null>(null);
+  const [reports, setReports] = useState<ReportsResponse | null>(null);
+  const [risk, setRisk] = useState<RiskLimitsResponse | null>(null);
+  const [riskError, setRiskError] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+
+  const load = useCallback(async (signal: AbortSignal) => {
+    try {
+      const bundle = await fetchAll(signal);
+      setData(bundle);
+      setError(null);
+      setUpdatedAt(Date.now());
+      setPulse((n) => n + 1);
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    timer.current = window.setInterval(() => {
+      void load(controller.signal);
+    }, POLL_MS);
+    return () => {
+      controller.abort();
+      if (timer.current !== null) window.clearInterval(timer.current);
+    };
+  }, [load]);
+
+  // 权益曲线按所选区间单独轮询，切换区间立即重拉
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchEquity(controller.signal, equityHours)
+        .then(setEquity)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, [equityHours]);
+
+  // 日报每天一份，低频拉取即可；切回页面时也不必立刻重拉
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchReports(controller.signal)
+        .then(setReports)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // 风控限额单独轮询：接口不存在（后端未重启）时只让这张卡降级，
+  // 不能因为一个 404 让 fetchAll 的 Promise.all 整体失败、整页失联
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchRiskLimits(controller.signal)
+        .then((value) => {
+          setRisk(value);
+          setRiskError(null);
+        })
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setRisk(null);
+          setRiskError((err as Error).message);
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const overview = data?.overview;
+  const positions = data?.positions.positions ?? [];
+  const orders = data?.orders.orders ?? [];
+  const fills = data?.fills.fills ?? [];
+  const alerts = data?.alerts.alerts ?? [];
+  const equityPoints = equity?.points ?? [];
+  const equityRange =
+    EQUITY_RANGES.find((item) => item.hours === equityHours) ?? EQUITY_RANGES[0];
+  const degraded = useMemo(
+    () =>
+      new Set([
+        ...(overview?.degraded ?? []),
+        ...(data?.alerts.degraded ?? []),
+        ...(data?.pnl.degraded ?? []),
+        ...(risk?.degraded ?? []),
+        ...(reports?.degraded ?? []),
+        ...(equity?.degraded ?? []),
+      ]),
+    [overview, data, risk, equity, reports],
+  );
+  const alertStats = useMemo(() => {
+    let error = 0;
+    for (const alert of alerts) {
+      if (alert.level.toUpperCase() === "ERROR") error += 1;
+    }
+    return { total: alerts.length, error };
+  }, [alerts]);
+
+  const stale =
+    overview !== undefined &&
+    (overview.snapshot_age_seconds === null || overview.snapshot_age_seconds > 180);
+
+  return (
+    <div className="shell">
+      <div className="grain" aria-hidden="true" />
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">Q</span>
+          <div className="brand-text">
+            <span className="brand-title">QUANT / OPS</span>
+            <span className="brand-sub">模拟盘只读终端</span>
+          </div>
+        </div>
+        <div className="topmeta">
+          <span className={`pulse ${error ? "pulse-bad" : ""}`} key={pulse} />
+          <span className="topmeta-label">{error ? "连接中断" : "轮询中"}</span>
+          <span className="topmeta-time">{clock(updatedAt ?? undefined)}</span>
+        </div>
+      </header>
+
+      <div className="rail" role="status" aria-live="polite">
+        <Chip
+          label="KILL SWITCH"
+          value={
+            !overview
+              ? "—"
+              : !overview.kill_switch.known
+                ? "未知"
+                : overview.kill_switch.active
+                  ? "已激活"
+                  : "未激活"
+          }
+          tone={
+            !overview || !overview.kill_switch.known
+              ? "idle"
+              : overview.kill_switch.active
+                ? "bad"
+                : "ok"
+          }
+          note={overview?.kill_switch.reason ?? undefined}
+        />
+        <Chip
+          label="WORKER"
+          value={overview?.worker.online ? "在线" : "离线"}
+          tone={overview ? (overview.worker.online ? "ok" : "bad") : "idle"}
+          note={heartbeatNote(overview?.worker.age_seconds)}
+        />
+        <Chip
+          label="MONITOR"
+          value={overview?.monitor.online ? "在线" : "离线"}
+          tone={overview ? (overview.monitor.online ? "ok" : "bad") : "idle"}
+          note={heartbeatNote(overview?.monitor.age_seconds)}
+        />
+        <Chip
+          label="QUEUE"
+          value={overview ? String(overview.queue.pending ?? "—") : "—"}
+          tone={
+            overview && (overview.queue.pending ?? 0) > 50 ? "warn" : "idle"
+          }
+          note={overview ? `inflight ${overview.queue.inflight ?? "—"}` : undefined}
+        />
+        <Chip
+          label="DEAD"
+          value={overview ? String(overview.queue.dead ?? "—") : "—"}
+          tone={overview && (overview.queue.dead ?? 0) > 0 ? "warn" : "ok"}
+          note="死信队列"
+        />
+        <Chip
+          label="ALERTS"
+          value={alertStats.error > 0 ? `${alertStats.error} ERROR` : "无 ERROR"}
+          tone={alertStats.error > 0 ? "bad" : "ok"}
+          note={`共 ${alertStats.total} 条`}
+        />
+        <Chip
+          label="SOURCES"
+          value={degraded.size > 0 ? "降级" : "正常"}
+          tone={degraded.size > 0 ? "warn" : "ok"}
+          note={degraded.size > 0 ? [...degraded].join(" / ") : "redis + sqlite"}
+        />
+      </div>
+
+      {error && (
+        <div className="banner banner-bad">
+          接口异常：{error}。请确认 <code>quant dashboard</code> 是否在运行。
+        </div>
+      )}
+      {stale && (
+        <div className="banner banner-warn">
+          monitor 快照已过期或缺失。账户/指标数据停更，订单与成交仍来自本地 SQLite。
+        </div>
+      )}
+
+      <main className="grid">
+        <section className="card hero reveal" style={{ animationDelay: "40ms" }}>
+          <div className="card-head">
+            <h2>账户权益</h2>
+            <div className="chart-tools">
+              <div className="seg" role="group" aria-label="权益曲线时间范围">
+                {EQUITY_RANGES.map((item) => (
+                  <button
+                    key={item.hours}
+                    type="button"
+                    className={`seg-btn ${equityHours === item.hours ? "seg-on" : ""}`}
+                    onClick={() => setEquityHours(item.hours)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="equity">
+            <span className="equity-value">
+              {num(overview?.account?.total_equity, 2)}
+            </span>
+            <span className="equity-unit">USDT</span>
+          </div>
+          <EquityCurve points={equityPoints} label={equityRange.label} />
+          <dl className="kv">
+            <div>
+              <dt>可用</dt>
+              <dd>{num(overview?.account?.avail_usdt, 2)}</dd>
+            </div>
+            <div>
+              <dt>冻结</dt>
+              <dd>{num(overview?.account?.frozen_usdt, 2)}</dd>
+            </div>
+            <div>
+              <dt>未实现盈亏</dt>
+              <dd className={sign(overview?.account?.unrealized_pnl)}>
+                {num(overview?.account?.unrealized_pnl, 2)}
+              </dd>
+            </div>
+            <div>
+              <dt>保证金率</dt>
+              <dd>{overview?.account?.margin_ratio ? pct(overview.account.margin_ratio) : "—"}</dd>
+            </div>
+          </dl>
+          <div className="orders-line">
+            {["filled", "pending", "canceled"].map((status) => (
+              <span key={status} className="orders-pill">
+                <em>{status}</em>
+                <b>{overview?.orders[status] ?? 0}</b>
+              </span>
+            ))}
+            <span className="orders-pill">
+              <em>持仓数</em>
+              <b>{overview?.positions_count ?? positions.length}</b>
+            </span>
+          </div>
+        </section>
+
+        <section className="card metrics reveal" style={{ animationDelay: "90ms" }}>
+          <div className="card-head">
+            <h2>风险指标</h2>
+            <span className="card-note">
+              {overview?.snapshot_age_seconds !== null &&
+              overview?.snapshot_age_seconds !== undefined
+                ? `${age(overview.snapshot_age_seconds)} 前刷新`
+                : "等待 monitor"}
+            </span>
+          </div>
+          <div className="metric-grid">
+            <Metric
+              label="最大回撤"
+              value={pct(overview?.metrics?.max_drawdown)}
+              hint="相对历史峰值权益"
+              tone={drawdownTone(overview?.metrics?.max_drawdown)}
+            />
+            <Metric
+              label="撤单率"
+              value={overview?.metrics?.cancel_rate ? pct(overview.metrics.cancel_rate) : "—"}
+              hint="撤销 / (成交 + 撤销)"
+              tone={cancelTone(overview?.metrics?.cancel_rate)}
+            />
+            <Metric
+              label="最小强平距离"
+              value={
+                overview?.metrics?.min_liq_distance
+                  ? pct(overview.metrics.min_liq_distance)
+                  : "—"
+              }
+              hint="越接近 0 越危险"
+              tone={liqTone(overview?.metrics?.min_liq_distance)}
+            />
+            <Metric
+              label="挂单 / 处理中"
+              value={`${overview?.queue.pending ?? "—"} / ${overview?.queue.inflight ?? "—"}`}
+              hint="Redis 信号队列"
+              tone="neutral"
+            />
+          </div>
+        </section>
+
+        <section className="card risk-limits reveal" style={{ animationDelay: "105ms" }}>
+          <div className="card-head">
+            <h2>风控限额</h2>
+            <span className="card-note">
+              {riskError
+                ? "接口不可用"
+                : risk?.known
+                  ? `${risk.strategy ?? "—"}${
+                      risk.paper_mode ? " · 模拟盘" : ""
+                    } · 权益 ${num(risk.equity)} · UTC+8 00:00 重置`
+                  : "等待 worker 发布生效值"}
+            </span>
+          </div>
+          <RiskLimitsPanel risk={risk} error={riskError} />
+        </section>
+
+        <section className="card kill reveal" style={{ animationDelay: "120ms" }}>
+          <div className="card-head">
+            <h2>紧急停止</h2>
+            <span className="card-note">只拦新信号 · 不撤挂单 · 不停进程</span>
+          </div>
+          <KillSwitchPanel state={overview?.kill_switch} />
+        </section>
+
+        <EnginePanel engine={data?.engine} />
+
+        <ChartPanel />
+
+        <BacktestPanel />
+
+        <section className="card positions reveal" style={{ animationDelay: "140ms" }}>
+          <PositionsPanel rows={positions} />
+        </section>
+
+        <section className="card alerts reveal" style={{ animationDelay: "190ms" }}>
+          <div className="card-head">
+            <h2>告警</h2>
+            <span className="card-note">
+              {alerts.length} 条 · 最近在前
+            </span>
+          </div>
+          <AlertPanel alerts={alerts} />
+        </section>
+
+        <section className="card pnl reveal" style={{ animationDelay: "240ms" }}>
+          <div className="card-head">
+            <h2>成交盈亏</h2>
+            <span className="card-note">
+              {data?.pnl
+                ? `FIFO 回合 · ${data.pnl.round_trips} 个已平仓`
+                : "等待数据"}
+            </span>
+          </div>
+          <PnlPanel pnl={data?.pnl} />
+        </section>
+
+        <section className="card reports reveal" style={{ animationDelay: "280ms" }}>
+          <div className="card-head">
+            <h2>模拟盘日报</h2>
+            <span className="card-note">
+              {reports
+                ? `每日 08:00 · 偏离阈值 ${pct(String(reports.threshold))}`
+                : "等待数据"}
+            </span>
+          </div>
+          <ReportsPanel reports={reports} />
+        </section>
+
+        <section className="card orders reveal" style={{ animationDelay: "280ms" }}>
+          <div className="card-head">
+            <h2>最近订单</h2>
+            <span className="card-note">SQLite · 倒序</span>
+          </div>
+          <Table
+            empty={orders.length === 0}
+            emptyHint="暂无订单记录"
+            head={["时间", "品种", "方向", "类型", "数量", "价格", "状态"]}
+            rows={orders.map((row) => orderCells(row))}
+          />
+        </section>
+
+        <section className="card fills reveal" style={{ animationDelay: "290ms" }}>
+          <div className="card-head">
+            <h2>最近成交</h2>
+            <span className="card-note">
+              累计手续费 {num(data?.fills.total_fee, 4)}
+            </span>
+          </div>
+          <Table
+            empty={fills.length === 0}
+            emptyHint="暂无成交记录"
+            head={["时间", "品种", "方向", "数量", "成交价", "名义", "手续费"]}
+            rows={fills.map((row) => fillCells(row))}
+          />
+        </section>
+      </main>
+
+      <footer className="footer">
+        <span>只读终端 · 每 {POLL_MS / 1000}s 轮询</span>
+        <span>
+          Redis 快照 + SQLite 状态 · 最后更新 {clock(updatedAt ?? undefined)}
+        </span>
+      </footer>
+    </div>
+  );
+}
+
+/** 风控限额：上限是 worker 发布的生效值，已用额度由后端现算。 */
+function RiskLimitsPanel({
+  risk,
+  error,
+}: {
+  risk: RiskLimitsResponse | null;
+  error: string | null;
+}) {
+  if (error) {
+    return (
+      <p className="risk-unknown">
+        接口不可用（{error}）：看板后端还是旧进程，重启后该卡片才会生效；
+        其余面板不受影响。
+      </p>
+    );
+  }
+  if (!risk?.known) {
+    return (
+      <p className="risk-unknown">
+        未收到 worker 的生效风控参数：<code>quant run-worker</code> 启动后每
+        60s 发布一次，停机 5 分钟后过期。
+      </p>
+    );
+  }
+  return (
+    <div className="risk-grid">
+      {risk.rules.map((rule) => (
+        <RiskLimitRow key={rule.key} rule={rule} />
+      ))}
+    </div>
+  );
+}
+
+function RiskLimitRow({ rule }: { rule: RiskLimitRule }) {
+  const ratio = rule.ratio === null ? null : Number(rule.ratio);
+  const limit = Number(rule.limit ?? 0);
+  const used = Number(rule.used ?? 0);
+  // 连亏用点阵比进度条更直观；异常上限不画，退回数值展示
+  const dots =
+    rule.key === "consecutive_loss" && Number.isFinite(limit) && limit > 0
+      ? Math.min(Math.round(limit), 20)
+      : 0;
+  const width = ratio === null ? 0 : Math.min(ratio, 1) * 100;
+
+  return (
+    <div className={`risk-item risk-${rule.level}`}>
+      <div className="risk-top">
+        <span className="risk-label">{rule.label}</span>
+        <span className="risk-value">
+          {rule.used === null ? "参考" : num(rule.used)} / {num(rule.limit)}
+        </span>
+      </div>
+      {dots > 0 ? (
+        <>
+          <div className="risk-dots" title={rule.detail}>
+            {Array.from({ length: dots }, (_, index) => (
+              <span
+                key={index}
+                className={index < used ? "risk-dot risk-dot-on" : "risk-dot"}
+              />
+            ))}
+          </div>
+          <div className="risk-foot">
+            <span>{rule.detail}</span>
+            <b>{pct(rule.ratio)}</b>
+          </div>
+        </>
+      ) : ratio === null ? (
+        <div className="risk-ref">{rule.detail}</div>
+      ) : (
+        <>
+          <div className="risk-track" title={rule.detail}>
+            <span className="risk-fill" style={{ width: `${width}%` }} />
+            <span className="risk-tick risk-tick-warn" />
+            <span className="risk-tick risk-tick-halt" />
+          </div>
+          <div className="risk-foot">
+            <span>{rule.detail}</span>
+            <b>{pct(rule.ratio)}</b>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const KILL_TOKEN_KEY = "quant.dashboard.token";
+
+// 手续费率按回测默认 0.1% 估算，仅用于下单前预览
+const FEE_RATE = 0.001;
+
+function holdingOf(row: PositionRow): number {
+  return Number(row.local_qty ?? row.qty ?? 0);
+}
+
+/** 持仓操作：选中一行后出现操作条，只允许减仓。 */
+function PositionsPanel({ rows }: { rows: PositionRow[] }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [ratio, setRatio] = useState<number | null>(null);
+  const [qty, setQty] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [flattenOpen, setFlattenOpen] = useState(false);
+  const [flattenWord, setFlattenWord] = useState("");
+  const [flattenReason, setFlattenReason] = useState("");
+  const [flattenReport, setFlattenReport] = useState<string[]>([]);
+
+  const row = rows.find((item) => item.inst_id === selected) ?? null;
+  const holding = row ? holdingOf(row) : 0;
+  const price = Number(
+    row?.mark_price ?? row?.avg_price ?? row?.local_avg_price ?? 0
+  );
+  const previewQty = ratio !== null ? holding * ratio : Number(qty || 0);
+  const previewValue = Number.isFinite(previewQty) ? previewQty * price : 0;
+
+  const pick = (instId: string) => {
+    setSelected(instId === selected ? null : instId);
+    setRatio(null);
+    setQty("");
+    setError("");
+    setNotice("");
+  };
+
+  const applyRatio = (value: number) => {
+    setRatio(value);
+    // 输入框跟着联动，用户改数字会取消高亮
+    setQty(holding > 0 ? String(Number((holding * value).toFixed(8))) : "");
+    setNotice("");
+  };
+
+  const submitReduce = async () => {
+    if (!row) return;
+    if (!reason.trim()) {
+      setError("请填写操作原因");
+      return;
+    }
+    if (previewQty <= 0) {
+      setError("请选择比例或填写数量");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await reducePosition(
+        row.inst_id,
+        ratio !== null
+          ? { ratio, reason: reason.trim() }
+          : { qty, reason: reason.trim() },
+        window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? ""
+      );
+      const filled = result.fill;
+      setNotice(
+        filled
+          ? `已卖出 ${compactQty(filled.qty)} @ ${num(filled.price, 2)}，手续费 ${num(filled.fee, 4)}`
+          : `已提交（${result.status ?? "pending"}），等待交易所成交`
+      );
+      setQty("");
+      setRatio(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitFlatten = async () => {
+    if (flattenWord.trim().toUpperCase() !== "FLATTEN") {
+      setError("确认词不匹配：请输入 FLATTEN");
+      return;
+    }
+    if (!flattenReason.trim()) {
+      setError("请填写操作原因");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setFlattenReport([]);
+    try {
+      const result = await flattenPositions(
+        flattenReason.trim(),
+        window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? ""
+      );
+      setFlattenReport(
+        result.results.map((item) => {
+          const who = item.inst_id;
+          if (!item.ok) return `${who}：失败 — ${item.error ?? "未知错误"}`;
+          return item.fill
+            ? `${who}：卖出 ${compactQty(item.fill.qty)} @ ${num(item.fill.price, 2)}`
+            : `${who}：已提交，等待成交`;
+        })
+      );
+      setNotice(
+        result.total === 0
+          ? "当前没有可平持仓"
+          : `全平完成：成功 ${result.succeeded} / ${result.total}`
+      );
+      setFlattenOpen(false);
+      setFlattenWord("");
+      setFlattenReason("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="card-head pos-head">
+        <h2>持仓</h2>
+        <span className="card-note">
+          {rows.length} 条 · 点选一行可减仓
+        </span>
+        <button
+          className="pos-flat"
+          onClick={() => {
+            setFlattenOpen(!flattenOpen);
+            setFlattenReport([]);
+            setError("");
+          }}
+          disabled={rows.length === 0 || busy}
+        >
+          一键全平
+        </button>
+      </div>
+
+      {flattenOpen && (
+        <div className="pos-flat-bar">
+          <span className="pos-flat-warn">
+            将对全部多头持仓下市价卖单，且不可撤销。输入 FLATTEN 确认：
+          </span>
+          <input
+            className="pos-input"
+            value={flattenWord}
+            placeholder="FLATTEN"
+            onChange={(e) => setFlattenWord(e.target.value)}
+          />
+          <input
+            className="pos-input"
+            value={flattenReason}
+            placeholder="原因（必填）"
+            onChange={(e) => setFlattenReason(e.target.value)}
+          />
+          <button className="pos-danger" onClick={submitFlatten} disabled={busy}>
+            {busy ? "提交中…" : "确认全平"}
+          </button>
+        </div>
+      )}
+
+      <Table
+        empty={rows.length === 0}
+        emptyHint="暂无持仓：本地无记录，monitor 也未回报合约持仓"
+        head={[
+          "品种",
+          "账户数量",
+          "账户均价",
+          "策略持仓",
+          "标记价",
+          "账户盈亏",
+          "策略盈亏",
+          "杠杆",
+          "强平价",
+          "距离",
+        ]}
+        rows={rows.map((item) => positionCells(item))}
+        activeIndex={
+          selected === null
+            ? -1
+            : rows.findIndex((item) => item.inst_id === selected)
+        }
+        onRowClick={(index) => pick(rows[index].inst_id)}
+      />
+
+      {row && (
+        <div className="pos-bar">
+          <span className="pos-who">
+            {row.inst_id} · 可减 {compactQty(String(holding))}
+          </span>
+          {[0.25, 0.5, 1].map((value) => (
+            <button
+              key={value}
+              className={ratio === value ? "pos-chip pos-chip-on" : "pos-chip"}
+              onClick={() => applyRatio(value)}
+              disabled={busy || holding <= 0}
+            >
+              {value === 1 ? "平仓" : `${value * 100}%`}
+            </button>
+          ))}
+          <input
+            className="pos-input pos-input-qty"
+            value={qty}
+            placeholder="数量（基础币）"
+            onChange={(e) => {
+              setQty(e.target.value);
+              setRatio(null);
+            }}
+          />
+          <input
+            className="pos-input pos-input-reason"
+            value={reason}
+            placeholder="原因（必填）"
+            onChange={(e) => setReason(e.target.value)}
+          />
+          {previewQty > 0 && (
+            <span className="pos-est">
+              ≈ {num(String(previewValue), 2)} USDT · 手续费 ≈{" "}
+              {num(String(previewValue * FEE_RATE), 2)}
+            </span>
+          )}
+          <button
+            className="pos-danger"
+            onClick={submitReduce}
+            disabled={busy || holding <= 0}
+          >
+            {busy ? "提交中…" : "减仓"}
+          </button>
+        </div>
+      )}
+
+      {(error || notice) && (
+        <div className={error ? "pos-msg pos-msg-bad" : "pos-msg"}>
+          {error || notice}
+        </div>
+      )}
+      {flattenReport.length > 0 && (
+        <ul className="pos-report">
+          {flattenReport.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/** 紧急停止：两段式确认，避免误点。 */
+function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
+  const [local, setLocal] = useState<KillSwitchState | null>(null);
+  const [pending, setPending] = useState<"on" | "off" | null>(null);
+  const [reason, setReason] = useState("");
+  const [token, setToken] = useState(
+    () => window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? ""
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  // 服务端状态一变就丢弃本地结果，避免遮住风控的自动激活
+  useEffect(() => {
+    setLocal(null);
+  }, [state?.active, state?.reason]);
+
+  const active = local?.active ?? state?.active ?? false;
+  const authRequired = local?.auth_required ?? state?.auth_required ?? false;
+
+  const submit = async (action: "on" | "off") => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await setKillSwitch(
+        action,
+        action === "on" ? reason.trim() : "",
+        token
+      );
+      setLocal(result);
+      if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+      setNotice(action === "on" ? "已停止开新仓" : "已恢复开仓");
+      setPending(null);
+      setReason("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const start = () => {
+    setPending(active ? "off" : "on");
+    setError("");
+    setNotice("");
+  };
+
+  return (
+    <div className="kill-body">
+      <div className="kill-status">
+        <span className={active ? "kill-badge kill-badge-on" : "kill-badge"}>
+          {active ? "已激活" : "未激活"}
+        </span>
+        <span className="kill-detail">
+          {active
+            ? `原因：${state?.reason || local?.reason || "未填写"}`
+            : "停止后 worker 拒绝新信号并写入死信队列，engine 本轮跳过"}
+        </span>
+      </div>
+
+      {pending === null ? (
+        <button
+          type="button"
+          className={active ? "kill-btn kill-btn-safe" : "kill-btn kill-btn-danger"}
+          onClick={start}
+        >
+          {active ? "解除停止" : "停止开新仓"}
+        </button>
+      ) : (
+        <div className="kill-confirm">
+          {pending === "on" && (
+            <input
+              className="kill-input"
+              placeholder="原因（写进告警，便于复盘）"
+              maxLength={60}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          )}
+          {authRequired && (
+            <input
+              className="kill-input"
+              type="password"
+              placeholder="DASHBOARD_TOKEN"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+          )}
+          <button
+            type="button"
+            className="kill-btn kill-btn-danger"
+            disabled={busy}
+            onClick={() => submit(pending)}
+          >
+            {busy ? "提交中…" : pending === "on" ? "确认停止" : "确认解除"}
+          </button>
+          <button
+            type="button"
+            className="kill-btn"
+            disabled={busy}
+            onClick={() => setPending(null)}
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {error && <div className="kill-msg kill-msg-bad">操作失败：{error}</div>}
+      {!error && notice && <div className="kill-msg">{notice}</div>}
+      <p className="kill-note">
+        网页按钮只写停止标志，不会撤挂单；需要同时撤单请执行
+        <code>quant kill-switch --on</code>。
+      </p>
+    </div>
+  );
+}
+
+function EnginePanel({ engine }: { engine?: EngineResponse }) {
+  const [params, setParams] = useState<Record<string, unknown> | null>(null);
+  const strategyId = engine?.strategy;
+
+  useEffect(() => {
+    if (!strategyId) return;
+    const controller = new AbortController();
+    fetchStrategies(controller.signal)
+      .then((res) => {
+        const hit = res.strategies.find((item) => item.id === strategyId);
+        setParams(hit?.params ?? null);
+      })
+      .catch(() => setParams(null));
+    return () => controller.abort();
+  }, [strategyId]);
+
+  const paramsText = params
+    ? Object.entries(params)
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(" · ")
+    : "—";
+  const online = engine?.online ?? false;
+  const tone: Tone = !engine ? "idle" : online ? "ok" : "bad";
+  const toneClass = tone === "idle" ? "tag-muted" : `tag-${tone}`;
+  const statusText = !engine
+    ? "—"
+    : !engine.status
+      ? "无记录"
+      : online
+        ? ENGINE_STATUS[engine.status] ?? engine.status
+        : "离线";
+  const lag = engine?.lag_bars;
+  const lagTone =
+    lag === null || lag === undefined
+      ? "tag-muted"
+      : lag === 0
+        ? "tag-ok"
+        : lag > (engine?.max_catchup_bars ?? 24)
+          ? "tag-bad"
+          : "tag-warn";
+  return (
+    <section className="card engine reveal" style={{ animationDelay: "120ms" }}>
+      <div className="card-head">
+        <h2>策略引擎</h2>
+        <span className="card-note">
+          {engine
+            ? `${engine.strategy} · ${engine.inst} · ${engine.bar}`
+            : "等待数据"}
+        </span>
+      </div>
+      <dl className="kv">
+        <div>
+          <dt>状态</dt>
+          <dd className={`engine-state ${toneClass}`}>
+            {statusText}
+            {engine?.reason && (
+              <span className="engine-reason" title={engine.reason}>
+                {engine.reason}
+              </span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>最近评估 bar</dt>
+          <dd>{stamp(engine?.last_bar_ts)}</dd>
+        </div>
+        <div>
+          <dt>水位延迟</dt>
+          <dd className={lagTone}>
+            {lag === null || lag === undefined
+              ? "—"
+              : lag === 0
+                ? "已追平"
+                : `${lag} 根`}
+          </dd>
+        </div>
+        <div>
+          <dt>最近心跳</dt>
+          <dd>{heartbeatNote(engine?.status_age_seconds)}</dd>
+        </div>
+        <div>
+          <dt>策略参数</dt>
+          <dd className="engine-params">{paramsText}</dd>
+        </div>
+      </dl>
+      <div className="orders-line">
+        <span className="orders-pill">
+          <em>本轮补评估</em>
+          <b>{engine?.catch_up ?? 0}</b>
+        </span>
+        <span className="orders-pill">
+          <em>累计补评估</em>
+          <b>{engine?.catch_up_total ?? 0}</b>
+        </span>
+        <span className="orders-pill">
+          <em>跳过 tick</em>
+          <b>{engine?.skipped_total ?? 0}</b>
+        </span>
+        <span className="orders-pill">
+          <em>累计信号</em>
+          <b>{engine?.signals_total ?? 0}</b>
+        </span>
+        <span className="orders-pill">
+          <em>本地最新 bar</em>
+          <b>{stamp(engine?.local_bar_ts)}</b>
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function ChartPanel() {
+  const [bar, setBar] = useState("1H");
+  const [data, setData] = useState<CandlesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const next = await fetchCandles(controller.signal, bar);
+        setData(next);
+        setError(null);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [bar]);
+
+  const empty = data !== null && data.bars.length === 0;
+  const staleBars = data?.degraded.includes("candles") ?? false;
+  const options = useMemo(() => {
+    const available = data?.available_bars ?? [];
+    if (available.length === 0) return BAR_OPTIONS;
+    return available.includes(bar) ? available : [...available, bar];
+  }, [data, bar]);
+
+  return (
+    <section className="card chart reveal" style={{ animationDelay: "115ms" }}>
+      <div className="card-head">
+        <h2>
+          {data?.inst ?? "—"} <span className="chart-bar">{data?.bar ?? bar}</span>
+        </h2>
+        <div className="chart-tools">
+          {data && data.fills.length > 0 && (
+            <span className="card-note">{data.fills.length} 笔本地成交已标注</span>
+          )}
+          {data?.position && (
+            <span className="card-note">
+              持仓 {compactQty(data.position.qty)} @ {num(data.position.avg_price, 2)}
+            </span>
+          )}
+          <div className="seg" role="group" aria-label="K 线周期">
+            {options.map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={option === bar ? "seg-btn seg-on" : "seg-btn"}
+                onClick={() => setBar(option)}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="chart-box">
+        <CandleChart data={data} />
+        {empty && (
+          <div className="chart-empty">
+            {staleBars
+              ? "本地无该周期 K 线：先运行 quant sync-candles 同步行情"
+              : "暂无 K 线数据"}
+          </div>
+        )}
+        {error && <div className="chart-empty">接口异常：{error}</div>}
+      </div>
+      <div className="chart-foot">
+        <span>数据来源：本地 parquet（{data?.bars.length ?? 0} 根）</span>
+        <span>成交点来自 SQLite fills</span>
+        <span>绿线为持仓均价</span>
+      </div>
+    </section>
+  );
+}
+
+function BacktestPanel() {
+  const [mode, setMode] = useState<"backtest" | "optimize">("backtest");
+  const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
+  const [strategy, setStrategy] = useState("sma_cross");
+  const [inst, setInst] = useState("BTC-USDT");
+  const [bar, setBar] = useState("1H");
+  const [start, setStart] = useState(() => dateOffset(-30));
+  const [end, setEnd] = useState(() => dateOffset(0));
+  const [warmup, setWarmup] = useState("200");
+  const [params, setParams] = useState("");
+  const [grid, setGrid] = useState("fast_len=5,10,20;slow_len=20,50,80");
+  const [metric, setMetric] = useState("sharpe");
+  const [top, setTop] = useState("10");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [backtest, setBacktest] = useState<BacktestResponse | null>(null);
+  const [optimize, setOptimize] = useState<OptimizeResponse | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const pending = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchStrategies(controller.signal)
+      .then((res) => {
+        setStrategies(res.strategies);
+        if (res.strategies.length === 0) return;
+        // 保持当前选择；配置里没有时才退回第一个
+        setStrategy((current) =>
+          res.strategies.some((item) => item.id === current)
+            ? current
+            : res.strategies[0].id,
+        );
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => () => pending.current?.abort(), []);
+
+  const current = strategies.find((item) => item.id === strategy);
+  const configHint = current ? formatParams(current.params) : "";
+
+  const recordEntry = (result: BacktestResponse) => {
+    const entry: HistoryEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      saved_at: Date.now(),
+      strategy: result.strategy,
+      inst: result.inst,
+      bar: result.bar,
+      start: result.start,
+      end: result.end,
+      params: formatParams(result.params),
+      bar_count: result.bar_count,
+      trade_count: result.trade_count,
+      final_equity: result.final_equity,
+      metrics: result.metrics,
+    };
+    setHistory((items) => {
+      // 同一配置重跑时替换旧记录，避免历史里堆满重复项
+      const rest = items.filter(
+        (item) => historySignature(item) !== historySignature(entry),
+      );
+      const next = [entry, ...rest].slice(0, HISTORY_LIMIT);
+      persistHistory(next);
+      return next;
+    });
+  };
+
+  const removeEntry = (id: string) => {
+    setHistory((items) => {
+      const next = items.filter((item) => item.id !== id);
+      persistHistory(next);
+      return next;
+    });
+    setPicked((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    setPicked(new Set());
+    persistHistory([]);
+  };
+
+  const togglePick = (id: string) => {
+    setPicked((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < COMPARE_LIMIT) next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    const warmupBars = Number(warmup);
+    if (!Number.isInteger(warmupBars) || warmupBars < 0) {
+      setError("预热根数必须是非负整数");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const controller = new AbortController();
+    pending.current = controller;
+    const body = {
+      strategy,
+      inst,
+      bar,
+      start,
+      end,
+      params,
+      warmup_bars: warmupBars,
+    };
+    try {
+      if (mode === "backtest") {
+        setOptimize(null);
+        const result = await runBacktest(controller.signal, body);
+        setBacktest(result);
+        recordEntry(result);
+      } else {
+        setBacktest(null);
+        setOptimize(
+          await runOptimize(controller.signal, {
+            ...body,
+            grid,
+            metric,
+            top: Number(top) || 10,
+          }),
+        );
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card backtest reveal" style={{ animationDelay: "120ms" }}>
+      <div className="card-head">
+        <h2>策略回测</h2>
+        <div className="chart-tools">
+          <span className="card-note">本地 parquet · 只计算不落盘</span>
+          <div className="seg" role="group" aria-label="回测模式">
+            <button
+              type="button"
+              className={mode === "backtest" ? "seg-btn seg-on" : "seg-btn"}
+              onClick={() => setMode("backtest")}
+            >
+              单次回测
+            </button>
+            <button
+              type="button"
+              className={mode === "optimize" ? "seg-btn seg-on" : "seg-btn"}
+              onClick={() => setMode("optimize")}
+            >
+              参数寻优
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bt-form">
+        <label className="bt-field">
+          <span>策略</span>
+          <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+            {strategies.length === 0 && <option value={strategy}>{strategy}</option>}
+            {strategies.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="bt-field">
+          <span>品种</span>
+          <input value={inst} onChange={(e) => setInst(e.target.value)} />
+        </label>
+        <label className="bt-field">
+          <span>周期</span>
+          <select value={bar} onChange={(e) => setBar(e.target.value)}>
+            {BAR_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="bt-field">
+          <span>开始</span>
+          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+        </label>
+        <label className="bt-field">
+          <span>结束</span>
+          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+        </label>
+        <label className="bt-field">
+          <span>预热根数</span>
+          <input
+            type="number"
+            min={0}
+            value={warmup}
+            onChange={(e) => setWarmup(e.target.value)}
+          />
+        </label>
+      </div>
+
+      {mode === "backtest" ? (
+        <div className="bt-form">
+          <label className="bt-field bt-span">
+            <span>参数覆盖（留空沿用策略配置）</span>
+            <input
+              value={params}
+              placeholder={configHint || "fast_len=10;slow_len=50"}
+              onChange={(e) => setParams(e.target.value)}
+            />
+          </label>
+        </div>
+      ) : (
+        <div className="bt-form">
+          <label className="bt-field bt-span">
+            <span>参数网格</span>
+            <input
+              value={grid}
+              placeholder="fast_len=5,10;slow_len=20,50"
+              onChange={(e) => setGrid(e.target.value)}
+            />
+          </label>
+          <label className="bt-field">
+            <span>排序指标</span>
+            <select value={metric} onChange={(e) => setMetric(e.target.value)}>
+              {METRIC_SELECT.map((key) => (
+                <option key={key} value={key}>
+                  {METRIC_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="bt-field">
+            <span>Top N</span>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={top}
+              onChange={(e) => setTop(e.target.value)}
+            />
+          </label>
+        </div>
+      )}
+
+      <div className="bt-actions">
+        <button type="button" className="bt-run" onClick={() => void submit()} disabled={busy}>
+          {busy ? "计算中…" : mode === "backtest" ? "运行回测" : "开始寻优"}
+        </button>
+        <span className="card-note">
+          {mode === "backtest"
+            ? "区间前仅预热：不成交、不计入指标"
+            : "网格组合上限 500 组，非法组合自动跳过"}
+        </span>
+      </div>
+
+      {error && <div className="bt-error">{error}</div>}
+
+      {mode === "backtest" ? (
+        backtest ? (
+          <BacktestResult data={backtest} />
+        ) : (
+          <div className="empty">填好区间后点「运行回测」，指标与权益曲线会显示在这里</div>
+        )
+      ) : optimize ? (
+        <OptimizeResult data={optimize} />
+      ) : (
+        <div className="empty">填好网格后点「开始寻优」，参数排名会显示在这里</div>
+      )}
+
+      {mode === "backtest" && (
+        <BacktestHistory
+          entries={history}
+          picked={picked}
+          onToggle={togglePick}
+          onRemove={removeEntry}
+          onClear={clearHistory}
+        />
+      )}
+    </section>
+  );
+}
+
+function BacktestResult({ data }: { data: BacktestResponse }) {
+  const values = data.equity
+    .map((point) => Number(point.equity))
+    .filter((value) => Number.isFinite(value));
+  return (
+    <>
+      <div className="bt-sub">
+        <span>
+          {data.strategy} · {data.inst} · {data.bar} · {data.start} ~ {data.end}
+        </span>
+        <span>
+          {data.bar_count} 根 · 预热 {data.warmup_count} · 期末权益{" "}
+          {num(data.final_equity, 2)} · {data.elapsed_ms} ms
+        </span>
+      </div>
+      <div className="metric-grid bt-metrics">
+        {METRIC_ORDER.map((key) => (
+          <Metric
+            key={key}
+            label={METRIC_LABELS[key]}
+            value={metricText(key, data.metrics[key])}
+            hint={METRIC_HINTS[key] ?? ""}
+            tone={metricTone(key, data.metrics[key])}
+          />
+        ))}
+      </div>
+      <Curve values={values} emptyHint="回测区间内权益数据不足" />
+      <div className="bt-sub">
+        <span>实际参数 {formatParams(data.params)}</span>
+        <span>
+          {data.trade_count} 笔成交
+          {data.unfilled_signals > 0
+            ? ` · ${data.unfilled_signals} 个信号未成交`
+            : ""}
+        </span>
+      </div>
+      <Table
+        empty={data.trades.length === 0}
+        emptyHint="区间内没有成交"
+        head={["时间", "方向", "数量", "成交价", "手续费"]}
+        rows={data.trades.map((trade) => [
+          stamp(trade.ts),
+          <span className={trade.side === "buy" ? "positive" : "negative"}>
+            {trade.side === "buy" ? "买入" : "卖出"}
+          </span>,
+          compactQty(trade.qty),
+          num(trade.price, 2),
+          num(trade.fee, 4),
+        ])}
+      />
+      {data.trades_truncated && (
+        <div className="bt-note">
+          仅显示最近 {data.trades.length} 笔，区间内共 {data.trade_count} 笔
+        </div>
+      )}
+    </>
+  );
+}
+
+function BacktestHistory({
+  entries,
+  picked,
+  onToggle,
+  onRemove,
+  onClear,
+}: {
+  entries: HistoryEntry[];
+  picked: Set<string>;
+  onToggle: (id: string) => void;
+  onRemove: (id: string) => void;
+  onClear: () => void;
+}) {
+  const runs = entries.filter((entry) => picked.has(entry.id));
+
+  return (
+    <div className="bt-history">
+      <div className="bt-history-head">
+        <h3>历史对比</h3>
+        <span className="card-note">
+          {entries.length === 0
+            ? "每次回测自动保存，最多 20 条"
+            : `已存 ${entries.length} 条 · 勾选 2–${COMPARE_LIMIT} 条对比`}
+        </span>
+        {entries.length > 0 && (
+          <button type="button" className="bt-clear" onClick={onClear}>
+            清空
+          </button>
+        )}
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="empty">运行一次回测后会自动记入历史，刷新页面也不会丢</div>
+      ) : (
+        <ul className="hist-list">
+          {entries.map((entry) => {
+            const ret = entry.metrics.total_return;
+            return (
+              <li
+                key={entry.id}
+                className={picked.has(entry.id) ? "hist-item hist-on" : "hist-item"}
+              >
+                <label className="hist-check">
+                  <input
+                    type="checkbox"
+                    checked={picked.has(entry.id)}
+                    onChange={() => onToggle(entry.id)}
+                  />
+                  <span className="hist-main">
+                    <span className="hist-title">
+                      {entry.strategy} · {entry.inst} · {entry.bar}
+                    </span>
+                    <span className="hist-range">
+                      {entry.start} ~ {entry.end} · {entry.bar_count} 根 ·{" "}
+                      {entry.trade_count} 笔
+                    </span>
+                    <span className="hist-params mono">{entry.params}</span>
+                  </span>
+                  <span className="hist-metrics">
+                    <span
+                      className={
+                        typeof ret === "number" ? (ret > 0 ? "positive" : ret < 0 ? "negative" : "") : ""
+                      }
+                    >
+                      收益 {metricText("total_return", ret)}
+                    </span>
+                    <span>回撤 {metricText("max_drawdown", entry.metrics.max_drawdown)}</span>
+                    <span>夏普 {metricText("sharpe", entry.metrics.sharpe)}</span>
+                  </span>
+                  <span className="hist-time mono">{stamp(entry.saved_at)}</span>
+                </label>
+                <button
+                  type="button"
+                  className="hist-del"
+                  aria-label="删除这条历史"
+                  onClick={() => onRemove(entry.id)}
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {runs.length >= 2 && <CompareTable runs={runs} />}
+    </div>
+  );
+}
+
+/** 多条回测横向对比：每个指标高亮最优值（回撤取最小，其余取最大）。 */
+function CompareTable({ runs }: { runs: HistoryEntry[] }) {
+  const head = [
+    "指标",
+    ...runs.map((run, index) => `#${index + 1} ${clock(run.saved_at).slice(0, 5)}`),
+  ];
+  const rows: ReactNode[][] = [
+    ["区间", ...runs.map((run) => `${run.start} ~ ${run.end}`)],
+    ["配置", ...runs.map((run) => `${run.strategy} · ${run.inst} · ${run.bar}`)],
+    [
+      "参数",
+      ...runs.map((run) => <span className="mono">{run.params}</span>),
+    ],
+  ];
+
+  for (const key of METRIC_ORDER) {
+    const best = bestValue(runs, key);
+    rows.push([
+      METRIC_LABELS[key] ?? key,
+      ...runs.map((run) => {
+        const value = run.metrics[key];
+        const isBest = best !== null && typeof value === "number" && value === best;
+        return (
+          <span key={run.id} className={isBest ? "bt-best" : "mono"}>
+            {metricText(key, value)}
+          </span>
+        );
+      }),
+    ]);
+  }
+
+  rows.push([
+    "期末权益",
+    ...runs.map((run) => <span className="mono">{num(run.final_equity, 2)}</span>),
+  ]);
+
+  return (
+    <>
+      <div className="bt-sub">
+        <span>横向对比（{runs.length} 条）</span>
+        <span>高亮为该指标最优值</span>
+      </div>
+      <Table head={head} rows={rows} empty={false} emptyHint="" />
+    </>
+  );
+}
+
+function OptimizeResult({ data }: { data: OptimizeResponse }) {
+  const names = Object.keys(data.grid);
+  const extras = OPTIMIZE_METRICS.filter((key) => key !== data.metric);
+  return (
+    <>
+      <div className="bt-sub">
+        <span>
+          {data.strategy} · {data.inst} · {data.bar} · {data.start} ~ {data.end}
+        </span>
+        <span>
+          {data.combo_count} 组组合 · 跳过 {data.skipped_count} 组非法参数 ·{" "}
+          {data.elapsed_ms} ms
+        </span>
+      </div>
+      <Table
+        empty={data.results.length === 0}
+        emptyHint="没有可用的参数组合"
+        head={[
+          "#",
+          ...names,
+          METRIC_LABELS[data.metric] ?? data.metric,
+          ...extras.map((key) => METRIC_LABELS[key] ?? key),
+        ]}
+        rows={data.results.map((row) => [
+          String(row.rank),
+          ...names.map((name) => row.params[name] ?? "—"),
+          <b className="bt-best">{metricText(data.metric, row.metrics[data.metric])}</b>,
+          ...extras.map((key) => metricText(key, row.metrics[key])),
+        ])}
+      />
+      <div className="bt-note">
+        按「{METRIC_LABELS[data.metric] ?? data.metric}」
+        {data.metric === "max_drawdown" || data.metric === "avg_holding_bars"
+          ? "从小到大"
+          : "从大到小"}
+        排序
+      </div>
+    </>
+  );
+}
+
+
+function CandleChart({ data }: { data: CandlesResponse | null }) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const priceLineRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]> | null>(null);
+  const fittedRef = useRef<string>("");
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+
+    const chart = createChart(el, {
+      width: el.clientWidth,
+      height: 340,
+      layout: {
+        background: { color: "transparent" },
+        textColor: "#7d8b81",
+        fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: "rgba(226, 240, 228, 0.05)" },
+        horzLines: { color: "rgba(226, 240, 228, 0.05)" },
+      },
+      rightPriceScale: { borderColor: "rgba(226, 240, 228, 0.12)" },
+      timeScale: {
+        borderColor: "rgba(226, 240, 228, 0.12)",
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: {
+        vertLine: { color: "rgba(200, 242, 79, 0.4)", labelBackgroundColor: "#2a3327" },
+        horzLine: { color: "rgba(200, 242, 79, 0.4)", labelBackgroundColor: "#2a3327" },
+      },
+    });
+
+    candleRef.current = chart.addCandlestickSeries({
+      upColor: "#4fe3a1",
+      downColor: "#ff5f5f",
+      borderVisible: false,
+      wickUpColor: "#4fe3a1",
+      wickDownColor: "#ff5f5f",
+    });
+    chartRef.current = chart;
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width && width > 0) chart.applyOptions({ width });
+    });
+    observer.observe(el);
+
+    return () => {
+      observer.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      candleRef.current = null;
+      priceLineRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const series = candleRef.current;
+    const chart = chartRef.current;
+    if (!series || !chart || !data) return;
+
+    const rows = data.bars.map((row) => ({
+      time: Math.floor(row.ts / 1000) as UTCTimestamp,
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+    }));
+    series.setData(rows);
+
+    if (priceLineRef.current) {
+      series.removePriceLine(priceLineRef.current);
+      priceLineRef.current = null;
+    }
+    if (data.position) {
+      priceLineRef.current = series.createPriceLine({
+        price: Number(data.position.avg_price),
+        color: "#c8f24f",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: "成本",
+      });
+    }
+
+    if (rows.length > 0) {
+      const times = rows.map((row) => row.time);
+      const markers: SeriesMarker<Time>[] = data.fills.map((fill) => {
+        // 成交时间不一定落在 bar 开盘时间上，吸附到所在 bar 避免丢点
+        const seconds = Math.floor(fill.ts / 1000);
+        let time = times[0];
+        for (const candidate of times) {
+          if (candidate <= seconds) time = candidate;
+          else break;
+        }
+        const buy = fill.side === "buy";
+        return {
+          time,
+          position: buy ? "belowBar" : "aboveBar",
+          color: buy ? "#4fe3a1" : "#ff5f5f",
+          shape: buy ? "arrowUp" : "arrowDown",
+          text: `${buy ? "买" : "卖"} ${compactQty(fill.qty)}`,
+        };
+      });
+      series.setMarkers(markers);
+    } else {
+      series.setMarkers([]);
+    }
+
+    const key = `${data.inst}-${data.bar}`;
+    if (fittedRef.current !== key && rows.length > 0) {
+      chart.timeScale().fitContent();
+      fittedRef.current = key;
+    }
+  }, [data]);
+
+  return <div className="chart-canvas" ref={boxRef} />;
+}
+
+function EquityCurve({ points, label }: { points: EquityPoint[]; label: string }) {
+  const values = points
+    .map((p) => Number(p.total_equity))
+    .filter((v) => Number.isFinite(v));
+
+  // 区间最大回撤：相对区间内历史峰值的最大跌幅
+  let peak = values[0] ?? 0;
+  let drawdown = 0;
+  for (const value of values) {
+    if (value > peak) peak = value;
+    if (peak > 0) drawdown = Math.max(drawdown, (peak - value) / peak);
+  }
+
+  return (
+    <Curve
+      values={values}
+      label={label}
+      drawdown={drawdown}
+      emptyHint="曲线数据不足（monitor 至少运行两轮后才有趋势）"
+    />
+  );
+}
+
+function Curve({
+  values,
+  emptyHint,
+  label,
+  drawdown,
+}: {
+  values: number[];
+  emptyHint: string;
+  label?: string;
+  drawdown?: number;
+}) {
+  if (values.length < 2) {
+    return <div className="curve-empty">{emptyHint}</div>;
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const W = 100;
+  const H = 32;
+  const step = W / (values.length - 1);
+  const coords = values.map((v, i) => {
+    const x = (i * step).toFixed(2);
+    const y = (H - ((v - min) / span) * H).toFixed(2);
+    return `${x},${y}`;
+  });
+  const line = `M${coords.join(" L")}`;
+  const first = values[0];
+  const last = values[values.length - 1];
+  const change = first === 0 ? 0 : (last - first) / first;
+
+  return (
+    <div className="curve">
+      <svg
+        className="curve-svg"
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <path className="curve-area" d={`${line} L${W},${H} L0,${H} Z`} />
+        <path
+          className="curve-line"
+          d={line}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      <div className="curve-foot">
+        <span>
+          {label ? `${label} · ` : ""}低 {num(min, 2)}
+        </span>
+        <span className={change >= 0 ? "positive" : "negative"}>
+          {label ? "收益 " : ""}
+          {change >= 0 ? "+" : ""}
+          {(change * 100).toFixed(2)}%
+        </span>
+        {drawdown !== undefined && (
+          <span className={drawdown > 0.1 ? "negative" : "dim"}>
+            回撤 {(drawdown * 100).toFixed(2)}%
+          </span>
+        )}
+        <span>高 {num(max, 2)}</span>
+      </div>
+    </div>
+  );
+}
+
+function dateOffset(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function formatParams(params: Record<string, unknown>): string {
+  const entries = Object.entries(params);
+  if (entries.length === 0) return "—";
+  return entries.map(([key, value]) => `${key}=${String(value)}`).join("; ");
+}
+
+function metricTone(
+  key: string,
+  value: number | null | undefined,
+): "good" | "warn" | "bad" | "neutral" {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "neutral";
+  }
+  switch (key) {
+    case "total_return":
+    case "annual_return":
+    case "sharpe":
+      return value > 0 ? "good" : value < 0 ? "bad" : "neutral";
+    case "max_drawdown":
+      return value < 0.1 ? "good" : value < 0.25 ? "warn" : "bad";
+    case "win_rate":
+      return value >= 0.5 ? "good" : value >= 0.35 ? "warn" : "bad";
+    case "profit_factor":
+      return value >= 1.5 ? "good" : value >= 1 ? "warn" : "bad";
+    default:
+      return "neutral";
+  }
+}
+
+function Chip({
+  label,
+  value,
+  note,
+  tone,
+}: {
+  label: string;
+  value: string;
+  note?: string;
+  tone: Tone;
+}) {
+  return (
+    <div className={`chip chip-${tone}`}>
+      <span className="chip-label">{label}</span>
+      <span className="chip-value">{value}</span>
+      {note && <span className="chip-note">{note}</span>}
+    </div>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+  tone: "good" | "warn" | "bad" | "neutral";
+}) {
+  return (
+    <div className={`metric metric-${tone}`}>
+      <span className="metric-label">{label}</span>
+      <span className="metric-value">{value}</span>
+      <span className="metric-hint">{hint}</span>
+    </div>
+  );
+}
+
+function Table({
+  head,
+  rows,
+  empty,
+  emptyHint,
+  activeIndex = -1,
+  onRowClick,
+}: {
+  head: string[];
+  rows: ReactNode[][];
+  empty: boolean;
+  emptyHint: string;
+  activeIndex?: number;
+  onRowClick?: (index: number) => void;
+}) {
+  if (empty) {
+    return <div className="empty">{emptyHint}</div>;
+  }
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {head.map((title) => (
+              <th key={title}>{title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((cells, index) => (
+            <tr
+              key={index}
+              className={
+                index === activeIndex
+                  ? "row-active"
+                  : onRowClick
+                    ? "row-clickable"
+                    : undefined
+              }
+              onClick={onRowClick ? () => onRowClick(index) : undefined}
+            >
+              {cells.map((cell, cellIndex) => (
+                <td key={cellIndex}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** 成交盈亏汇总：FIFO 回合统计，口径与风控/回测一致（含手续费）。 */
+function PnlPanel({ pnl }: { pnl?: PnlResponse }) {
+  if (!pnl || pnl.fill_count === 0) {
+    return (
+      <div className="empty">
+        暂无成交，无法统计盈亏。engine 出信号并成交后，这里会显示回合胜率与盈亏比。
+      </div>
+    );
+  }
+
+  const pnlTone =
+    sign(pnl.total_pnl) === "positive"
+      ? "good"
+      : sign(pnl.total_pnl) === "negative"
+        ? "bad"
+        : "neutral";
+  const winRate = pnl.win_rate === null ? null : Number(pnl.win_rate);
+  const winsHint =
+    pnl.round_trips > 0
+      ? `${pnl.wins} 胜 / ${pnl.losses} 负`
+      : "尚无已平仓回合";
+
+  return (
+    <>
+      <div className="metric-grid pnl-grid">
+        <Metric
+          label="已实现盈亏"
+          value={num(pnl.total_pnl, 2)}
+          hint={winsHint}
+          tone={pnlTone}
+        />
+        <Metric
+          label="胜率"
+          value={pnl.win_rate === null ? "—" : pct(pnl.win_rate)}
+          hint={`${pnl.round_trips} 个回合`}
+          tone={
+            winRate === null
+              ? "neutral"
+              : winRate >= 0.5
+                ? "good"
+                : winRate >= 0.35
+                  ? "warn"
+                  : "bad"
+          }
+        />
+        <Metric
+          label="盈亏比"
+          value={num(pnl.profit_factor, 2)}
+          hint="总盈利 / 总亏损"
+          tone={
+            pnl.profit_factor === null
+              ? "neutral"
+              : Number(pnl.profit_factor) >= 1.5
+                ? "good"
+                : Number(pnl.profit_factor) >= 1
+                  ? "warn"
+                  : "bad"
+          }
+        />
+        <Metric
+          label="平均盈利"
+          value={num(pnl.avg_win, 2)}
+          hint="单回合均值"
+          tone="neutral"
+        />
+        <Metric
+          label="平均亏损"
+          value={num(pnl.avg_loss, 2)}
+          hint="单回合均值"
+          tone="neutral"
+        />
+        <Metric
+          label="累计手续费"
+          value={num(pnl.fee, 4)}
+          hint={`名义成交 ${num(pnl.turnover, 0)}`}
+          tone="neutral"
+        />
+      </div>
+      <div className="pnl-foot">
+        <span>{pnl.fill_count} 笔成交</span>
+        <span>
+          最好 {num(pnl.best, 2)} · 最差 {num(pnl.worst, 2)}
+        </span>
+        <span>
+          {stamp(pnl.first_ts)} → {stamp(pnl.last_ts)}
+        </span>
+        <span>未平仓部分不计入回合</span>
+      </div>
+    </>
+  );
+}
+
+const REPORT_METRICS: Record<string, string> = {
+  trade_count: "成交笔数",
+  qty: "成交量",
+  notional: "名义金额",
+  fee: "手续费",
+  side_sequence: "方向序列",
+};
+
+/** 模拟盘日报：每天 08:00 生成的「模拟盘 vs 回测」偏离比对。 */
+function ReportsPanel({ reports }: { reports?: ReportsResponse | null }) {
+  const [open, setOpen] = useState<string | null>(null);
+
+  if (!reports) {
+    return <div className="empty">读取日报中…</div>;
+  }
+  const items = reports.reports;
+  if (items.length === 0) {
+    return (
+      <div className="empty">
+        暂无日报。monitor 每天 08:00 生成一份，且当日需要有模拟盘成交才会产出；
+        文件写在 {reports.out_dir}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <ul className="rpt-list">
+        {items.map((item) => {
+          const expanded = open === item.name;
+          return (
+            <li key={item.name} className={expanded ? "rpt-item rpt-on" : "rpt-item"}>
+              <button
+                type="button"
+                className="rpt-head"
+                onClick={() => setOpen(expanded ? null : item.name)}
+              >
+                <span
+                  className={
+                    item.status === "PASS" ? "rpt-badge rpt-pass" : "rpt-badge rpt-fail"
+                  }
+                >
+                  {item.status}
+                </span>
+                <span className="rpt-date mono">{item.date}</span>
+                <span className="rpt-config mono">
+                  {item.strategy} · {item.inst}
+                </span>
+                <span className="rpt-dev mono">
+                  最大偏离 {(item.max_deviation * 100).toFixed(2)}%
+                </span>
+                <span className="rpt-time mono">{stamp(item.mtime)}</span>
+                <span className="rpt-caret">{expanded ? "−" : "+"}</span>
+              </button>
+              {expanded && <ReportTable item={item} threshold={reports.threshold} />}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="rpt-foot">
+        <span>{items.length} 份日报</span>
+        <span>阈值 {pct(String(reports.threshold))}，超出即 FAIL</span>
+        <span>数据来自 reports/daily 下的 CSV</span>
+      </div>
+    </>
+  );
+}
+
+function ReportTable({
+  item,
+  threshold,
+}: {
+  item: ReportItem;
+  threshold: number;
+}) {
+  const head = ["指标", "模拟盘", "回测", "偏离"];
+  const rows = item.rows.map((row) => {
+    const side = row.metric === "side_sequence";
+    const dev = Number(row.deviation);
+    const over = !side && Number.isFinite(dev) && dev > threshold;
+    return [
+      REPORT_METRICS[row.metric] ?? row.metric,
+      <span className="mono">{row.paper}</span>,
+      <span className="mono">{row.backtest}</span>,
+      <span className={side ? (row.paper === "match" ? "positive" : "negative") : over ? "negative" : "mono"}>
+        {side ? (row.paper === "match" ? "一致" : "不一致") : `${(dev * 100).toFixed(2)}%`}
+      </span>,
+    ];
+  });
+
+  return (
+    <div className="rpt-table">
+      <Table head={head} rows={rows} empty={false} emptyHint="" />
+    </div>
+  );
+}
+
+type AlertGroup = {
+  rule: string;
+  level: string;
+  count: number;
+  latest: AlertRow;
+  items: AlertRow[];
+};
+
+/** 按规则聚合的告警面板：级别筛选 + 规则筛选 + 展开查看明细。 */
+function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
+  const [level, setLevel] = useState("ALL");
+  const [rule, setRule] = useState("ALL");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const counts = useMemo<Record<string, number>>(() => {
+    const byLevel: Record<string, number> = { ERROR: 0, WARNING: 0, INFO: 0 };
+    for (const alert of alerts) {
+      const key = alert.level.toUpperCase();
+      if (key in byLevel) byLevel[key] += 1;
+    }
+    return { ...byLevel, ALL: alerts.length };
+  }, [alerts]);
+
+  const ruleOptions = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const alert of alerts) {
+      seen.set(alert.rule, (seen.get(alert.rule) ?? 0) + 1);
+    }
+    return [...seen.entries()].sort((a, b) => b[1] - a[1]);
+  }, [alerts]);
+
+  const groups = useMemo<AlertGroup[]>(() => {
+    const buckets = new Map<string, AlertRow[]>();
+    for (const alert of alerts) {
+      if (level !== "ALL" && alert.level.toUpperCase() !== level) continue;
+      if (rule !== "ALL" && alert.rule !== rule) continue;
+      const bucket = buckets.get(alert.rule);
+      if (bucket) bucket.push(alert);
+      else buckets.set(alert.rule, [alert]);
+    }
+    return [...buckets.entries()]
+      .map(([name, items]) => ({
+        rule: name,
+        level: items.reduce(
+          (worst, item) =>
+            (ALERT_LEVEL_RANK[item.level.toUpperCase()] ?? 0) >
+            (ALERT_LEVEL_RANK[worst] ?? 0)
+              ? item.level.toUpperCase()
+              : worst,
+          items[0].level.toUpperCase(),
+        ),
+        count: items.length,
+        latest: items[0],
+        items,
+      }))
+      .sort((a, b) => b.latest.ts - a.latest.ts);
+  }, [alerts, level, rule]);
+
+  const toggle = (name: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  if (alerts.length === 0) {
+    return <div className="empty">暂无告警。monitor 命中规则后会在此累积。</div>;
+  }
+
+  return (
+    <>
+      <div className="alert-tools">
+        <div className="alert-levels">
+          {ALERT_LEVELS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`alert-filter ${level === item.key ? "is-active" : ""}`}
+              onClick={() => setLevel(item.key)}
+            >
+              {item.label}
+              <b>{counts[item.key] ?? 0}</b>
+            </button>
+          ))}
+        </div>
+        <select
+          className="alert-rule-select"
+          value={rule}
+          onChange={(event) => setRule(event.target.value)}
+          aria-label="按规则筛选告警"
+        >
+          <option value="ALL">全部规则（{alerts.length}）</option>
+          {ruleOptions.map(([name, count]) => (
+            <option key={name} value={name}>
+              {name}（{count}）
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {groups.length === 0 ? (
+        <div className="empty">当前筛选条件下没有告警。</div>
+      ) : (
+        <ul className="alert-list">
+          {groups.map((group) => {
+            const tone =
+              group.level === "ERROR" ? "bad" : group.level === "INFO" ? "ok" : "warn";
+            const open = rule !== "ALL" || expanded.has(group.rule);
+            return (
+              <li key={group.rule} className="alert-group">
+                <button
+                  type="button"
+                  className="alert-group-head"
+                  onClick={() => toggle(group.rule)}
+                  aria-expanded={open}
+                >
+                  <span className={`alert-badge alert-badge-${tone}`}>
+                    {group.level}
+                  </span>
+                  <span className="alert-rule">{group.rule}</span>
+                  <span className="alert-count">×{group.count}</span>
+                  <span className="alert-msg">{group.latest.message}</span>
+                  <span className="alert-time">{clock(group.latest.ts)}</span>
+                  <span className="alert-caret">{open ? "−" : "+"}</span>
+                </button>
+                {open && (
+                  <ul className="alert-items">
+                    {group.items.map((alert, index) => (
+                      <AlertItem key={`${alert.ts}-${index}`} alert={alert} />
+                    ))}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function AlertItem({ alert }: { alert: AlertRow }) {
+  const level = alert.level.toLowerCase();
+  const tone = level === "error" ? "bad" : level === "info" ? "ok" : "warn";
+  return (
+    <li className={`alert alert-${tone}`}>
+      <div className="alert-top">
+        <span className="alert-rule">{alert.rule}</span>
+        <span className="alert-time">{clock(alert.ts)}</span>
+      </div>
+      <p className="alert-msg">{alert.message}</p>
+    </li>
+  );
+}
+
+function positionCells(row: PositionRow): ReactNode[] {
+  return [
+    <span key="inst" className="mono strong">{row.inst_id}</span>,
+    // 账户列只认交易所快照：本地数量的口径不同（只含策略成交），
+    // 拿来顶替会让「0.001 策略仓」看起来像账户全部余额
+    <span key="qty" className="mono">{compactQty(row.qty)}</span>,
+    <span key="avg" className="mono">{num(row.avg_price, 2)}</span>,
+    <span key="strat" className="mono">
+      {row.local_qty == null
+        ? "—"
+        : `${compactQty(row.local_qty)} @ ${num(row.local_avg_price, 2)}`}
+    </span>,
+    <span key="mark" className="mono">{num(row.mark_price, 2)}</span>,
+    <span key="upl" className={`mono ${sign(row.unrealized_pnl)}`}>
+      {num(row.unrealized_pnl, 2)}
+    </span>,
+    <span key="supl" className={`mono ${sign(row.strategy_unrealized_pnl)}`}>
+      {num(row.strategy_unrealized_pnl, 2)}
+    </span>,
+    <span key="lev" className="mono">{row.leverage ? `${num(row.leverage, 0)}x` : "—"}</span>,
+    <span key="liq" className="mono">{num(row.liq_price, 2)}</span>,
+    <span key="dist" className="mono">{pct(row.liq_distance)}</span>,
+  ];
+}
+
+function orderCells(row: OrderRow): ReactNode[] {
+  return [
+    <span key="ts" className="mono dim">{clock(row.created_ts)}</span>,
+    <span key="inst" className="mono strong">{row.inst_id ?? "—"}</span>,
+    <span key="side" className={row.side === "buy" ? "long" : "short"}>
+      {row.side === "buy" ? "买入" : row.side === "sell" ? "卖出" : "—"}
+    </span>,
+    <span key="type" className="dim">{row.order_type ?? "—"}</span>,
+    <span key="qty" className="mono">{compactQty(row.qty)}</span>,
+    <span key="px" className="mono">
+      {num(row.filled_price ?? row.price, 2)}
+    </span>,
+    <StatusTag key="status" status={row.status} />,
+  ];
+}
+
+function fillCells(row: FillRow): ReactNode[] {
+  return [
+    <span key="ts" className="mono dim">{clock(row.ts)}</span>,
+    <span key="inst" className="mono strong">{row.inst_id}</span>,
+    <span key="side" className={row.side === "buy" ? "long" : "short"}>
+      {row.side === "buy" ? "买入" : "卖出"}
+    </span>,
+    <span key="qty" className="mono">{compactQty(row.qty)}</span>,
+    <span key="px" className="mono">{num(row.price, 2)}</span>,
+    <span key="notional" className="mono">{num(row.notional, 2)}</span>,
+    <span key="fee" className="mono dim">{num(row.fee, 4)}</span>,
+  ];
+}
+
+function StatusTag({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    pending: "tag-warn",
+    filled: "tag-ok",
+    canceled: "tag-muted",
+    rejected: "tag-bad",
+  };
+  return <span className={`tag ${map[status] ?? "tag-muted"}`}>{status}</span>;
+}
+
+function heartbeatNote(seconds: number | null | undefined): string {
+  return seconds === null || seconds === undefined
+    ? "无心跳记录"
+    : `心跳 ${age(seconds)} 前`;
+}
+
+function sign(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed === 0) return "";
+  return parsed > 0 ? "positive" : "negative";
+}
+
+function drawdownTone(value: string | null | undefined): "good" | "warn" | "bad" | "neutral" {
+  if (value === null || value === undefined) return "neutral";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "neutral";
+  if (parsed >= 0.2) return "bad";
+  if (parsed >= 0.1) return "warn";
+  return "good";
+}
+
+function cancelTone(value: string | null | undefined): "good" | "warn" | "bad" | "neutral" {
+  if (value === null || value === undefined) return "neutral";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "neutral";
+  if (parsed >= 0.5) return "bad";
+  if (parsed >= 0.2) return "warn";
+  return "good";
+}
+
+function liqTone(value: string | null | undefined): "good" | "warn" | "bad" | "neutral" {
+  if (value === null || value === undefined) return "neutral";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "neutral";
+  if (parsed <= 0.1) return "bad";
+  if (parsed <= 0.2) return "warn";
+  return "good";
+}
