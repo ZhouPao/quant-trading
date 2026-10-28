@@ -1,0 +1,234 @@
+"""run-worker 命令：启动信号消费 worker（spec §9，M3 增补执行/行情接入）。
+
+用法：
+  quant run-worker --strategy sma_cross
+  quant run-worker --strategy sma_cross --broker okx --td-mode cash
+  quant run-worker --strategy sma_cross --ws          # WS 实时价
+  quant run-worker --strategy sma_cross --paper-mode  # 模拟盘验证期放宽仓位
+
+行情来源优先级：
+1. `--ws`：WS tickers 实时价
+2. `--broker okx`：OKX 公开 ticker REST 实时价
+3. 回退：本地 1H K线最近收盘价
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from decimal import Decimal
+
+from redis.asyncio import Redis
+
+from quant.execution.account import read_account_field
+from quant.execution.executor import Executor
+from quant.execution.kill_switch import KillSwitch
+from quant.execution.okx_broker import OkxBroker
+from quant.execution.price import LivePriceBook, RestPriceProvider
+from quant.execution.reconciler import Reconciler
+from quant.execution.worker import Worker
+from quant.foundation.config import Settings
+from quant.foundation.logger import get_logger, setup_logger
+from quant.okx.client import OKXClient
+from quant.okx.ws_client import WSClient
+from quant.queue.signal_queue import SignalQueue
+from quant.risk.checker import RiskChecker
+from quant.risk.config import load_risk_config
+from quant.state.sqlite_store import SQLiteStore
+from quant.storage.bar_storage import BarStorage
+
+DAY_MS = 86_400_000
+
+
+def _bar_price_provider(data_dir):
+    """从本地 1H K线读最近收盘价；无数据返回 None。"""
+    storage = BarStorage(data_dir)
+
+    def provider(inst_id: str) -> Decimal | None:
+        now_ms = int(time.time() * 1000)
+        bars = storage.load_bars(inst_id, "1H", now_ms - 2 * DAY_MS, now_ms)
+        if not bars:
+            return None
+        return bars[-1].close
+
+    return provider
+
+
+def _apply_paper_mode(config):
+    """模拟盘验证模式：放宽仓位比例，使风控不截断回测的全仓 sizing。
+
+    仅覆盖仓位比例；`max_order_qty`、日亏损、连续亏损等仍生效。
+    `max_order_qty`（配置 10000）与 `[backtest].initial_cash` 同量级，
+    真实账户下会成为实际的单笔上限——这正是日报偏离对比需要的口径：
+    模拟盘成交名义应与回测初始资金对齐，而不是与账户可用余额对齐。
+    """
+    return config.model_copy(
+        update={
+            "max_position_pct": Decimal("1.0"),
+            "max_total_pct": Decimal("1.0"),
+        }
+    )
+
+
+def _build_broker(args, settings: Settings, client: OKXClient | None):
+    if args.broker == "okx":
+        if client is None:
+            raise RuntimeError("okx broker requires an OKXClient")
+        return OkxBroker(client, td_mode=args.td_mode)
+    return Executor(settings.backtest.commission_rate)
+
+
+async def _run(args, settings: Settings) -> int:
+    log = get_logger("cli.run_worker")
+
+    redis = Redis.from_url(settings.redis.url, decode_responses=True)
+    queue = SignalQueue(
+        redis,
+        pending_key=settings.redis.queue_key,
+        inflight_key=settings.redis.inflight_key,
+        dead_key=settings.redis.dead_key,
+    )
+    store = SQLiteStore(settings.state.db_path)
+    risk_config = load_risk_config(args.strategy, config_dir=args.config_dir)
+    if args.paper_mode:
+        risk_config = _apply_paper_mode(risk_config)
+    risk = RiskChecker(risk_config, store, settings.backtest.initial_cash)
+    # 发布的是「生效值」而非配置文件原值：paper-mode 覆盖只存在于本进程
+    risk_limits = {
+        "strategy": risk_config.strategy_id,
+        "paper_mode": bool(args.paper_mode),
+        "rules": {
+            "max_position_pct": str(risk_config.max_position_pct),
+            "max_total_pct": str(risk_config.max_total_pct),
+            "max_order_qty": str(risk_config.max_order_qty),
+            "daily_loss_limit": str(risk_config.daily_loss_limit),
+            "consecutive_loss_limit": risk_config.consecutive_loss_limit,
+        },
+    }
+
+    client: OKXClient | None = None
+    public_client: OKXClient | None = None
+    ws: WSClient | None = None
+    ws_task: asyncio.Task | None = None
+    price_book: LivePriceBook | None = None
+    bar_provider = _bar_price_provider(settings.storage.data_dir)
+
+    try:
+        if args.broker == "okx":
+            client = OKXClient(settings.okx)
+        broker = _build_broker(args, settings, client)
+
+        # 仅 OKX broker 支持对账（需 get_order 查询远端订单状态）
+        order_timeout = (
+            args.order_timeout
+            if args.order_timeout is not None
+            else settings.execution.order_timeout_seconds
+        )
+        reconcile_interval = (
+            args.reconcile_interval
+            if args.reconcile_interval is not None
+            else settings.execution.reconcile_interval_seconds
+        )
+        reconciler = (
+            Reconciler(store, broker, order_timeout_seconds=order_timeout)
+            if args.broker == "okx"
+            else None
+        )
+
+        # 公开行情不需要鉴权：mock 模式也可用 REST 实时价
+        if client is not None:
+            public_client = client
+        else:
+            public_client = OKXClient(settings.okx)
+
+        if args.ws:
+            price_book = LivePriceBook()
+            ws = WSClient()
+            await ws.subscribe("tickers", args.inst, price_book.update_from_payload)
+            ws_task = asyncio.create_task(ws.run())
+
+        rest_provider = RestPriceProvider(public_client)
+
+        async def equity_provider() -> Decimal | None:
+            """风控基数取账户总权益，与 engine 读同一份 monitor 快照。
+
+            读不到快照时返回 None，checker 退回 initial_cash 兜底；此时仓位
+            上限会按配置初始资金计算，可能截断真实账户下的下单量。
+            """
+            value = await read_account_field(
+                redis,
+                settings.monitor.dashboard_snapshot_key,
+                "total_equity",
+            )
+            if value is None:
+                log.warning(
+                    "account snapshot unavailable, risk equity falls back to "
+                    f"{settings.backtest.initial_cash}"
+                )
+            return value
+
+        def price_provider(inst_id: str) -> Decimal | None:
+            if price_book is not None:
+                live = price_book.get_price(inst_id)
+                if live is not None:
+                    return live
+            rest = rest_provider(inst_id)
+            if rest is not None:
+                return rest
+            return bar_provider(inst_id)
+
+        worker = Worker(
+            queue=queue,
+            risk=risk,
+            executor=broker,
+            store=store,
+            redis=redis,
+            price_provider=price_provider,
+            heartbeat_interval=args.heartbeat_interval,
+            reconciler=reconciler,
+            kill_switch=KillSwitch(redis),
+            reconcile_interval=reconcile_interval,
+            equity_provider=equity_provider,
+            risk_limits_key=(
+                f"{settings.monitor.risk_limits_key}:{args.strategy}"
+            ),
+            risk_limits=risk_limits,
+            risk_limits_ttl=settings.monitor.risk_limits_ttl_seconds,
+        )
+
+        log.info(
+            f"worker started strategy={args.strategy} broker={args.broker} "
+            f"ws={'on' if args.ws else 'off'} "
+            f"paper_mode={'on' if args.paper_mode else 'off'} "
+            f"max_position_pct={risk_config.max_position_pct} "
+            f"reconcile={reconcile_interval}s order_timeout={order_timeout}s "
+            f"db={settings.state.db_path}"
+        )
+        await worker.run()
+        return 0
+    finally:
+        if ws is not None:
+            await ws.close()
+        if ws_task is not None:
+            ws_task.cancel()
+            try:
+                await ws_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"ws task stopped with error: {e}")
+        if public_client is not None:
+            public_client.close()
+        store.close()
+        await redis.aclose()
+
+
+def main(args) -> int:
+    """启动 worker（阻塞直到 SIGINT/SIGTERM）。"""
+    settings = Settings.load(args.config)
+    setup_logger(**settings.logging.model_dump())
+    log = get_logger("cli.run_worker")
+    try:
+        return asyncio.run(_run(args, settings))
+    except KeyboardInterrupt:
+        log.info("worker interrupted")
+        return 0

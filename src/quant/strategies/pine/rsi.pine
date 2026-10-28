@@ -1,0 +1,10 @@
+//@version=5
+strategy("RSI", overlay=false)
+period = input(14, "RSI Period")
+oversold = input(30, "Oversold")
+overbought = input(70, "Overbought")
+r = ta.rsi(close, period)
+if r < oversold
+    strategy.entry("long", strategy.long)
+if r > overbought
+    strategy.close("long")

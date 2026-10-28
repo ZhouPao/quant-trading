@@ -1,0 +1,86 @@
+# 复制为 config.toml 并填入真实值；config.toml 不入 git（见 .gitignore）
+# 配置加载语法：${ENV_VAR} 引用环境变量；${ENV_VAR:-default} 提供默认值
+
+[okx]
+api_key = "${OKX_API_KEY}"
+secret = "${OKX_SECRET}"
+passphrase = "${OKX_PASSPHRASE}"
+demo = true                         # true=模拟盘，false=实盘；M1 可保持 true
+
+[storage]
+data_dir = "./data"
+retention_days = 365                # K线/SQLite 历史/日报 CSV 的保留天数
+retention_enabled = true            # monitor 每日自动清理；false 时只能 quant prune
+retention_at = "03:30"              # 本地时间 HH:MM
+
+[rate_limit]
+timeout_seconds = 10.0
+
+[logging]
+level = "INFO"                      # DEBUG/INFO/WARNING/ERROR
+file = "./logs/quant-trading.log"
+rotation = "10 MB"
+retention = "30 days"
+
+# 以下段落 M1 不实现，M2 起由下游模块扩展；此处仅预留形状
+[redis]
+url = "${REDIS_URL:-redis://localhost:6379/0}"
+queue_key = "quant:signals"              # LIST 主队列
+inflight_key = "quant:signals:inflight"  # 处理中暂存（崩溃可恢复）
+dead_key = "quant:signals:dead"          # 死信队列
+dedup_prefix = "quant:dedup:"            # SET 键前缀 + hash(signal_json)
+dedup_ttl_seconds = 300                  # 5 分钟（TV 网络异常重发保护）
+
+[webhook]
+host = "127.0.0.1"
+port = 8000
+path = "/webhook/tv"
+auth_token = "${WEBHOOK_AUTH_TOKEN:-}"    # TV alert header 校验；空=不校验
+ack_timeout_seconds = 5
+
+[backtest]
+initial_cash = "10000"                    # 回测初始资金（USDT）
+commission_rate = "0.001"                 # 双边手续费率
+slippage_bps = "5"                        # 滑点（基点）
+window_size = 200                         # 策略可见历史 bar 数
+
+[state]
+db_path = "./data/state/quant.db"         # SQLite 状态库
+
+[execution]
+reconcile_interval_seconds = 60           # worker 运行期对账间隔（0=仅启动时对账）
+order_timeout_seconds = 300               # 挂单超时自动撤单（秒，0=关闭）
+
+[candles]
+insts = ["BTC-USDT"]                      # 定时增量同步的品种
+bar = "1H"
+interval_seconds = 300                    # 轮询间隔；0=只跑一次
+lookback_bars = 3                         # 每次回看几根，顺带补断点附近的洞
+
+[engine]
+enabled = true                            # 本地策略实时信号引擎（不依赖 TradingView）
+strategy = "sma_cross"                    # 与 config/strategies/{id}.toml 对应
+inst = "BTC-USDT"
+bar = "1H"
+interval_seconds = 60                     # 轮询间隔；每根 bar 只评估一次
+warmup_bars = 200                         # 回放窗口，需覆盖策略最慢周期
+config_dir = "./config/strategies"
+cash_fallback = "10000"                   # 读不到账户可用 USDT 时的兜底仓位基数
+
+[dashboard]
+host = "127.0.0.1"                        # 只读看板监听地址，默认仅本机
+port = 8080
+web_dir = "./web/dist"                    # 前端构建产物目录
+
+[report]
+enabled = false                           # true=monitor 每日定时出模拟盘偏离日报
+at = "08:00"                              # 本地时间 HH:MM（monitor 在该时刻后的第一轮生成）
+strategy = "sma_cross"
+inst = "BTC-USDT"
+bar = "1H"
+window_hours = 24
+threshold = 0.05                          # 最大允许偏离（超过记 FAIL）
+limit = 500                               # 读取的模拟盘成交上限
+config_dir = "./config/strategies"
+out_dir = "./reports/daily"               # CSV 输出目录
+email = true                              # SMTP 未配置时自动降级为仅日志

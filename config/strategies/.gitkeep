@@ -1,0 +1,2 @@
+# 策略配置目录（按 strategy_id 命名的 toml 文件，不入 git）
+# 每个 strategy_id 一个 toml，定义该策略的风控参数（持仓上限/日亏损上限等）

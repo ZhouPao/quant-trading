@@ -1,0 +1,295 @@
+"""运维看板 FastAPI 应用（M4 扩展）。
+
+端点：
+- GET /api/health    存活探针
+- GET /api/overview  账户/指标/心跳/队列/kill-switch 汇总
+- GET /api/positions 本地持仓 + monitor 市场快照
+- GET /api/orders    最近订单
+- GET /api/fills     最近成交
+- GET /api/pnl       成交盈亏汇总（FIFO 回合，含手续费）
+- GET /api/risk-limits 生效风控限额与当前已用额度（worker 发布 + 本地现算）
+- GET /api/reports   模拟盘偏离日报（读取 reports/daily/*.csv）
+- GET /api/alerts    最近告警
+- GET /api/equity    权益时序（默认近 24 小时）
+- GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
+- GET /api/candles   K 线面板（本地 parquet + 成交 + 持仓均价）
+- GET /api/strategies 可用策略清单（config/strategies/*.toml）
+- POST /api/backtest  单次回测（只返回结果，不落盘）
+- POST /api/optimize  参数网格寻优（只返回排名，不落盘）
+- POST /api/kill-switch 切换紧急停止标志（写操作）
+- POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
+- POST /api/positions/flatten 一键全平（写操作，直连 OKX）
+
+若前端构建产物存在（默认 web/dist），同一进程在 / 下托管静态页面。
+手动减仓/全平以外全部只读；写操作都要求本机 Host、自定义头与
+（配置了 token 时的）token。
+"""
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from quant.dashboard.backtest import (
+    BacktestRequest,
+    BacktestRequestError,
+    BacktestService,
+    OptimizeRequest,
+)
+from quant.dashboard.manual import ManualTradeError, ManualTrader
+from quant.dashboard.service import DashboardService
+from quant.foundation.errors import QuantError
+from quant.foundation.logger import get_logger
+from quant.webhook.auth import verify_token
+
+log = get_logger("dashboard.app")
+
+MAX_LIMIT = 200
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class KillSwitchRequest(BaseModel):
+    action: Literal["on", "off"]
+    reason: str = ""
+
+
+class ReduceRequest(BaseModel):
+    """手动减仓：ratio 与 qty 二选一。"""
+
+    inst_id: str
+    ratio: float | None = None
+    qty: str | None = None
+    reason: str
+
+
+class FlattenRequest(BaseModel):
+    """一键全平：必须手动输入 FLATTEN 才提交。"""
+
+    reason: str
+    confirm: str
+
+
+def _host_only(raw: str) -> str:
+    """从 Host 头里取出主机名（兼容 `host:port` 与 `[::1]:port`）。"""
+    if raw.startswith("["):
+        return raw.split("]")[0].lstrip("[")
+    return raw.split(":")[0]
+
+
+def _guard_write(request: Request, token: str) -> None:
+    """写操作守卫：本机 Host + 自定义头 + 可选 token。
+
+    自定义头会让浏览器跨站请求先发预检，而本应用不返回任何 CORS 头，
+    因此能挡住「恶意网页静默停掉交易」这类 CSRF；Host 限制则挡 DNS 重绑定。
+    """
+    host = _host_only(request.headers.get("host", ""))
+    if host not in LOCAL_HOSTS:
+        raise HTTPException(
+            status_code=403, detail="dashboard only accepts local requests"
+        )
+    if request.headers.get("X-Dashboard-Request") != "1":
+        raise HTTPException(
+            status_code=400, detail="missing X-Dashboard-Request header"
+        )
+    if token and not verify_token(
+        request.headers.get("X-Dashboard-Token", ""), token
+    ):
+        raise HTTPException(status_code=401, detail="invalid dashboard token")
+
+
+def create_app(
+    service: DashboardService,
+    web_dir: Path | None = None,
+    manual: ManualTrader | None = None,
+) -> FastAPI:
+    app = FastAPI(
+        title="quant-trading dashboard",
+        description="只读运维看板（含紧急停止与手动减仓）",
+        docs_url=None,
+        redoc_url=None,
+    )
+    backtests = BacktestService(service.settings)
+
+    def _trader() -> ManualTrader:
+        if manual is None:
+            raise HTTPException(
+                status_code=503, detail="手动交易未启用（缺少 OKX 客户端）"
+            )
+        return manual
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        return {"status": "ok"}
+
+    @app.get("/api/overview")
+    async def overview() -> JSONResponse:
+        return JSONResponse(await service.overview())
+
+    @app.get("/api/positions")
+    async def positions() -> JSONResponse:
+        return JSONResponse(await service.positions())
+
+    @app.get("/api/orders")
+    async def orders(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+    ) -> JSONResponse:
+        return JSONResponse(await service.orders(limit))
+
+    @app.get("/api/fills")
+    async def fills(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+    ) -> JSONResponse:
+        return JSONResponse(await service.fills(limit))
+
+    @app.get("/api/reports")
+    async def reports(limit: int = 20) -> JSONResponse:
+        return JSONResponse(await service.reports(min(max(limit, 1), MAX_LIMIT)))
+
+    @app.get("/api/pnl")
+    async def pnl() -> JSONResponse:
+        return JSONResponse(await service.pnl())
+
+    @app.get("/api/risk-limits")
+    async def risk_limits() -> JSONResponse:
+        return JSONResponse(await service.risk_limits())
+
+    @app.get("/api/alerts")
+    async def alerts(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+    ) -> JSONResponse:
+        return JSONResponse(await service.alerts(limit))
+
+    @app.get("/api/equity")
+    async def equity(
+        hours: int = Query(24, ge=1, le=720),
+    ) -> JSONResponse:
+        return JSONResponse(await service.equity(hours))
+
+    @app.get("/api/engine")
+    async def engine() -> JSONResponse:
+        return JSONResponse(await service.engine())
+
+    @app.get("/api/candles")
+    async def candles(
+        inst: str | None = Query(None, description="默认取 engine.inst"),
+        bar: str | None = Query(None, description="默认取 engine.bar"),
+        limit: int = Query(300, ge=20, le=1000),
+    ) -> JSONResponse:
+        return JSONResponse(await service.candles(inst, bar, limit))
+
+    @app.get("/api/strategies")
+    async def strategies() -> JSONResponse:
+        return JSONResponse({"strategies": await backtests.strategies()})
+
+    @app.post("/api/backtest")
+    async def backtest(req: BacktestRequest) -> JSONResponse:
+        try:
+            return JSONResponse(await backtests.run(req))
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.post("/api/optimize")
+    async def optimize(req: OptimizeRequest) -> JSONResponse:
+        try:
+            return JSONResponse(await backtests.optimize(req))
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.post("/api/kill-switch")
+    async def kill_switch(
+        request: Request, req: KillSwitchRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        reason = req.reason.strip()
+        try:
+            result = await service.set_kill_switch(req.action == "on", reason)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"kill switch write failed: {e}")
+            raise HTTPException(
+                status_code=503, detail="redis unavailable"
+            ) from e
+        # 写操作留痕：谁在什么时候因为什么停了策略
+        log.warning(f"kill switch -> {req.action} (reason={reason!r})")
+        return JSONResponse(result)
+
+    @app.post("/api/positions/reduce")
+    async def reduce_position(
+        request: Request, req: ReduceRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            qty = Decimal(req.qty) if req.qty else None
+        except (InvalidOperation, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"qty 非法：{e}") from e
+        try:
+            result = await _trader().reduce(
+                req.inst_id.strip(),
+                ratio=Decimal(str(req.ratio)) if req.ratio is not None else None,
+                qty=qty,
+                reason=req.reason,
+            )
+        except ManualTradeError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+        except QuantError as e:
+            # 交易所拒单/网络异常：502 让前端区分「请求本身有问题」
+            raise HTTPException(
+                status_code=502, detail=f"交易所下单失败：{e}"
+            ) from e
+        return JSONResponse(result)
+
+    @app.post("/api/positions/flatten")
+    async def flatten_positions(
+        request: Request, req: FlattenRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        if req.confirm.strip().upper() != "FLATTEN":
+            raise HTTPException(
+                status_code=400, detail="确认词不匹配：请输入 FLATTEN"
+            )
+        try:
+            result = await _trader().flatten(reason=req.reason)
+        except ManualTradeError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+        except QuantError as e:
+            raise HTTPException(
+                status_code=502, detail=f"交易所下单失败：{e}"
+            ) from e
+        return JSONResponse(result)
+
+    index = web_dir / "index.html" if web_dir is not None else None
+    if index is not None and index.is_file():
+        app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
+    else:
+        log.warning(
+            f"web assets not found at {web_dir}, serving API only "
+            f"(run `npm run build` in web/)"
+        )
+
+        @app.get("/")
+        async def root() -> dict:
+            return {
+                "service": "quant-trading dashboard",
+                "hint": "前端未构建：cd web && npm install && npm run build",
+                "api": [
+                    "/api/overview",
+                    "/api/positions",
+                    "/api/orders",
+                    "/api/fills",
+                    "/api/alerts",
+                    "/api/equity",
+                    "/api/candles",
+                    "/api/strategies",
+                    "/api/backtest",
+                    "/api/optimize",
+                ],
+            }
+
+    return app
+
+
+__all__ = ["create_app"]

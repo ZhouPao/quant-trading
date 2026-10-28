@@ -1,0 +1,10 @@
+//@version=5
+strategy("SMA Cross", overlay=true)
+fast_len = input(10, "Fast SMA")
+slow_len = input(50, "Slow SMA")
+fast = ta.sma(close, fast_len)
+slow = ta.sma(close, slow_len)
+if ta.crossover(fast, slow)
+    strategy.entry("long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("long")
