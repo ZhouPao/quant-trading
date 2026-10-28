@@ -33,6 +33,14 @@ logs/
 notebooks/.ipynb_checkpoints/
 reports/daily/
 reports/backtest/
+reports/*.csv
+
+# Frontend build artifacts
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
 
 # Local SQLite
 *.db
