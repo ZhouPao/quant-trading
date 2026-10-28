@@ -11,6 +11,7 @@ from quant.backtest.position import Position
 from quant.backtest.signal import Signal
 from quant.risk.checker import RiskChecker, RiskDecision
 from quant.risk.config import RiskConfig, load_risk_config
+from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
 
 _TS = 1_700_000_000_000
@@ -283,3 +284,27 @@ class TestDecisionType:
         )
         with pytest.raises(AttributeError):
             decision.approved = False  # type: ignore[misc]
+
+
+class TestRoundTripPnls:
+    def test_instruments_do_not_cross_match(self) -> None:
+        def fill(inst_id: str, side: str, price: str, ts: int) -> Fill:
+            return Fill(
+                order_id=f"o-{ts}",
+                inst_id=inst_id,
+                side=side,
+                qty=Decimal("1"),
+                price=Decimal(price),
+                fee=Decimal("0"),
+                ts=ts,
+            )
+
+        fills = [
+            fill("BTC-USDT", "buy", "100", 1),
+            fill("BTC-USDT-SWAP", "buy", "200", 2),
+            fill("BTC-USDT-SWAP", "sell", "210", 3),
+            fill("BTC-USDT", "sell", "90", 4),
+        ]
+
+        # 现货与合约各自配对；结果按平仓时间排序，而不是按品种分组顺序。
+        assert round_trip_pnls(fills) == [Decimal("10"), Decimal("-10")]

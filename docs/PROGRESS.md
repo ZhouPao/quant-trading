@@ -888,6 +888,28 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - 已知遗留：worker 的 OKX WS 仍在每轮重连（`Connection reset by peer`），
   与本次切换无关，沿用既有排查项。
 
+### 8.28 P0 收尾：git 初始化 + 合约端到端验证
+
+- 版本管理：仓库此前从未 `git init`。现已初始化并提交两个基线提交
+  （源码/测试/文档、前端源码），`.env`、`config/config.toml`、
+  `config/strategies/*.toml`、`data/`、`logs/` 仍由 `.gitignore` 排除。
+- 合约端到端（OKX 模拟盘，`BTC-USDT-SWAP`）：
+  - 买入：`1 张`、`avgPx=80722.9483`、`fee=0.4036147415 USDT`、
+    `tdMode=cross`、`state=filled`；本地记为 `0.01 BTC`。
+  - 平仓：`1 张`、`avgPx=80699.7129`、`fee=0.4034985645 USDT`；
+    交易所 `SWAP positions` 清空，本地持仓归零，回合价差 `-0.232354`。
+  - 结论：信号 → webhook → Redis → worker → broker → OKX → SQLite →
+    看板全链路在合约口径下打通，`ctVal`/`lotSz` 换算与 `feeCcy=USDT` 一致。
+- 验证中发现并修复：`round_trip_pnls()` 未按 `inst_id` 分组，现货
+  `BTC-USDT` 的买入会被拿去和 `BTC-USDT-SWAP` 的卖单 FIFO 配对，
+  导致看板回合盈亏从 `-1.0395` 错算成 `-0.9443`。现按品种分组配对、
+  再按平仓时间合并，兼顾“最近连续亏损”的时间顺序。
+- 验证：`pytest` 950 passed（新增 1 条跨品种不互配 + 平仓时间排序用例）；
+  重启 worker/monitor/dashboard 后 `/api/pnl` 返回
+  `total_pnl=-1.039467306`、`round_trips=1`，与逐笔价差+双边手续费一致。
+- 未完成：SMTP 仍缺 `SMTP_USERNAME/SMTP_PASSWORD` 与收件人，`test-email`
+  无法实测；worker 的 WS 每轮 `Connection reset by peer` 仍未处理。
+
 ---
 
 ## 9. 相关文档
