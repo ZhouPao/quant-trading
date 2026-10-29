@@ -116,6 +116,7 @@ class CandleFetcher:
         # 后续页 after=oldest-1（拿比上次更旧的）
         # 停止：返回空，或 oldest <= cursor（已覆盖到 start）
         total = 0
+        max_saved_ts = 0
         next_after = end_ts + 1  # 第一页拿 ts <= end_ts
         while True:
             batch = self._client.get_history_candles(
@@ -136,6 +137,7 @@ class CandleFetcher:
             if in_range:
                 saved = self._storage.save_bars(in_range)
                 total += saved
+                max_saved_ts = max(max_saved_ts, newest)
                 # 断点：更新到已落盘的最新 ts
                 self._save_checkpoint(inst_id, bar_size, newest)
                 _log.info(
@@ -150,6 +152,11 @@ class CandleFetcher:
             # 不足 page_size，说明没有更旧数据
             if len(bars) < self._page_size:
                 break
+
+        # 翻页是从新到旧，循环结束时断点会停在最旧那一页；
+        # 这里统一推回已落盘的最新 ts，否则下一轮会把整段历史重拉一遍。
+        if max_saved_ts:
+            self._save_checkpoint(inst_id, bar_size, max_saved_ts)
 
         _log.info(f"main loop done, total={total}, start validation+fill")
 

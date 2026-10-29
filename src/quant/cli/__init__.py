@@ -33,6 +33,9 @@ from quant.cli.sync_candles import main as sync_candles_main
 from quant.cli.test_email import main as test_email_main
 from quant.cli.validate_data import main as validate_data_main
 
+# OKX 支持的 K线周期；6H/12H 为本地扩展口径，OKX 原生返回
+BAR_CHOICES = ["1m", "5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D"]
+
 
 def _add_backtest_args(sub, name: str) -> None:
     """backtest / optimize 共用的参数。"""
@@ -42,7 +45,7 @@ def _add_backtest_args(sub, name: str) -> None:
     p.add_argument(
         "--bar",
         default="1H",
-        choices=["1m", "5m", "15m", "30m", "1H", "4H", "1D"],
+        choices=BAR_CHOICES,
         help="K线周期",
     )
     p.add_argument("--start", required=True, help="开始日期 YYYY-MM-DD（含）")
@@ -194,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_engine.add_argument(
         "--bar",
         default=None,
-        choices=["1m", "5m", "15m", "30m", "1H", "4H", "1D"],
+        choices=BAR_CHOICES,
         help="K线周期",
     )
     p_engine.add_argument(
@@ -397,7 +400,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="逗号分隔的 instId；默认取 config [candles] insts",
     )
     p_sync.add_argument(
-        "--bar", default=None, help="K线周期；默认取 config [candles] bar"
+        "--bar",
+        default=None,
+        help="逗号分隔的周期；默认取 config [candles] bars",
     )
     p_sync.add_argument(
         "--loop", action="store_true", help="常驻轮询（供 supervisor 托管）"
@@ -479,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_paper.add_argument("--strategy", default="sma_cross", help="策略 ID")
     p_paper.add_argument("--inst", default="BTC-USDT", help="产品 ID")
     p_paper.add_argument(
-        "--bar", default="1H", choices=["1m", "5m", "15m", "30m", "1H", "4H", "1D"],
+        "--bar", default="1H", choices=BAR_CHOICES,
         help="K线周期",
     )
     p_paper.add_argument(

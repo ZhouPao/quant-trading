@@ -129,8 +129,14 @@ class CandleSyncSettings(BaseModel):
 
     insts: list[str] = Field(default_factory=lambda: ["BTC-USDT"])
     bar: str = "1H"
+    bars: list[str] = Field(default_factory=list)   # 为空时回落为 [bar]
     interval_seconds: int = 300             # 轮询间隔，0 表示跑一次即退出
     lookback_bars: int = 3                  # 每次回看几根，顺带补断点附近的洞
+
+    @property
+    def resolved_bars(self) -> list[str]:
+        """实际要同步的周期列表：配置了 bars 就只用它，否则用单个 bar。"""
+        return list(self.bars) if self.bars else [self.bar]
 
 
 class EngineSettings(BaseModel):

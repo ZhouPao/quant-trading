@@ -249,6 +249,12 @@ class TestLoadBars:
         with pytest.raises(BacktestSetupError, match="unsupported bar"):
             load_bars(settings, INST, "2H", START, START + HOUR, 0)
 
+    def test_supports_six_and_twelve_hour_bars(self) -> None:
+        from quant.backtest.runner import BAR_MS
+
+        assert BAR_MS["6H"] == 6 * HOUR
+        assert BAR_MS["12H"] == 12 * HOUR
+
     def test_build_matcher(self, tmp_path) -> None:
         matcher = build_matcher(_settings(tmp_path))
         assert matcher.commission_rate == Decimal("0.001")

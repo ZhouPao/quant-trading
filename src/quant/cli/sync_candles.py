@@ -2,11 +2,12 @@
 
 用法：
   quant sync-candles                                  # 按配置同步一次后退出
-  quant sync-candles --inst BTC-USDT,ETH-USDT --bar 1H
+  quant sync-candles --inst BTC-USDT,ETH-USDT --bar 1H,4H
   quant sync-candles --loop --interval 300            # 常驻，供 supervisor 托管
 
 与 `fetch-candles` 的区别：不需要传日期，终点自动取「最近已收盘的 bar」，
 起点取断点，适合定时轮询。未收盘的最后一根不落盘，避免污染回测与日报。
+默认同步 `[candles] bars` 列出的全部周期。
 """
 from __future__ import annotations
 
@@ -18,15 +19,19 @@ from quant.foundation.logger import get_logger, setup_logger
 from quant.okx.client import OKXClient
 
 
-def _sync_once(fetcher: CandleFetcher, insts: list[str], bar: str,
+def _sync_once(fetcher: CandleFetcher, insts: list[str], bars: list[str],
                lookback_bars: int, log) -> int:
-    """同步一轮，返回净增根数合计。单个品种失败不影响其他品种。"""
+    """同步一轮（insts × bars），返回净增根数合计。
+
+    单个品种/周期失败只记日志，不影响其余组合继续同步。
+    """
     total = 0
-    for inst in insts:
-        try:
-            total += fetcher.sync(inst, bar, lookback_bars=lookback_bars)
-        except Exception as e:  # noqa: BLE001
-            log.error(f"sync failed inst={inst} bar={bar}: {e}")
+    for bar in bars:
+        for inst in insts:
+            try:
+                total += fetcher.sync(inst, bar, lookback_bars=lookback_bars)
+            except Exception as e:  # noqa: BLE001
+                log.error(f"sync failed inst={inst} bar={bar}: {e}")
     return total
 
 
@@ -45,7 +50,14 @@ def main(args) -> int:
         log.error("no inst configured (set [candles] insts or pass --inst)")
         return 1
 
-    bar = args.bar or settings.candles.bar
+    bars = (
+        [s.strip() for s in args.bar.split(",") if s.strip()]
+        if args.bar
+        else settings.candles.resolved_bars
+    )
+    if not bars:
+        log.error("no bar configured (set [candles] bars or pass --bar)")
+        return 1
     interval = (
         args.interval
         if args.interval is not None
@@ -61,21 +73,21 @@ def main(args) -> int:
     try:
         fetcher = CandleFetcher(client, settings.storage.data_dir)
         if not args.loop:
-            total = _sync_once(fetcher, insts, bar, lookback, log)
-            log.info(f"sync done insts={insts} bar={bar} new={total}")
+            total = _sync_once(fetcher, insts, bars, lookback, log)
+            log.info(f"sync done insts={insts} bars={bars} new={total}")
             return 0
 
         if interval <= 0:
             log.error(f"--loop requires positive interval, got {interval}")
             return 1
         log.info(
-            f"candle sync loop started insts={insts} bar={bar} "
+            f"candle sync loop started insts={insts} bars={bars} "
             f"interval={interval}s lookback={lookback}"
         )
         while True:
             started = time.monotonic()
-            total = _sync_once(fetcher, insts, bar, lookback, log)
-            log.info(f"sync round done insts={insts} bar={bar} new={total}")
+            total = _sync_once(fetcher, insts, bars, lookback, log)
+            log.info(f"sync round done insts={insts} bars={bars} new={total}")
             # 扣除本轮耗时，避免慢网络下间隔不断被拉长
             elapsed = time.monotonic() - started
             time.sleep(max(1.0, interval - elapsed))

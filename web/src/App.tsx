@@ -47,7 +47,7 @@ import type { ChartSettings } from "./chart/types";
 import "./styles.css";
 
 const POLL_MS = 5000;
-const BAR_OPTIONS = ["1H", "4H", "1D"];
+const BAR_OPTIONS = ["5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D"];
 // 与后端 /api/equity 的 hours 上限（720）保持一致
 const EQUITY_RANGES = [
   { hours: 24, label: "24h" },

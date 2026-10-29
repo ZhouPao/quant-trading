@@ -15,11 +15,11 @@ M1–M3 完成，M4 完成约 95%（含 engine 心跳与恢复通知；只差填
 
 | 指标 | 数值 |
 |---|---|
-| 源码 | 102 个 Python 文件 / 约 13,744 行 |
-| 测试 | 53 个测试文件 / 约 18,298 行 / **949 条全部通过** |
-| 前端 | 4 个文件 / 约 5,090 行（React 18 + TS + Vite + lightweight-charts） |
+| 源码 | 105 个 Python 文件 / 约 14,178 行 |
+| 测试 | 52 个测试文件 / 约 18,890 行 / **991 条全部通过** |
+| 前端 | 11 个文件 / 约 6,393 行（React 18 + TS + Vite + ECharts） |
 | CLI 子命令 | 19 个 |
-| 本地行情 | BTC / ETH-USDT 各 1H 17,534 根、4H 4,383 根、1D 729 根（约 2 年，2.3 MB parquet） |
+| 本地行情 | BTC-USDT-SWAP 与 BTC-USDT 均覆盖 5m/15m/30m/1H/4H/6H/12H/1D 八周期（10 MB parquet） |
 | 当前策略 | `sma_cross`（1H，fast=10 / slow=50） |
 | 正在运行的进程 | supervisor + engine + monitor + dashboard |
 
@@ -963,6 +963,82 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
   18.54% → **7.16%**，收益 0.33% → 0.76%，但平均持仓 38.5 → 5.5 根、盈亏比
   0.80 → 0.49 —— 最近支撑往往很近，1H 上容易被打掉，属于结构性止损的典型
   代价，参数还需按周期调。
+
+### 8.31 回填 SWAP 4H/1D 与 4H 参数对照
+
+- 背景：`[candles] insts` 已切到 `BTC-USDT-SWAP`，但本地只有该品种的 1H，
+  4H/1D 仅现货有。切周期与趋势过滤都被数据卡住。
+- 回填：`quant fetch-candles --inst BTC-USDT-SWAP` 补 4H（2024-01-01 起，
+  净增 6,196 根）与 1D（净增 1,032 根）；`validate-data` 两周期均
+  `errors=0, duplicates=0, missing=0, invalid_ohlc=0`。1D 首根为 16:00 UTC，
+  是 OKX 日线的口径（港时零点），非异常。`data/candles` 由 3.0 MB 增至 3.4 MB。
+- 现有本地行情：BTC-USDT-SWAP 1H 24,781 / 4H 6,196 / 1D 1,032；
+  BTC-USDT 1H 17,605 / 4H / 1D；ETH-USDT 1H / 4H / 1D。
+- 4H 参数对照（BTC-USDT-SWAP，2024-03-01..2026-10-29，预热 200 根）：
+
+  | 参数 | 总收益 | 最大回撤 | 胜率 | 盈亏比 | 交易数 | 平均持仓 |
+  |---|---|---|---|---|---|---|
+  | 10/100 | 39.65% | 34.43% | 31.25% | 1.21 | 48 | 59.7 |
+  | 10/100 + 撑压 | 22.57% | 15.23% | 35.42% | 1.26 | 48 | 9.7 |
+  | 10/50 | 8.47% | 35.48% | 27.85% | 0.95 | 79 | 36.6 |
+  | 10/50 + 撑压 | 1.16% | 27.71% | 36.49% | 0.78 | 74 | 7.1 |
+
+- 结论一：4H 比 1H 高一个量级（1H 最优 0.33% vs 4H 10/100 的 39.65%），
+  印证 §7 的判断——1H 亏损主要来自换手成本（66 轮≈20pp）。
+- 结论二：撑压线在 4H 上不再拖累盈亏比（1.21 → 1.26），与 1H 的
+  0.80 → 0.49 相反。收益腰斩但回撤由 34% 降到 15%，是收益换回撤的交易，
+  是否默认开启取决于目标偏好。
+- 结论三：`slow_len=50` 在 4H 上明显弱于 100，慢线还要继续拉长；
+  下一步应在 4H 上扫 `slow_len` × 撑压参数，而不是沿用 1H 的 10/50。
+- 注意：`[candles] bar = "1H"` 意味着日常同步只维护 1H，4H/1D 会停在
+  2026-10-29。切 4H 时须同步改 `[candles] bar`、`[engine] bar`、
+  `[engine] max_catchup_bars`（4H 下 24 根=4 天）、日报窗口与 `retention_days`。
+
+### 8.32 补齐 5m/15m/30m/6H/12H 五周期
+
+- 背景：图表与回测此前只支持 1m/5m/15m/30m/1H/4H/1D，缺 6H/12H；
+  分钟级虽有 CLI 支持但从未回填，本地实际只有 1H/4H/1D。
+- 代码放开周期：
+  - `cli/__init__.py` 新增 `BAR_CHOICES` 常量（含 6H、12H），backtest /
+    optimize / run-engine / paper-report 四处 `choices` 统一复用它；
+    `sync-candles --bar` 改为逗号分隔的自由格式（不再受 choices 限制）。
+  - `backtest/runner.py` 与 `report/daily.py` 的 `BAR_MS` 补
+    `6H=21_600_000`、`12H=43_200_000`。周期换算的唯一实现
+    `DataValidator._bar_size_ms` 本就按 `nH` 通用解析，无需改动。
+  - 前端 `BAR_OPTIONS` 扩到 8 个周期；K 线面板的周期按钮仍优先用
+    后端返回的 `available_bars`（磁盘实际有哪些），数据到位即自动出现。
+- 多周期日常同步：
+  - `CandleSyncSettings` 新增 `bars` 列表与 `resolved_bars` 属性
+    （`bars` 为空回落为 `[bar]`，旧配置行为不变）。
+  - `sync-candles` 一轮改为 `insts × bars` 双循环，单组失败只记日志，
+    不中断其余组合；断点本就按 `(inst, bar)` 分文件，多周期互不覆盖。
+  - `config/config.toml` 增 `bars = ["5m","15m","30m","1H","4H","6H","12H","1D"]`。
+    每轮请求数 2 品种 × 8 周期 = 16 次，间隔 300s，压力可忽略。
+- 回填（BTC-USDT-SWAP 与 BTC-USDT 各一份）：
+  - 6H / 12H 全量 2024-01-01 起：各 4,130 / 2,065 根
+  - 30m / 15m / 5m 近 6 个月（2026-04-29 起）：各 8,813 / 17,626 / 52,878 根
+  - `validate-data` 五周期十组全部 `errors=0, duplicates=0, missing=0,
+    invalid_ohlc=0`；`data/candles` 由 3.4 MB 增至 10 MB。
+- 测试：新增 13 条（BAR_CHOICES 覆盖、6H/12H 在四类 CLI 子命令可解析、
+  `sync-candles --bar` 自由格式、`_sync_once` 的 insts×bars 组合与
+  单组失败不中断、`resolved_bars` 的回落与优先规则、BAR_MS 新增键），
+  全量 **990 passed**，`ruff check` 通过。
+- 已知限制：分钟级数据只回填 6 个月，5m 无法做超过半年的回测；
+  `retention_days = 1095` 远大于回填跨度，不会被自动清理。
+- 生效前提：supervisor 里常驻的 `sync-candles --loop` 只在进程启动时读配置，
+  需重启 supervisor 才会开始维护新增周期（也可手动跑一次 `quant sync-candles`）。
+- **重启后暴露并修复的缺陷**：`CandleFetcher.fetch()` 是「从新往旧」翻页，
+  每页都把断点写成该页最新 ts，循环结束时断点停在**最旧**那一页，
+  下一轮 `sync` 就以旧断点为 cursor 把整段历史重拉一遍。
+  1H 上表现为每轮 18s 空转（一直从 2026-01-10 重拉 16k 根），
+  多周期后 5m 单轮要拉 52k 根（~530 页），完全不可用。
+  修复：主循环记录 `max_saved_ts`，循环结束后把断点推回已落盘的最新 ts；
+  补单测 `test_multi_page_checkpoint_ends_at_newest`。
+  同时把 16 个 `(inst, bar)` 断点按 parquet 实际最后一根重置，
+  首轮即从最新出发（本轮 `new=24`，耗时不到 1 秒）。
+- 重启后状态：7 个进程全部在线，dashboard `/api/health` 200，
+  BTC-USDT 的 4H/1D 也补齐到最新（此前停在 10-24/10-26）。
+  全量测试 **991 passed**。
 
 ---
 

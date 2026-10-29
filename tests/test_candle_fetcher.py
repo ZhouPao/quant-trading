@@ -119,6 +119,20 @@ class TestCandleFetcherPagination:
         )
         assert total == 250
 
+    def test_multi_page_checkpoint_ends_at_newest(self, tmp_path: Path) -> None:
+        """翻页结束后断点应停在最新一根，而不是最后一页（最旧）的最新根。
+
+        否则下一轮 sync 会以旧断点为 cursor，把整段历史重新拉一遍。
+        """
+        all_bars = _make_bar_sequence(0, 250)
+        client = _make_client([all_bars[150:], all_bars[50:150], all_bars[:50]])
+        fetcher = CandleFetcher(client, tmp_path, page_size=100)
+
+        fetcher.fetch("BTC-USDT", "1H", 0, 249 * 3_600_000)
+
+        ckpt = fetcher._load_checkpoint("BTC-USDT", "1H")
+        assert ckpt.last_ts == 249 * 3_600_000
+
     def test_partial_page_stops_loop(self, tmp_path: Path) -> None:
         """某页不足 page_size，循环应停止。
 

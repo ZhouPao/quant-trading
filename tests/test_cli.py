@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from quant.cli import build_parser
+from quant.cli import BAR_CHOICES, build_parser
 from quant.cli import main as cli_main
 from quant.cli.align_data import main as align_main
 from quant.cli.fetch_candles import main as fetch_main
@@ -27,6 +27,7 @@ from quant.cli.fetch_candles import parse_date_to_ms
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
 from quant.cli.fetch_instruments import main as fetch_instruments_main
 from quant.cli.run_worker import _apply_paper_mode
+from quant.cli.sync_candles import _sync_once
 from quant.cli.validate_data import main as validate_main
 from quant.foundation.config import OKXSettings, Settings, StorageSettings
 from quant.risk.config import RiskConfig
@@ -1046,3 +1047,71 @@ class TestCliMainDispatchNew:
         )
         assert ret == 0
         mock_fetch_funding.assert_called_once()
+
+
+# =====================================================================
+# 多周期支持：BAR_CHOICES / sync-candles 多周期
+# =====================================================================
+
+
+class TestMultiPeriodSupport:
+    def test_bar_choices_include_6h_and_12h(self) -> None:
+        assert "6H" in BAR_CHOICES
+        assert "12H" in BAR_CHOICES
+
+    @pytest.mark.parametrize("bar", ["6H", "12H"])
+    def test_backtest_accepts_new_periods(self, bar: str) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "backtest",
+                "--strategy", "sma_cross",
+                "--inst", "BTC-USDT",
+                "--bar", bar,
+                "--start", "2024-01-01",
+                "--end", "2024-02-01",
+            ]
+        )
+        assert args.bar == bar
+
+    @pytest.mark.parametrize("bar", ["6H", "12H"])
+    def test_paper_report_accepts_new_periods(self, bar: str) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["paper-report", "--bar", bar])
+        assert args.bar == bar
+
+    @pytest.mark.parametrize("bar", ["6H", "12H"])
+    def test_run_engine_accepts_new_periods(self, bar: str) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["run-engine", "--bar", bar])
+        assert args.bar == bar
+
+    def test_sync_candles_bar_is_free_form(self) -> None:
+        """--bar 支持逗号分隔，不能是 argparse choices 受限。"""
+        parser = build_parser()
+        args = parser.parse_args(["sync-candles", "--bar", "1H,6H,12H"])
+        assert args.bar == "1H,6H,12H"
+
+    def test_sync_once_covers_every_inst_and_bar(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class _Fetcher:
+            def sync(self, inst: str, bar: str, lookback_bars: int = 3) -> int:
+                calls.append((inst, bar))
+                return 1
+
+        total = _sync_once(_Fetcher(), ["A", "B"], ["1H", "6H"], 3, MagicMock())
+        assert calls == [("A", "1H"), ("B", "1H"), ("A", "6H"), ("B", "6H")]
+        assert total == 4
+
+    def test_sync_once_continues_after_one_failure(self) -> None:
+        class _Fetcher:
+            def sync(self, inst: str, bar: str, lookback_bars: int = 3) -> int:
+                if inst == "BAD":
+                    raise RuntimeError("boom")
+                return 2
+
+        log = MagicMock()
+        total = _sync_once(_Fetcher(), ["BAD", "OK"], ["1H"], 3, log)
+        assert total == 2
+        log.error.assert_called_once()

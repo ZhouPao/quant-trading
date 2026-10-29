@@ -113,6 +113,45 @@ level = "DEBUG"
     assert s.redis.queue_key == "quant:signals"
 
 
+def test_candle_sync_resolved_bars_falls_back_to_bar(tmp_path):
+    """未配置 bars 时回落为 [bar]，保证旧配置行为不变。"""
+    cfg = _write_config(
+        tmp_path,
+        """
+[okx]
+api_key = "k"
+secret = "s"
+passphrase = "p"
+
+[candles]
+insts = ["BTC-USDT"]
+bar = "4H"
+""",
+    )
+    s = Settings.load(cfg)
+    assert s.candles.bars == []
+    assert s.candles.resolved_bars == ["4H"]
+
+
+def test_candle_sync_resolved_bars_prefers_bars(tmp_path):
+    """配置了 bars 就只用 bars，忽略兼容字段 bar。"""
+    cfg = _write_config(
+        tmp_path,
+        """
+[okx]
+api_key = "k"
+secret = "s"
+passphrase = "p"
+
+[candles]
+bar = "1H"
+bars = ["5m", "1H", "6H", "12H"]
+""",
+    )
+    s = Settings.load(cfg)
+    assert s.candles.resolved_bars == ["5m", "1H", "6H", "12H"]
+
+
 def test_settings_load_missing_env_raises(tmp_path):
     cfg = _write_config(
         tmp_path,
