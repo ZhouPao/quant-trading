@@ -19,8 +19,12 @@ env/
 # IDE
 .vscode/
 .idea/
+.trae/
 *.swp
 .DS_Store
+
+# 本地文档草稿
+*.docx
 
 # Project sensitive (不入 git，由本地或环境变量提供)
 .env
