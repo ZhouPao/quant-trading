@@ -22,6 +22,8 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
     参数（ctx.params）：
         fast_len: 快线周期，默认 10
         slow_len: 慢线周期，默认 50
+        ema_len: 趋势过滤的 EMA 周期，默认 200
+        ema_filter: 是否只在收盘价站上 EMA 时允许开仓，默认关闭
         commission_rate: 手续费率，用于下单量预留，默认 0.001
         sr_*: 支撑压力止盈止损参数，见 SrExitMixin，默认关闭
     """
@@ -33,11 +35,13 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
     def on_init(self, ctx: Context) -> None:
         self.fast_len = int(ctx.params.get("fast_len", 10))
         self.slow_len = int(ctx.params.get("slow_len", 50))
+        self.ema_len = int(ctx.params.get("ema_len", 200))
+        self.ema_filter = bool(ctx.params.get("ema_filter", False))
         self.commission_rate = Decimal(
             str(ctx.params.get("commission_rate", "0.001"))
         )
-        if self.fast_len <= 0 or self.slow_len <= 0:
-            raise ValueError("fast_len and slow_len must be positive")
+        if self.fast_len <= 0 or self.slow_len <= 0 or self.ema_len <= 0:
+            raise ValueError("fast_len, slow_len and ema_len must be positive")
         if self.fast_len >= self.slow_len:
             raise ValueError(
                 f"fast_len ({self.fast_len}) must be < slow_len ({self.slow_len})"
@@ -45,8 +49,10 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
         self._sr_init(ctx)
 
     def on_bar(self, bar: Bar, ctx: Context) -> Signal | None:
-        # 需要 slow_len 根当前窗口 + 1 根用于计算前值
-        if len(ctx.bars_window) < self.slow_len + 1:
+        # 需要 slow_len 根当前窗口 + 1 根用于计算前值；开启趋势过滤时还要
+        # 攒够 ema_len 根收盘才能算出 EMA
+        need = max(self.slow_len + 1, self.ema_len if self.ema_filter else 0)
+        if len(ctx.bars_window) < need:
             return None
 
         closes = [b.close for b in ctx.bars_window]
@@ -57,8 +63,13 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
         prev_fast = sum(prev[-self.fast_len :]) / self.fast_len
         prev_slow = sum(prev[-self.slow_len :]) / self.slow_len
 
-        # 金叉：空仓时买入
-        if prev_fast <= prev_slow and fast > slow and ctx.position.is_flat:
+        # 金叉：空仓时买入（开启趋势过滤时还要求收盘价在 EMA 上方）
+        if (
+            prev_fast <= prev_slow
+            and fast > slow
+            and ctx.position.is_flat
+            and self._trend_ok(closes)
+        ):
             stop, _ = self._sr_freeze(bar.close, ctx)
             if not self._sr_allows_entry(stop):
                 return None
@@ -87,11 +98,32 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
 
         return None
 
+    def _trend_ok(self, closes: list[Decimal]) -> bool:
+        """趋势过滤：收盘价必须站上 EMA；未开启过滤时恒为 True。"""
+        if not self.ema_filter:
+            return True
+        ema = _ema_last(closes, self.ema_len)
+        return ema is not None and closes[-1] > ema
+
     def _position_qty(self, cash: Decimal, price: Decimal) -> Decimal:
         """按可用现金全仓买入，预留手续费。"""
         if price <= 0:
             return Decimal("0")
         return cash / (price * (1 + self.commission_rate))
+
+
+def _ema_last(closes: list[Decimal], period: int) -> Decimal | None:
+    """按最后 period 根收盘递推 EMA，样本不足时返回 None。
+
+    以最早 period 根的简单平均作种子，之后逐根递推，避免依赖全量历史。
+    """
+    if period <= 0 or len(closes) < period:
+        return None
+    ema = sum(closes[:period]) / period
+    k = Decimal(2) / Decimal(period + 1)
+    for c in closes[period:]:
+        ema = (c - ema) * k + ema
+    return ema
 
 
 __all__ = ["SmaCrossStrategy"]

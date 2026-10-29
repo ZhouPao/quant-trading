@@ -58,8 +58,8 @@ def _add_backtest_args(sub, name: str) -> None:
     p.add_argument(
         "--warmup-bars",
         type=int,
-        default=200,
-        help="预热 K线数（不成交、不计入指标），默认 200",
+        default=300,
+        help="预热 K线数（不成交、不计入指标），默认 300（EMA200 需 201 根）",
     )
     p.add_argument(
         "--config-dir",

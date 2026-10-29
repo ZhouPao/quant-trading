@@ -62,6 +62,17 @@ def _bars(count: int = 400) -> list[Bar]:
 
 
 def _settings(tmp_path: Path, **report) -> Settings:
+    # 用临时策略配置，避免依赖仓库里 config/strategies 的实盘参数
+    config_dir = tmp_path / "strategies"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "sma_cross.toml").write_text(
+        '[strategy]\n'
+        'strategy_id = "sma_cross"\n'
+        'class = "quant.strategies.python.sma_cross.SmaCrossStrategy"\n\n'
+        "[params]\n"
+        "fast_len = 10\n"
+        "slow_len = 50\n"
+    )
     return Settings(
         okx=OKXSettings(api_key="k", secret="s", passphrase="p"),
         storage={"data_dir": tmp_path / "data"},
@@ -70,6 +81,7 @@ def _settings(tmp_path: Path, **report) -> Settings:
             "enabled": True,
             "at": "00:00",
             "out_dir": tmp_path / "reports",
+            "config_dir": config_dir,
             **report,
         },
     )
@@ -422,7 +434,7 @@ class TestPaperReportUsesSharedBuilder:
             threshold=0.05,
             window_hours=24,
             out=str(out),
-            config_dir="config/strategies",
+            config_dir=str(settings.report.config_dir),
             config="config/config.toml",
         )
         assert paper_report.main(args) == 0

@@ -81,7 +81,7 @@ def build_report(
     limit: int = 500,
     window_hours: int = 24,
     threshold: float = DEFAULT_THRESHOLD,
-    config_dir: Path | str = "config/strategies",
+    config_dir: Path | str | None = None,
 ) -> DeviationReport:
     """读取模拟盘成交 + 本地 K线重跑回测，返回偏离报告。
 
@@ -116,7 +116,9 @@ def build_report(
             "run fetch-candles first"
         )
 
-    strategy_obj, params = _load_strategy(strategy, Path(config_dir))
+    strategy_obj, params = _load_strategy(
+        strategy, Path(config_dir or settings.report.config_dir)
+    )
     # 必须从本地最早一根 bar 开始连续成交，而不是只回看 window_size 根。
     # 模拟盘在窗口起点可能持有很早建立的仓位，回看段太短时回测会「空仓起步」，
     # 首笔平仓就对不上：实测 200 根回看会产生 52% 的假偏离，全量历史为 0%。

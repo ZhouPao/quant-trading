@@ -48,10 +48,22 @@ def _bars(count: int = 400) -> list[Bar]:
 
 
 def _settings(tmp_path: Path) -> Settings:
+    # 用临时策略配置，避免依赖仓库里 config/strategies 的实盘参数
+    config_dir = tmp_path / "strategies"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "sma_cross.toml").write_text(
+        '[strategy]\n'
+        'strategy_id = "sma_cross"\n'
+        'class = "quant.strategies.python.sma_cross.SmaCrossStrategy"\n\n'
+        "[params]\n"
+        "fast_len = 10\n"
+        "slow_len = 50\n"
+    )
     return Settings(
         okx=OKXSettings(api_key="k", secret="s", passphrase="p"),
         storage={"data_dir": tmp_path / "data"},
         state={"db_path": tmp_path / "data" / "state" / "quant.db"},
+        report={"config_dir": config_dir},
     )
 
 
@@ -64,7 +76,7 @@ def _args(**overrides):
         "threshold": 0.05,
         "window_hours": 24,
         "out": None,
-        "config_dir": "config/strategies",
+        "config_dir": None,  # None -> 回落到 settings.report.config_dir
         "config": "config/config.toml",
     }
     args.update(overrides)

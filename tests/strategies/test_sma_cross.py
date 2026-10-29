@@ -16,7 +16,7 @@ from quant.backtest.engine import Backtest
 from quant.backtest.matcher import Matcher
 from quant.backtest.position import Position
 from quant.models.bar import Bar
-from quant.strategies.python.sma_cross import SmaCrossStrategy
+from quant.strategies.python.sma_cross import SmaCrossStrategy, _ema_last
 
 _TS0 = 1_700_000_000_000
 _HOUR = 3_600_000
@@ -155,6 +155,69 @@ class TestSmaCrossSignals:
         assert len(signals) == 1
         cost = signals[0].qty * bars[-1].close * Decimal("1.001")
         assert cost <= Decimal("10000")
+
+
+class TestEmaTrendFilter:
+    def test_ema_seeded_by_sma_then_recursive(self) -> None:
+        """1..5 取 4 周期：种子 (1+2+3+4)/4=2.5，k=0.4 → 3.5。"""
+        closes = [Decimal(str(v)) for v in range(1, 6)]
+        assert _ema_last(closes, 4) == Decimal("3.5")
+
+    def test_ema_returns_none_when_not_enough_bars(self) -> None:
+        assert _ema_last([Decimal("1"), Decimal("2")], 4) is None
+
+    def test_filter_blocks_buy_below_ema(self) -> None:
+        """金叉出现但收盘价仍在 EMA 下方 → 不开仓。"""
+        strategy = SmaCrossStrategy()
+        ctx = _ctx(
+            {"fast_len": 2, "slow_len": 3, "ema_len": 4, "ema_filter": True}
+        )
+        strategy.on_init(ctx)
+        signals = _feed(
+            strategy, ctx, _bars(["100", "100", "100", "100", "50", "52", "54"])
+        )
+
+        assert signals == []
+
+    def test_filter_allows_buy_above_ema(self) -> None:
+        """同一组参数下收盘价站上 EMA → 正常买入。"""
+        strategy = SmaCrossStrategy()
+        ctx = _ctx(
+            {"fast_len": 2, "slow_len": 3, "ema_len": 4, "ema_filter": True}
+        )
+        strategy.on_init(ctx)
+        signals = _feed(strategy, ctx, _bars(["10", "10", "10", "10", "11"]))
+
+        assert len(signals) == 1
+        assert signals[0].side == "buy"
+
+    def test_filter_does_not_block_exit(self) -> None:
+        """死叉平仓不受趋势过滤影响（收盘价低于 EMA 也要平）。"""
+        strategy = SmaCrossStrategy()
+        position = Position(
+            inst_id="BTC-USDT", qty=Decimal("1"), avg_price=Decimal("10")
+        )
+        ctx = _ctx(
+            params={"fast_len": 2, "slow_len": 3, "ema_len": 4, "ema_filter": True},
+            position=position,
+        )
+        strategy.on_init(ctx)
+        signals = _feed(
+            strategy, ctx, _bars(["10", "10", "10", "10", "12", "13", "10"])
+        )
+
+        assert [s.side for s in signals] == ["sell"]
+
+    def test_filter_waits_for_ema_window(self) -> None:
+        """ema_len 大于 slow_len 时，窗口不足不产生信号。"""
+        strategy = SmaCrossStrategy()
+        ctx = _ctx(
+            {"fast_len": 2, "slow_len": 3, "ema_len": 10, "ema_filter": True}
+        )
+        strategy.on_init(ctx)
+        signals = _feed(strategy, ctx, _bars(["10", "10", "10", "9", "12"]))
+
+        assert signals == []
 
 
 class TestSmaCrossBacktest:
