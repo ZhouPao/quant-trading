@@ -13,15 +13,17 @@ from quant.backtest.context import Context
 from quant.backtest.signal import Signal
 from quant.backtest.strategy import Strategy
 from quant.models.bar import Bar
+from quant.strategies.python.sr_exit import SrExitMixin
 
 
-class SmaCrossStrategy(Strategy):
+class SmaCrossStrategy(SrExitMixin, Strategy):
     """SMA 金叉/死叉策略。
 
     参数（ctx.params）：
         fast_len: 快线周期，默认 10
         slow_len: 慢线周期，默认 50
         commission_rate: 手续费率，用于下单量预留，默认 0.001
+        sr_*: 支撑压力止盈止损参数，见 SrExitMixin，默认关闭
     """
 
     @property
@@ -40,6 +42,7 @@ class SmaCrossStrategy(Strategy):
             raise ValueError(
                 f"fast_len ({self.fast_len}) must be < slow_len ({self.slow_len})"
             )
+        self._sr_init(ctx)
 
     def on_bar(self, bar: Bar, ctx: Context) -> Signal | None:
         # 需要 slow_len 根当前窗口 + 1 根用于计算前值
@@ -56,6 +59,9 @@ class SmaCrossStrategy(Strategy):
 
         # 金叉：空仓时买入
         if prev_fast <= prev_slow and fast > slow and ctx.position.is_flat:
+            stop, _ = self._sr_freeze(bar.close, ctx)
+            if not self._sr_allows_entry(stop):
+                return None
             qty = self._position_qty(ctx.cash, bar.close)
             if qty <= 0:
                 return None

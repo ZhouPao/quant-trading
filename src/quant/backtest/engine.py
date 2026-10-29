@@ -4,6 +4,8 @@
 设计约束：
 - bars 必须按 ts 严格升序且同品种，引擎不排序
 - 市价单按下一根开盘价成交，避免使用未来数据
+- 保护性出场（`strategy.protective_exit`）在 bar 内触及即按该价位成交，
+  本根不再接受新信号
 - 最后一根产生的信号无法成交，记入 unfilled_signals
 - equity = cash + position.market_value(bar.close)，每根 bar 记录一次
 """
@@ -126,9 +128,29 @@ class Backtest:
             ctx.timestamp = bar.ts
             self._advance(ctx, bar)
 
-            signal = self.strategy.on_bar(bar, ctx)
-            if signal is not None:
-                pending = signal
+            # 保护性出场：止损/止盈在 bar 内触及即按该价位成交，本根不再接受新信号
+            exited = False
+            if position.is_long:
+                exit_price = self.strategy.protective_exit(bar, ctx)
+                if exit_price is not None:
+                    fill = self.matcher.fill_at(
+                        inst_id=bar.inst_id,
+                        side="sell",
+                        qty=position.qty,
+                        price=exit_price,
+                        ts=bar.ts,
+                    )
+                    cash -= fill.net_value
+                    position.apply_fill(fill)
+                    trades.append(fill)
+                    ctx.cash = cash
+                    self.strategy.on_trade(fill, ctx)
+                    exited = True
+
+            if not exited:
+                signal = self.strategy.on_bar(bar, ctx)
+                if signal is not None:
+                    pending = signal
 
             ctx.cash = cash
             equity_curve.append((bar.ts, cash + position.market_value(bar.close)))

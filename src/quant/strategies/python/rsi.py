@@ -13,9 +13,10 @@ from quant.backtest.context import Context
 from quant.backtest.signal import Signal
 from quant.backtest.strategy import Strategy
 from quant.models.bar import Bar
+from quant.strategies.python.sr_exit import SrExitMixin
 
 
-class RsiStrategy(Strategy):
+class RsiStrategy(SrExitMixin, Strategy):
     """RSI 超卖买入/超买平仓策略。
 
     参数（ctx.params）：
@@ -40,6 +41,7 @@ class RsiStrategy(Strategy):
             raise ValueError("rsi_period must be positive")
         if not self.oversold < self.overbought:
             raise ValueError("oversold must be < overbought")
+        self._sr_init(ctx)
 
         self.last_rsi: Decimal | None = None
         self._prev_close: Decimal | None = None
@@ -55,6 +57,9 @@ class RsiStrategy(Strategy):
             return None
 
         if rsi < self.oversold and ctx.position.is_flat:
+            stop, _ = self._sr_freeze(bar.close, ctx)
+            if not self._sr_allows_entry(stop):
+                return None
             qty = self._position_qty(ctx.cash, bar.close)
             if qty <= 0:
                 return None

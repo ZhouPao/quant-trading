@@ -190,6 +190,31 @@ class LiveSignalEngine:
             ctx.bars_window.append(bar)
             if len(ctx.bars_window) > window:
                 del ctx.bars_window[: len(ctx.bars_window) - window]
+
+            # 保护性出场：与回测同口径，bar 内触及止损/止盈即出场。
+            # 实盘只能转成市价卖单入队，成交价由 worker 按当时盘口决定。
+            exit_price = (
+                strategy.protective_exit(bar, ctx) if ctx.position.is_long else None
+            )
+            if exit_price is not None:
+                out = Signal(
+                    strategy_id=strategy.strategy_id,
+                    side="sell",
+                    order_type="market",
+                    inst_id=bar.inst_id,
+                    qty=ctx.position.qty,
+                    ts=bar.ts,
+                )
+                if bar.ts in pending_ts:
+                    signals.append(out)
+                # 虚拟成交按触发价记，保证后续 bar 的持仓判断与回测一致
+                self._apply_virtual_fill(ctx, out, bar, price=exit_price)
+                log.info(
+                    f"protective exit triggered inst={bar.inst_id} "
+                    f"price={exit_price} bar_ts={bar.ts}"
+                )
+                continue
+
             out = strategy.on_bar(bar, ctx)
             if out is None or bar.ts not in pending_ts:
                 continue
@@ -257,24 +282,30 @@ class LiveSignalEngine:
         return pending
 
     def _apply_virtual_fill(
-        self, ctx: Context, signal: Signal, bar: Bar
+        self,
+        ctx: Context,
+        signal: Signal,
+        bar: Bar,
+        price: Decimal | None = None,
     ) -> None:
         """补评估时把信号记到虚拟持仓与现金上，让后续 bar 的判断与回测一致。
 
-        实际成交由 worker 按市价执行；这里只用本根收盘价维护策略可见的状态。
+        实际成交由 worker 按市价执行；这里只用本根收盘价（保护性出场用触发价）
+        维护策略可见的状态。
         """
+        fill_price = bar.close if price is None else price
         ctx.position.apply_fill(
             Fill(
                 order_id=f"catchup-{bar.ts}",
                 inst_id=signal.inst_id,
                 side=signal.side,
                 qty=signal.qty,
-                price=bar.close,
+                price=fill_price,
                 fee=Decimal("0"),
                 ts=bar.ts,
             )
         )
-        notional = signal.qty * bar.close
+        notional = signal.qty * fill_price
         if signal.side == "buy":
             ctx.cash = max(ctx.cash - notional, Decimal("0"))
         else:

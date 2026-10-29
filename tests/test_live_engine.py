@@ -18,6 +18,7 @@ import fakeredis.aioredis
 import pytest
 
 from quant.backtest.order import Order
+from quant.backtest.position import Position
 from quant.backtest.signal import Signal
 from quant.engine.live import LiveSignalEngine
 from quant.execution.kill_switch import KillSwitch
@@ -432,6 +433,124 @@ class TestCatchUp:
         finally:
             store.close()
             await redis.aclose()
+
+
+class TestProtectiveExit:
+    """支撑/压力止盈止损在补评估路径上也要生效。"""
+
+    async def test_stop_out_enqueues_sell(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        cfg = tmp_path / "strategies"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "sma_cross.toml").write_text(
+            "[strategy]\n"
+            'strategy_id = "sma_cross"\n'
+            'class = "quant.strategies.python.sma_cross.SmaCrossStrategy"\n\n'
+            "[params]\nfast_len = 10\nslow_len = 50\n"
+            "sr_enabled = true\nsr_left_right = 2\n"
+        )
+        bars = _sr_bars()
+        BarStorage(settings.storage.data_dir).save_bars(bars)
+        store = SQLiteStore(settings.state.db_path)
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        marker = (
+            f"{settings.engine.last_bar_key}:"
+            f"{settings.engine.strategy}:{settings.engine.inst}"
+        )
+        # 水位停在金叉前一根，让补评估覆盖金叉与随后的破位
+        await redis.set(marker, str(bars[55].ts))
+        try:
+            tick = await _engine(settings, store, redis).run_once(
+                now_ms=bars[-1].ts + HOUR
+            )
+
+            # 金叉买入 + 触及支撑 90 的止损卖出
+            assert tick.status == "signal"
+            assert tick.signal_count == 2
+            assert tick.signal is not None
+            assert tick.signal.side == "sell"
+
+            items = await _queue_items(settings, redis)
+            assert len(items) == 2
+            assert '"side":"sell"' in items[0]
+            assert '"side":"buy"' in items[1]
+        finally:
+            store.close()
+            await redis.aclose()
+
+    async def test_existing_long_reseeds_levels(self, tmp_path) -> None:
+        """已持仓时不会再走开仓分支，需用持仓均价重新定档才有保护。"""
+        settings = _settings(tmp_path)
+        cfg = tmp_path / "strategies"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "sma_cross.toml").write_text(
+            "[strategy]\n"
+            'strategy_id = "sma_cross"\n'
+            'class = "quant.strategies.python.sma_cross.SmaCrossStrategy"\n\n'
+            "[params]\nfast_len = 10\nslow_len = 50\n"
+            "sr_enabled = true\nsr_left_right = 2\n"
+        )
+        bars = _sr_bars()
+        BarStorage(settings.storage.data_dir).save_bars(bars)
+        store = SQLiteStore(settings.state.db_path)
+        store.update_position(
+            Position(inst_id="BTC-USDT", qty=Decimal("1"), avg_price=Decimal("120"))
+        )
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        marker = (
+            f"{settings.engine.last_bar_key}:"
+            f"{settings.engine.strategy}:{settings.engine.inst}"
+        )
+        await redis.set(marker, str(bars[56].ts))
+        try:
+            tick = await _engine(settings, store, redis).run_once(
+                now_ms=bars[-1].ts + HOUR
+            )
+
+            # 只有止损卖出，没有买入（持仓已存在）
+            assert tick.status == "signal"
+            assert tick.signal_count == 1
+            assert tick.signal is not None
+            assert tick.signal.side == "sell"
+
+            items = await _queue_items(settings, redis)
+            assert len(items) == 1
+            assert '"side":"sell"' in items[0]
+        finally:
+            store.close()
+            await redis.aclose()
+
+
+def _sr_bars() -> list[Bar]:
+    """横盘 100 → 第 50 根探底 90（摆动低点）→ 第 56 根跳升 125（金叉）→ 第 58 根跌破 90。"""
+    bars = []
+    total = 60
+    for i in range(total):
+        if i == 50:
+            price = Decimal("90")
+        elif i == 56:
+            price = Decimal("125")
+        elif i == 58:
+            price = Decimal("86")
+        else:
+            price = Decimal("100")
+        high = Decimal("124") if i == 57 else price
+        low = Decimal("85") if i == 58 else price
+        bars.append(
+            Bar(
+                ts=LAST_TS - (total - 1 - i) * HOUR,
+                open=price,
+                high=high,
+                low=low,
+                close=price,
+                vol=Decimal("10"),
+                vol_quote=price * 10,
+                confirm=1,
+                inst_id="BTC-USDT",
+                bar_size="1H",
+            )
+        )
+    return bars
 
 
 class TestStatusPublish:

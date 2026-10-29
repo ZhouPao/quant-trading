@@ -75,6 +75,45 @@ class Matcher:
             ts=next_bar.ts,
         )
 
+    def fill_at(
+        self,
+        inst_id: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        ts: int,
+    ) -> Fill:
+        """按指定价位直接成交，用于 bar 内触发的保护性出场。
+
+        保护性出场是「挂在结构位上的单子」，触及即成交，因此不套滑点。
+
+        Args:
+            inst_id: 产品 ID
+            side: 成交方向 buy/sell
+            qty: 成交数量，必须 > 0
+            price: 成交价，必须 > 0
+            ts: 成交时间戳 UTC ms
+
+        Returns:
+            Fill 成交记录
+
+        Raises:
+            ValueError: qty 或 price 非正
+        """
+        if qty <= 0:
+            raise ValueError(f"qty must be positive, got {qty}")
+        if price <= 0:
+            raise ValueError(f"price must be positive, got {price}")
+        return Fill(
+            order_id=str(uuid.uuid4()),
+            inst_id=inst_id,
+            side=side,
+            qty=qty,
+            price=price,
+            fee=price * qty * self.commission_rate,
+            ts=ts,
+        )
+
     def _apply_slippage(self, price: Decimal, side: str) -> Decimal:
         """市价单滑点：买入抬价、卖出压价。"""
         if side == "buy":
