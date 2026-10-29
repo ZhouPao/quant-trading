@@ -907,6 +907,12 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - 验证：`pytest` 950 passed（新增 1 条跨品种不互配 + 平仓时间排序用例）；
   重启 worker/monitor/dashboard 后 `/api/pnl` 返回
   `total_pnl=-1.039467306`、`round_trips=1`，与逐笔价差+双边手续费一致。
+- 测试数据清理：验证完成后删除两笔 SWAP 测试成交（`orders` / `fills` /
+  `signals` / `positions` 四表同步），删前已备份
+  `data/state/quant.db.bak-20261028-233452`。清理后
+  `/api/pnl` 为 `fill_count=1 / round_trips=0`，持仓表只剩三个现货品种，
+  看板告警无残留；今日 08:00 日报生成于切换品种之前（`BTC-USDT`），
+  未受本次测试影响。
 - 未完成：SMTP 仍缺 `SMTP_USERNAME/SMTP_PASSWORD` 与收件人，`test-email`
   无法实测；worker 的 WS 每轮 `Connection reset by peer` 仍未处理。
 
