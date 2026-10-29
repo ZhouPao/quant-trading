@@ -916,6 +916,24 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - 未完成：SMTP 仍缺 `SMTP_USERNAME/SMTP_PASSWORD` 与收件人，`test-email`
   无法实测；worker 的 WS 每轮 `Connection reset by peer` 仍未处理。
 
+### 8.29 K 线面板补齐技术指标
+
+- 图表库由 `lightweight-charts` 换成 `echarts`（按需引入），换取原生多 pane
+  联动与指标生态；旧 `CandleChart` 组件与其依赖一并移除。
+- 新增 `web/src/chart/`：`indicators.ts` 纯函数（SMA/EMA/RMA/BOLL/MACD/
+  KDJ/ATR/SuperTrend/摆动点聚类撑压线）、`options.ts` 组装 ECharts option、
+  `CandleChart.tsx`、`IndicatorBar.tsx`、`settings.ts`（localStorage 持久化）。
+- 主图：MA（默认 5/10/20/50/200）、BOLL(20,2)、SuperTrend(10,3)、撑压线
+  （左右各 3 根摆动点、0.5% 聚类、最多 5 条并标注触碰次数）；副图：VOL
+  （含 5/10 量均线）、MACD(12/26/9)、KDJ(9,3,3)。副图按启用数量撑高画布。
+- 交互：十字线跨 pane 联动、tooltip 汇总全部启用指标、滚轮缩放 + 底部滑块；
+  轮询刷新保留用户缩放位置，切换周期才回到最近 120 根。开关与参数存
+  `qt.chart.indicators.v1`，改参数即时重算。
+- 验证：`vitest` 13 条指标用例通过（含 KDJ 的 J=3K−2D、SuperTrend 空头
+  切换、撑压聚类触碰计数）；`tsc -b` 与 `vite build` 通过（gzip 250 KB）；
+  浏览器实测默认三项副图、三个可选指标开关与刷新后设置恢复均正常。
+  过程中修复 `grid.left/right` 传数字被当成像素、导致价格轴标签被裁的问题。
+
 ---
 
 ## 9. 相关文档

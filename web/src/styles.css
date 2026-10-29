@@ -916,6 +916,84 @@ tbody tr.row-active td:first-child {
   color: var(--ink);
 }
 
+/* ---------------- 指标栏 ---------------- */
+
+.ind-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 16px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+
+.ind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ind-chip {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.ind-chip:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.ind-on {
+  color: var(--accent);
+  border-color: rgba(200, 242, 79, 0.45);
+  background: rgba(200, 242, 79, 0.1);
+}
+
+.ind-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: flex-end;
+}
+
+.ind-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dimmer);
+  letter-spacing: 0.06em;
+}
+
+.ind-field input {
+  width: 76px;
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  outline: none;
+}
+
+.ind-field-wide input {
+  width: 132px;
+}
+
+.ind-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(200, 242, 79, 0.18);
+}
+
 .seg-on {
   background: rgba(200, 242, 79, 0.12);
   color: var(--accent);

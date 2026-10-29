@@ -1,14 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
-  createChart,
-  type IChartApi,
-  type ISeriesApi,
-  type SeriesMarker,
-  type Time,
-  type UTCTimestamp,
-} from "lightweight-charts";
-import {
   age,
   clock,
   compactQty,
@@ -48,6 +40,10 @@ import {
   type RiskLimitsResponse,
   type StrategyInfo,
 } from "./api";
+import { CandleChart } from "./chart/CandleChart";
+import { IndicatorBar } from "./chart/IndicatorBar";
+import { loadSettings, saveSettings } from "./chart/settings";
+import type { ChartSettings } from "./chart/types";
 import "./styles.css";
 
 const POLL_MS = 5000;
@@ -1172,6 +1168,12 @@ function ChartPanel() {
   const [bar, setBar] = useState("1H");
   const [data, setData] = useState<CandlesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<ChartSettings>(loadSettings);
+
+  const updateSettings = useCallback((next: ChartSettings) => {
+    setSettings(next);
+    saveSettings(next);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1230,8 +1232,9 @@ function ChartPanel() {
           </div>
         </div>
       </div>
+      <IndicatorBar settings={settings} onChange={updateSettings} />
       <div className="chart-box">
-        <CandleChart data={data} />
+        <CandleChart data={data} settings={settings} />
         {empty && (
           <div className="chart-empty">
             {staleBars
@@ -1244,7 +1247,7 @@ function ChartPanel() {
       <div className="chart-foot">
         <span>数据来源：本地 parquet（{data?.bars.length ?? 0} 根）</span>
         <span>成交点来自 SQLite fills</span>
-        <span>绿线为持仓均价</span>
+        <span>滚轮缩放，底部滑块拖动可见区间</span>
       </div>
     </section>
   );
@@ -1781,129 +1784,6 @@ function OptimizeResult({ data }: { data: OptimizeResponse }) {
   );
 }
 
-
-function CandleChart({ data }: { data: CandlesResponse | null }) {
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const priceLineRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]> | null>(null);
-  const fittedRef = useRef<string>("");
-
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-
-    const chart = createChart(el, {
-      width: el.clientWidth,
-      height: 340,
-      layout: {
-        background: { color: "transparent" },
-        textColor: "#7d8b81",
-        fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: "rgba(226, 240, 228, 0.05)" },
-        horzLines: { color: "rgba(226, 240, 228, 0.05)" },
-      },
-      rightPriceScale: { borderColor: "rgba(226, 240, 228, 0.12)" },
-      timeScale: {
-        borderColor: "rgba(226, 240, 228, 0.12)",
-        timeVisible: true,
-        secondsVisible: false,
-      },
-      crosshair: {
-        vertLine: { color: "rgba(200, 242, 79, 0.4)", labelBackgroundColor: "#2a3327" },
-        horzLine: { color: "rgba(200, 242, 79, 0.4)", labelBackgroundColor: "#2a3327" },
-      },
-    });
-
-    candleRef.current = chart.addCandlestickSeries({
-      upColor: "#4fe3a1",
-      downColor: "#ff5f5f",
-      borderVisible: false,
-      wickUpColor: "#4fe3a1",
-      wickDownColor: "#ff5f5f",
-    });
-    chartRef.current = chart;
-
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width;
-      if (width && width > 0) chart.applyOptions({ width });
-    });
-    observer.observe(el);
-
-    return () => {
-      observer.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      candleRef.current = null;
-      priceLineRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const series = candleRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart || !data) return;
-
-    const rows = data.bars.map((row) => ({
-      time: Math.floor(row.ts / 1000) as UTCTimestamp,
-      open: Number(row.open),
-      high: Number(row.high),
-      low: Number(row.low),
-      close: Number(row.close),
-    }));
-    series.setData(rows);
-
-    if (priceLineRef.current) {
-      series.removePriceLine(priceLineRef.current);
-      priceLineRef.current = null;
-    }
-    if (data.position) {
-      priceLineRef.current = series.createPriceLine({
-        price: Number(data.position.avg_price),
-        color: "#c8f24f",
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: "成本",
-      });
-    }
-
-    if (rows.length > 0) {
-      const times = rows.map((row) => row.time);
-      const markers: SeriesMarker<Time>[] = data.fills.map((fill) => {
-        // 成交时间不一定落在 bar 开盘时间上，吸附到所在 bar 避免丢点
-        const seconds = Math.floor(fill.ts / 1000);
-        let time = times[0];
-        for (const candidate of times) {
-          if (candidate <= seconds) time = candidate;
-          else break;
-        }
-        const buy = fill.side === "buy";
-        return {
-          time,
-          position: buy ? "belowBar" : "aboveBar",
-          color: buy ? "#4fe3a1" : "#ff5f5f",
-          shape: buy ? "arrowUp" : "arrowDown",
-          text: `${buy ? "买" : "卖"} ${compactQty(fill.qty)}`,
-        };
-      });
-      series.setMarkers(markers);
-    } else {
-      series.setMarkers([]);
-    }
-
-    const key = `${data.inst}-${data.bar}`;
-    if (fittedRef.current !== key && rows.length > 0) {
-      chart.timeScale().fitContent();
-      fittedRef.current = key;
-    }
-  }, [data]);
-
-  return <div className="chart-canvas" ref={boxRef} />;
-}
 
 function EquityCurve({ points, label }: { points: EquityPoint[]; label: string }) {
   const values = points
