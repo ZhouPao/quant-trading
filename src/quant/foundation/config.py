@@ -99,6 +99,17 @@ class BacktestSettings(BaseModel):
     commission_rate: Decimal = Decimal("0.001")
     slippage_bps: Decimal = Decimal("5")
     window_size: int = 200
+    task_workers: int = 1           # 回测任务消费者数（CPU 密集，默认串行）
+    artifacts_dir: Path = Path("./data/backtests")
+
+
+class ParamsSettings(BaseModel):
+    """策略参数来源（MS4-C §12）。
+
+    `resolve_from_db=False` 是回滚开关：完全按 toml 读，忽略 strategy_params。
+    """
+
+    resolve_from_db: bool = True
 
 
 class StateSettings(BaseModel):
@@ -284,6 +295,7 @@ class Settings(BaseModel):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
+    params: ParamsSettings = Field(default_factory=ParamsSettings)
     state: StateSettings = Field(default_factory=StateSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     candles: CandleSyncSettings = Field(default_factory=CandleSyncSettings)
@@ -337,6 +349,7 @@ __all__ = [
     "LoggingSettings",
     "RedisSettings",
     "WebhookSettings",
+    "ParamsSettings",
     "ExecutionSettings",
     "CandleSyncSettings",
     "EngineSettings",

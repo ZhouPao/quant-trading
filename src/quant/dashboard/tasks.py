@@ -1,0 +1,487 @@
+"""回测任务队列（MS4-C §5.2 / §10.4）。
+
+设计取舍：
+
+- **单消费者**：回测是 CPU 密集，并发只会互相拖慢；并行应该发生在寻优内部的
+  进程池，而不是任务之间。
+- **状态写 SQLite，产物写文件**：状态是权威（重启后能查到「跑过什么」），
+  产物（equity/trades/report）落在 `data/backtests/{run_id}/`，库里只登记元数据。
+- **取消粒度是一根 bar**：`Backtest.run(should_stop=...)` 每根 bar 检查一次，
+  成本相对回测本身可忽略；取消中的任务不写指标与产物，避免留下半份结果。
+- **重启不自动重跑**：上次进程留下的 running 一律标 failed（`error="interrupted"`），
+  因为重跑会生成第二份产物，静默覆盖用户对上一次结果的预期。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from quant.backtest.engine import BacktestResult
+from quant.backtest.report import ReportGenerator
+from quant.backtest.runner import parse_range
+from quant.dashboard.backtest import (
+    BacktestRequest,
+    BacktestRequestError,
+    BacktestService,
+)
+from quant.foundation.config import Settings
+from quant.foundation.logger import get_logger
+from quant.state.sqlite_store import SQLiteStore
+
+log = get_logger("dashboard.tasks")
+
+PENDING = "pending"
+RUNNING = "running"
+DONE = "done"
+FAILED = "failed"
+CANCELED = "canceled"
+
+TERMINAL_STATUSES = frozenset({DONE, FAILED, CANCELED})
+
+#: 指标表里以整数存的列，其余数值列统一按文本存（避免浮点误差扩散到审计）。
+_INT_METRIC_COLUMNS = frozenset({"trade_count"})
+
+
+class RunNotFound(KeyError):
+    """run_id 不存在。"""
+
+
+class TaskRunner:
+    """回测任务队列：登记 → 执行 → 落库。"""
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        settings: Settings,
+        service: BacktestService,
+    ) -> None:
+        self._store = store
+        self._settings = settings
+        self._service = service
+        self._queue: asyncio.Queue[tuple[str, BacktestRequest]] = asyncio.Queue()
+        self._worker: asyncio.Task | None = None
+        self._canceled: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    async def recover(self) -> int:
+        """启动时把上次残留的 pending/running 任务标为 failed。"""
+        count = self._store.fail_interrupted_runs(_now_ms())
+        if count:
+            log.warning(f"marked {count} interrupted backtest run(s) as failed")
+        return count
+
+    async def close(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            try:
+                await self._worker
+            except asyncio.CancelledError:
+                pass
+            self._worker = None
+
+    # ------------------------------------------------------------------
+    # 提交 / 取消
+    # ------------------------------------------------------------------
+
+    async def submit(self, req: BacktestRequest) -> str:
+        """登记 pending 并唤醒消费者，立即返回 run_id。
+
+        Raises:
+            BacktestRequestError: 策略配置或日期非法（不排队，直接报错）
+        """
+        params = await asyncio.to_thread(self._service.check, req)
+        inst = req.inst or self._settings.engine.inst
+        start_ts, end_ts = _range_of(req)
+        now = _now_ms()
+        run_id = self._next_run_id(req.strategy, inst, now)
+
+        self._store.create_backtest_run(
+            run_id,
+            strategy_id=req.strategy,
+            inst_id=inst,
+            bar=req.bar,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            params=json.dumps(_jsonable(params), sort_keys=True),
+            kind="backtest",
+            status=PENDING,
+            created_at=now,
+            warmup_bars=req.warmup_bars,
+        )
+        await self._queue.put((run_id, req))
+        self._ensure_worker()
+        return run_id
+
+    async def rerun(self, run_id: str) -> str:
+        """按旧任务的参数与区间重跑，返回新 run_id（旧结果保留）。"""
+        row = self._require(run_id)
+        req = _request_from_row(row)
+        return await self.submit(req)
+
+    async def cancel(self, run_id: str) -> str:
+        """pending 直接取消；running 置标志，下一根 bar 退出。"""
+        row = self._require(run_id)
+        status = row["status"]
+        if status in TERMINAL_STATUSES:
+            return status
+        if status == PENDING:
+            # 队列里那条任务被取出后会发现状态已不是 pending 而直接跳过
+            self._store.update_run_status(run_id, CANCELED, finished_at=_now_ms())
+            return CANCELED
+        self._canceled.add(run_id)
+        return "canceling"
+
+    # ------------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------------
+
+    def get(self, run_id: str) -> dict[str, Any]:
+        row = self._require(run_id)
+        metrics = self._store.get_backtest_metrics(run_id) or {}
+        metrics.pop("run_id", None)
+        return {
+            **_run_payload(row),
+            "metrics": _metrics_payload(metrics),
+            "artifacts": [
+                {
+                    "kind": item["kind"],
+                    "size": item["size"],
+                    "created_at": item["created_at"],
+                }
+                for item in self._store.list_backtest_artifacts(run_id)
+            ],
+        }
+
+    def list_runs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        strategy_id: str | None = None,
+        inst_id: str | None = None,
+        bar: str | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> dict[str, Any]:
+        rows, total = self._store.list_backtest_runs(
+            limit,
+            offset,
+            strategy_id=strategy_id,
+            inst_id=inst_id,
+            bar=bar,
+            status=status,
+            kind=kind,
+            since_ms=since_ms,
+            until_ms=until_ms,
+        )
+        return {
+            "total": total,
+            "runs": [
+                {
+                    **_run_payload(row),
+                    "metrics": _metrics_payload(
+                        self._store.get_backtest_metrics(row["run_id"]) or {}
+                    ),
+                }
+                for row in rows
+            ],
+        }
+
+    def compare(self, run_ids: list[str]) -> dict[str, Any]:
+        """多组对比；品种或周期不一致直接拒绝，避免拿苹果比橘子。"""
+        if len(run_ids) < 2:
+            raise ValueError("compare needs at least 2 run ids")
+        rows = [self._require(run_id) for run_id in run_ids]
+        first = rows[0]
+        for row in rows[1:]:
+            if row["inst_id"] != first["inst_id"] or row["bar"] != first["bar"]:
+                raise ValueError(
+                    f"{row['run_id']} ({row['inst_id']} {row['bar']}) 与 "
+                    f"{first['run_id']} ({first['inst_id']} {first['bar']}) "
+                    f"品种或周期不一致，无法对比"
+                )
+        return {
+            "inst_id": first["inst_id"],
+            "bar": first["bar"],
+            "runs": [
+                {
+                    **_run_payload(row),
+                    "metrics": _metrics_payload(
+                        self._store.get_backtest_metrics(row["run_id"]) or {}
+                    ),
+                }
+                for row in rows
+            ],
+        }
+
+    def equity(self, run_id: str, limit: int = 2000) -> list[dict[str, Any]]:
+        """读取降采样后的权益曲线（产物缺失时返回空列表）。"""
+        path = self._artifact_path(run_id, "equity")
+        if path is None:
+            return []
+        frame = _read_parquet(path)
+        if frame.empty:
+            return []
+        step = max(1, -(-len(frame) // limit))
+        sampled = frame.iloc[::step]
+        return [
+            {"ts": int(row.ts), "equity": str(row.equity), "drawdown": str(row.drawdown)}
+            for row in sampled.itertuples()
+        ]
+
+    def trades(self, run_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        path = self._artifact_path(run_id, "trades")
+        if path is None:
+            return {"total": 0, "trades": []}
+        frame = _read_parquet(path)
+        window = frame.iloc[offset : offset + limit]
+        return {
+            "total": int(len(frame)),
+            "trades": [dict(row) for row in window.to_dict("records")],
+        }
+
+    # ------------------------------------------------------------------
+    # 执行
+    # ------------------------------------------------------------------
+
+    def _ensure_worker(self) -> None:
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._consume())
+
+    async def _consume(self) -> None:
+        while True:
+            run_id, req = await self._queue.get()
+            try:
+                await self._execute(run_id, req)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - 单任务失败不能拖垮队列
+                log.exception(f"backtest run failed run_id={run_id}: {e}")
+                self._store.update_run_status(
+                    run_id, FAILED, finished_at=_now_ms(), error=str(e)
+                )
+            finally:
+                self._queue.task_done()
+
+    async def _execute(self, run_id: str, req: BacktestRequest) -> None:
+        row = self._store.get_backtest_run(run_id)
+        if row is None or row["status"] != PENDING:
+            return  # 排队期间被取消
+        self._store.update_run_status(run_id, RUNNING, started_at=_now_ms())
+
+        try:
+            payload, result = await self._service.build_async(
+                req, lambda: run_id in self._canceled
+            )
+        except BacktestRequestError as e:
+            self._store.update_run_status(
+                run_id, FAILED, finished_at=_now_ms(), error=str(e)
+            )
+            return
+
+        if run_id in self._canceled:
+            self._canceled.discard(run_id)
+            self._store.update_run_status(run_id, CANCELED, finished_at=_now_ms())
+            return
+
+        now = _now_ms()
+        try:
+            artifacts = await asyncio.to_thread(self._write_artifacts, run_id, result)
+        except OSError as e:
+            # 磁盘写不进去时宁可整单 failed，也不要落一份半截产物
+            self._store.update_run_status(
+                run_id, FAILED, finished_at=now, error=f"artifact write failed: {e}"
+            )
+            return
+
+        self._store.save_backtest_metrics(run_id, _metric_row(payload))
+        for kind, path in artifacts:
+            self._store.add_backtest_artifact(
+                run_id, kind, str(path), _size(path), now
+            )
+        self._store.update_run_status(run_id, DONE, finished_at=_now_ms())
+
+    def _write_artifacts(
+        self, run_id: str, result: BacktestResult
+    ) -> list[tuple[str, Path]]:
+        out_dir = Path(self._settings.backtest.artifacts_dir) / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        equity_path = out_dir / "equity.parquet"
+        pd.DataFrame(
+            [
+                {
+                    "ts": ts,
+                    "equity": str(equity),
+                    "drawdown": (
+                        str(result.drawdown_curve[i][1])
+                        if i < len(result.drawdown_curve)
+                        else "0"
+                    ),
+                }
+                for i, (ts, equity) in enumerate(result.equity_curve)
+            ]
+        ).to_parquet(equity_path, index=False)
+
+        trades_path = out_dir / "trades.parquet"
+        pd.DataFrame(
+            [
+                {
+                    "ts": fill.ts,
+                    "inst_id": fill.inst_id,
+                    "side": fill.side,
+                    "qty": str(fill.qty),
+                    "price": str(fill.price),
+                    "fee": str(fill.fee),
+                }
+                for fill in result.trades
+            ],
+            columns=["ts", "inst_id", "side", "qty", "price", "fee"],
+        ).to_parquet(trades_path, index=False)
+
+        report_path = out_dir / "report.html"
+        ReportGenerator().to_html(result, report_path)
+        return [
+            ("equity", equity_path),
+            ("trades", trades_path),
+            ("report", report_path),
+        ]
+
+    # ------------------------------------------------------------------
+    # 辅助
+    # ------------------------------------------------------------------
+
+    def _require(self, run_id: str) -> dict:
+        row = self._store.get_backtest_run(run_id)
+        if row is None:
+            raise RunNotFound(run_id)
+        return row
+
+    def _next_run_id(self, strategy: str, inst: str, now_ms: int) -> str:
+        date = datetime.fromtimestamp(now_ms / 1000, UTC).strftime("%Y%m%d")
+        prefix = f"{date}-{strategy}-{inst}-"
+        seq = self._store.count_runs_with_prefix(prefix) + 1
+        return f"{prefix}{seq:03d}"
+
+    def _artifact_path(self, run_id: str, kind: str) -> Path | None:
+        for item in self._store.list_backtest_artifacts(run_id):
+            if item["kind"] == kind:
+                path = Path(item["path"])
+                return path if path.is_file() else None
+        return None
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _range_of(req: BacktestRequest) -> tuple[int, int]:
+    return parse_range(req.start, req.end)
+
+
+def _jsonable(params: dict) -> dict:
+    return {
+        key: (str(value) if isinstance(value, Decimal) else value)
+        for key, value in params.items()
+    }
+
+
+def _request_from_row(row: dict) -> BacktestRequest:
+    params = json.loads(row["params"] or "{}")
+    return BacktestRequest(
+        strategy=row["strategy_id"],
+        start=_date(row["start_ts"]),
+        end=_date(row["end_ts"] - 1),
+        inst=row["inst_id"],
+        bar=row["bar"],
+        params=";".join(f"{name}={value}" for name, value in params.items()),
+        warmup_bars=row["warmup_bars"],
+    )
+
+
+def _date(ts: int) -> str:
+    return datetime.fromtimestamp(ts / 1000, UTC).strftime("%Y-%m-%d")
+
+
+def _metric_row(payload: dict) -> dict:
+    row: dict[str, Any] = {}
+    for key, value in (payload.get("metrics") or {}).items():
+        if value is None:
+            row[key] = None
+        elif key in _INT_METRIC_COLUMNS:
+            row[key] = int(value)
+        else:
+            row[key] = str(value)
+    return row
+
+
+def _metrics_payload(row: dict) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in row.items():
+        if key == "run_id":
+            continue
+        # None 保留在键位里（inf/NaN 置空），前端统一渲染为 "—"
+        if value is None:
+            out[key] = None
+        elif key in _INT_METRIC_COLUMNS:
+            out[key] = int(value)
+        else:
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                out[key] = value
+    return out
+
+
+def _run_payload(row: dict) -> dict[str, Any]:
+    return {
+        "run_id": row["run_id"],
+        "strategy": row["strategy_id"],
+        "inst": row["inst_id"],
+        "bar": row["bar"],
+        "start": _date(row["start_ts"]),
+        "end": _date(row["end_ts"] - 1),
+        "params": json.loads(row["params"] or "{}"),
+        "warmup_bars": row["warmup_bars"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "error": row["error"],
+    }
+
+
+def _size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _read_parquet(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(path)
+
+
+__all__ = [
+    "CANCELED",
+    "DONE",
+    "FAILED",
+    "PENDING",
+    "RUNNING",
+    "TERMINAL_STATUSES",
+    "RunNotFound",
+    "TaskRunner",
+]

@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from quant.backtest.engine import Backtest
+from quant.backtest.engine import Backtest, BacktestResult
 from quant.backtest.optimizer import GridOptimizer
 from quant.backtest.runner import (
     BacktestSetupError,
@@ -32,7 +34,9 @@ from quant.backtest.runner import (
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
 from quant.models.bar import Bar
-from quant.strategies.loader import StrategyConfigError, load_strategy_class
+from quant.state.sqlite_store import SQLiteStore
+from quant.strategies.loader import StrategyConfigError
+from quant.strategies.params import ParamError, param_spec_payload, resolve_strategy
 
 log = get_logger("dashboard.backtest")
 
@@ -82,8 +86,9 @@ class OptimizeRequest(BacktestRequest):
 class BacktestService:
     """看板回测服务：策略清单 + 单次回测 + 网格寻优。"""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, store: SQLiteStore | None = None) -> None:
         self._settings = settings
+        self._store = store
         self._config_dir = Path(settings.engine.config_dir)
         self._lock = asyncio.Semaphore(1)
 
@@ -98,9 +103,18 @@ class BacktestService:
     async def run(self, req: BacktestRequest) -> dict[str, object]:
         async with self._lock:
             started = time.monotonic()
-            payload = await asyncio.to_thread(self._run_sync, req)
+            payload, _result = await asyncio.to_thread(self.build, req)
         payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return payload
+
+    async def build_async(
+        self,
+        req: BacktestRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], BacktestResult]:
+        """任务队列用的入口：与同步接口共用同一把信号量，避免打满 CPU。"""
+        async with self._lock:
+            return await asyncio.to_thread(self.build, req, should_stop)
 
     async def optimize(self, req: OptimizeRequest) -> dict[str, object]:
         async with self._lock:
@@ -117,18 +131,45 @@ class BacktestService:
         out: list[dict[str, object]] = []
         for path in sorted(self._config_dir.glob("*.toml")):
             try:
-                _cls, params = load_strategy_class(path.stem, self._config_dir)
-            except StrategyConfigError as e:
+                strategy_cls, params, sources = resolve_strategy(
+                    path.stem,
+                    self._config_dir,
+                    self._store,
+                    resolve_from_db=self._settings.params.resolve_from_db,
+                )
+            except (StrategyConfigError, ParamError) as e:
                 log.warning(f"skip strategy config {path}: {e}")
                 continue
-            out.append({"id": path.stem, "params": params})
+            spec = param_spec_payload(strategy_cls)
+            out.append(
+                {
+                    "id": path.stem,
+                    "params": _jsonable_params(params),
+                    "param_spec": spec,
+                    "sources": sources,
+                    # 未在 PARAM_SPEC 声明的参数（sr_* / commission_rate）只读
+                    "editable": [item["name"] for item in spec],
+                }
+            )
         return out
 
-    def _run_sync(self, req: BacktestRequest) -> dict[str, object]:
+    def check(self, req: BacktestRequest) -> dict:
+        """提交任务前的廉价校验（配置存在、日期合法），返回合并后的参数。"""
+        _cls, params, _start_ts, _end_ts = self._resolve(req)
+        return params
+
+    def build(
+        self,
+        req: BacktestRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], BacktestResult]:
+        """同步跑完一次回测，返回 (页面 JSON, 原始结果)。
+
+        原始结果供任务落库时写产物（equity/trades/report），页面 JSON 只是它的
+        裁剪版；两者必须来自同一次计算，否则「看到的」和「存下的」会不一致。
+        """
         inst = req.inst or self._settings.engine.inst
-        warmup, bars, strategy_cls, params = self._prepare(
-            req, inst
-        )
+        warmup, bars, strategy_cls, params = self._prepare(req, inst)
         try:
             result = Backtest(
                 strategy_cls(),
@@ -137,19 +178,19 @@ class BacktestService:
                 window_size=self._settings.backtest.window_size,
                 params=params,
                 warmup_bars=warmup,
-            ).run(bars)
+            ).run(bars, should_stop=should_stop)
         except ValueError as e:
             raise BacktestRequestError(str(e)) from e
 
         trades = result.trades[-MAX_TRADES:]
-        return {
+        payload: dict[str, object] = {
             "kind": "backtest",
             "strategy": req.strategy,
             "inst": inst,
             "bar": req.bar,
             "start": req.start,
             "end": req.end,
-            "params": params,
+            "params": _jsonable_params(params),
             "bar_count": len(bars),
             "warmup_count": len(warmup),
             "trade_count": len(result.trades),
@@ -169,6 +210,7 @@ class BacktestService:
                 for fill in trades
             ],
         }
+        return payload, result
 
     def _optimize_sync(self, req: OptimizeRequest) -> dict[str, object]:
         if req.metric not in METRIC_KEYS:
@@ -232,17 +274,28 @@ class BacktestService:
             ],
         }
 
+    def _resolve(self, req: BacktestRequest) -> tuple[type, dict, int, int]:
+        """解析策略类、合并参数与回测区间；不加载 K 线。"""
+        try:
+            # 先校验策略配置（廉价），避免数据不足的错误盖住配置写错
+            strategy_cls, params, _sources = resolve_strategy(
+                req.strategy,
+                self._config_dir,
+                self._store,
+                overrides=parse_params(req.params),
+                resolve_from_db=self._settings.params.resolve_from_db,
+            )
+            start_ts, end_ts = parse_range(req.start, req.end)
+        except (BacktestSetupError, StrategyConfigError, ParamError) as e:
+            raise BacktestRequestError(str(e)) from e
+        return strategy_cls, params, start_ts, end_ts
+
     def _prepare(
         self, req: BacktestRequest, inst: str
     ) -> tuple[list[Bar], list[Bar], type, dict]:
-        """解析区间、加载预热与回测段、读取策略类与参数。"""
+        """解析区间、加载预热与回测段、读取策略类与参数（toml→DB→请求）。"""
+        strategy_cls, params, start_ts, end_ts = self._resolve(req)
         try:
-            # 先校验策略配置（廉价），避免数据不足的错误盖住配置写错
-            strategy_cls, config_params = load_strategy_class(
-                req.strategy, self._config_dir
-            )
-            params = {**config_params, **parse_params(req.params)}
-            start_ts, end_ts = parse_range(req.start, req.end)
             warmup, bars = load_bars(
                 self._settings,
                 inst,
@@ -251,9 +304,17 @@ class BacktestService:
                 end_ts,
                 req.warmup_bars,
             )
-        except (BacktestSetupError, StrategyConfigError) as e:
+        except BacktestSetupError as e:
             raise BacktestRequestError(str(e)) from e
         return warmup, bars, strategy_cls, params
+
+
+def _jsonable_params(params: dict) -> dict:
+    """Decimal 不是合法 JSON，转字符串让页面按原样展示。"""
+    return {
+        key: (str(value) if isinstance(value, Decimal) else value)
+        for key, value in params.items()
+    }
 
 
 def _clean_metrics(metrics: dict[str, float]) -> dict[str, float | None]:

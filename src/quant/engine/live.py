@@ -37,7 +37,8 @@ from quant.queue.signal_queue import Deduper, SignalQueue
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 from quant.storage.validator import DataValidator
-from quant.strategies.loader import StrategyConfigError, load_strategy
+from quant.strategies.loader import StrategyConfigError
+from quant.strategies.params import ParamError, resolve_strategy
 
 log = get_logger("engine.live")
 
@@ -178,11 +179,17 @@ class LiveSignalEngine:
             return EngineTick("skipped", newest.ts, reason="pending orders")
 
         try:
-            strategy, params = await asyncio.to_thread(
-                load_strategy, self._cfg.strategy, self._cfg.config_dir
+            # 与回测共用同一真相源：toml → DB 覆盖 → 显式传参
+            strategy_cls, params, _sources = await asyncio.to_thread(
+                resolve_strategy,
+                self._cfg.strategy,
+                self._cfg.config_dir,
+                self._store,
+                resolve_from_db=self._settings.params.resolve_from_db,
             )
-        except StrategyConfigError as e:
+        except (StrategyConfigError, ParamError) as e:
             return EngineTick("error", newest.ts, reason=str(e))
+        strategy = strategy_cls()
 
         position = await asyncio.to_thread(self._store.get_position, self._cfg.inst)
         cash = await self._available_cash()

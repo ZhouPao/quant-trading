@@ -152,6 +152,37 @@ class TestWaitingForData:
         assert tick.bar_ts == LAST_TS
 
 
+class TestParamSource:
+    """引擎与回测共用 resolve_strategy：DB 覆盖必须对实盘生效（MS4-C §3.2）。"""
+
+    async def _rerun(self, settings, store, redis):
+        # 清掉水位，否则同一根 bar 会被判 duplicate
+        await redis.delete(f"{settings.engine.last_bar_key}:sma_cross:BTC-USDT")
+        return await _engine(settings, store, redis).run_once(now_ms=NOW)
+
+    async def test_db_override_reaches_engine(self, env) -> None:
+        settings, store, redis = env
+        assert (await self._rerun(settings, store, redis)).status == "signal"
+
+        # slow_len=200 后窗口不足 → 本根不产生信号
+        store.set_strategy_param("sma_cross", "slow_len", "200", NOW)
+
+        assert (await self._rerun(settings, store, redis)).status == "no_signal"
+
+    async def test_rollback_switch_ignores_db(self, env) -> None:
+        settings, store, redis = env
+        store.set_strategy_param("sma_cross", "slow_len", "200", NOW)
+        settings.params.resolve_from_db = False
+
+        assert (await self._rerun(settings, store, redis)).status == "signal"
+
+    async def test_invalid_db_override_does_not_break_engine(self, env) -> None:
+        settings, store, redis = env
+        store.set_strategy_param("sma_cross", "slow_len", "not-a-number", NOW)
+
+        assert (await self._rerun(settings, store, redis)).status == "signal"
+
+
 class TestSignal:
     async def test_signal_enqueued(self, env) -> None:
         settings, store, redis = env

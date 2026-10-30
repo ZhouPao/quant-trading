@@ -262,6 +262,39 @@ class TestUnfilled:
             Matcher().match(signal, bars[1])
 
 
+class TestShouldStop:
+    def test_stops_before_first_bar(self) -> None:
+        result = Backtest(ScriptedStrategy()).run(
+            _bars(4), should_stop=lambda: True
+        )
+
+        assert result.equity_curve == []
+        assert result.trades == []
+
+    def test_stops_midway(self) -> None:
+        """每根 bar 前检查一次；已回放的部分保留（调用方自行决定是否采用）。"""
+        result = Backtest(ScriptedStrategy()).run(_bars(4), should_stop=_StopAfter(2))
+
+        assert len(result.equity_curve) == 2
+
+    def test_none_means_full_run(self) -> None:
+        result = Backtest(ScriptedStrategy()).run(_bars(3), should_stop=None)
+
+        assert len(result.equity_curve) == 3
+
+
+class _StopAfter:
+    """第 n 次调用返回 True（前 n-1 次放行）。"""
+
+    def __init__(self, n: int) -> None:
+        self._left = n
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return self.calls > self._left
+
+
 class TestEquityCurve:
     def test_length_matches_bars(self) -> None:
         result = Backtest(ScriptedStrategy()).run(_bars(4))

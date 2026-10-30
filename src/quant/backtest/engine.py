@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -75,11 +76,18 @@ class Backtest:
         self.params = dict(params) if params else {}
         self.warmup_bars = list(warmup_bars) if warmup_bars else []
 
-    def run(self, bars: list[Bar]) -> BacktestResult:
+    def run(
+        self,
+        bars: list[Bar],
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> BacktestResult:
         """运行回测。
 
         Args:
             bars: 历史 K线，必须按 ts 严格升序且同品种
+            should_stop: 每根 bar 前调用一次，返回 True 即提前结束（取消任务）。
+                提前结束时结果只覆盖已回放的部分，调用方应丢弃。
 
         Returns:
             BacktestResult
@@ -111,6 +119,8 @@ class Backtest:
         pending: Signal | None = None
 
         for bar in bars:
+            if should_stop is not None and should_stop():
+                break
             # 上一根产生的信号在本根开盘时执行（避免未来数据）
             if pending is not None:
                 try:

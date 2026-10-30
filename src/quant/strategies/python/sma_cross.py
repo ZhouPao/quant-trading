@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from quant.backtest.context import Context
 from quant.backtest.signal import Signal
-from quant.backtest.strategy import Strategy
+from quant.backtest.strategy import ParamSpec, Strategy
 from quant.models.bar import Bar
 from quant.strategies.python.sr_exit import SrExitMixin
 
@@ -29,6 +29,27 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
         commission_rate: 手续费率，用于下单量预留，默认 0.001
         sr_*: 支撑压力止盈止损参数，见 SrExitMixin，默认关闭
     """
+
+    # 键名必须与 toml [params] 及 on_init 里 ctx.params.get(...) 逐字一致
+    PARAM_SPEC = {
+        "fast_len": ParamSpec(
+            "int", 10, min=2, max=200, description="快线周期", unit="根"
+        ),
+        "slow_len": ParamSpec(
+            "int", 50, min=3, max=500, description="慢线周期", unit="根"
+        ),
+        "ema_filter": ParamSpec("bool", False, description="启用 EMA 趋势过滤"),
+        "ema_len": ParamSpec(
+            "int", 200, min=20, max=500, description="EMA 周期", unit="根"
+        ),
+        "ema_band_atr": ParamSpec(
+            "float", 0.0, min=0.0, max=5.0,
+            description="趋势门槛在 EMA 之上再抬高的 ATR 倍数",
+        ),
+        "atr_len": ParamSpec(
+            "int", 14, min=2, max=100, description="ATR 周期", unit="根"
+        ),
+    }
 
     @property
     def strategy_id(self) -> str:

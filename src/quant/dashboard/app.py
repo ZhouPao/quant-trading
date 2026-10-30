@@ -17,8 +17,15 @@
 - GET /api/equity    权益时序（默认近 24 小时）
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
 - GET /api/candles   K 线面板（本地 parquet + 成交 + 持仓均价）
-- GET /api/strategies 可用策略清单（config/strategies/*.toml）
-- POST /api/backtest  单次回测（只返回结果，不落盘）
+- GET /api/strategies 可用策略清单（含 param_spec / 生效来源 / 可编辑字段）
+- POST /api/backtest  提交回测任务，立即返回 run_id（?sync=1 走旧同步路径）
+- GET /api/backtest/runs 回测历史（筛选 + 分页）
+- GET /api/backtest/compare 多组对比（同品种同周期）
+- GET /api/backtest/{run_id} 状态 + 指标 + 产物清单
+- GET /api/backtest/{run_id}/equity 降采样权益曲线
+- GET /api/backtest/{run_id}/trades 成交明细（分页）
+- POST /api/backtest/{run_id}/cancel 取消任务（写操作）
+- POST /api/backtest/{run_id}/rerun  复制参数重跑（写操作）
 - POST /api/optimize  参数网格寻优（只返回排名，不落盘）
 - POST /api/kill-switch 切换紧急停止标志（写操作）
 - POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
@@ -30,6 +37,7 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
@@ -47,6 +55,7 @@ from quant.dashboard.backtest import (
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService
+from quant.dashboard.tasks import RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
 from quant.webhook.auth import verify_token
@@ -127,13 +136,25 @@ def create_app(
     web_dir: Path | None = None,
     manual: ManualTrader | None = None,
 ) -> FastAPI:
+    backtests = BacktestService(service.settings, service.store)
+    tasks = TaskRunner(service.store, service.settings, backtests)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 上次进程留下的 running 任务不会自己动，启动时统一标 failed
+        await tasks.recover()
+        try:
+            yield
+        finally:
+            await tasks.close()
+
     app = FastAPI(
         title="quant-trading dashboard",
         description="只读运维看板（含紧急停止与手动减仓）",
         docs_url=None,
         redoc_url=None,
+        lifespan=lifespan,
     )
-    backtests = BacktestService(service.settings)
 
     def _trader() -> ManualTrader:
         if manual is None:
@@ -258,11 +279,106 @@ def create_app(
         return JSONResponse({"strategies": await backtests.strategies()})
 
     @app.post("/api/backtest")
-    async def backtest(req: BacktestRequest) -> JSONResponse:
+    async def backtest(
+        req: BacktestRequest, sync: bool = Query(False)
+    ) -> JSONResponse:
+        if sync:
+            # 兼容旧前端的一版路径；前端切换后可删
+            try:
+                return JSONResponse(await backtests.run(req))
+            except BacktestRequestError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
         try:
-            return JSONResponse(await backtests.run(req))
+            run_id = await tasks.submit(req)
         except BacktestRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse({"run_id": run_id, "status": "pending"})
+
+    @app.get("/api/backtest/runs")
+    async def backtest_runs(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+        strategy: str | None = Query(None),
+        inst: str | None = Query(None),
+        bar: str | None = Query(None),
+        status: str | None = Query(None),
+        kind: str | None = Query(None),
+        since: int | None = Query(None),
+        until: int | None = Query(None),
+    ) -> JSONResponse:
+        return JSONResponse(
+            tasks.list_runs(
+                limit,
+                offset,
+                strategy_id=strategy,
+                inst_id=inst,
+                bar=bar,
+                status=status,
+                kind=kind,
+                since_ms=since,
+                until_ms=until,
+            )
+        )
+
+    @app.get("/api/backtest/compare")
+    async def backtest_compare(
+        ids: str = Query(..., description="逗号分隔的 run_id"),
+    ) -> JSONResponse:
+        run_ids = [item.strip() for item in ids.split(",") if item.strip()]
+        try:
+            return JSONResponse(tasks.compare(run_ids))
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.get("/api/backtest/{run_id}")
+    async def backtest_detail(run_id: str) -> JSONResponse:
+        try:
+            return JSONResponse(tasks.get(run_id))
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+
+    @app.get("/api/backtest/{run_id}/equity")
+    async def backtest_equity(
+        run_id: str, limit: int = Query(2000, ge=20, le=10000)
+    ) -> JSONResponse:
+        try:
+            tasks.get(run_id)
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        return JSONResponse({"points": tasks.equity(run_id, limit)})
+
+    @app.get("/api/backtest/{run_id}/trades")
+    async def backtest_trades(
+        run_id: str,
+        limit: int = Query(100, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+    ) -> JSONResponse:
+        try:
+            tasks.get(run_id)
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        return JSONResponse(tasks.trades(run_id, limit, offset))
+
+    @app.post("/api/backtest/{run_id}/cancel")
+    async def backtest_cancel(request: Request, run_id: str) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse({"run_id": run_id, "status": await tasks.cancel(run_id)})
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+
+    @app.post("/api/backtest/{run_id}/rerun")
+    async def backtest_rerun(request: Request, run_id: str) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            new_id = await tasks.rerun(run_id)
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse({"run_id": new_id, "status": "pending"})
 
     @app.post("/api/optimize")
     async def optimize(req: OptimizeRequest) -> JSONResponse:
@@ -356,7 +472,9 @@ def create_app(
                     "/api/candles",
                     "/api/strategies",
                     "/api/backtest",
+                    "/api/backtest/runs",
                     "/api/optimize",
+                    "/api/processes",
                 ],
             }
 

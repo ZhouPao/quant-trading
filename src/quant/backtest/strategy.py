@@ -6,8 +6,9 @@ Python 副本必须与 Pine 版本逻辑严格对齐（PRD F2.1）。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from quant.backtest.context import Context
 from quant.backtest.signal import Signal
@@ -15,6 +16,26 @@ from quant.models.bar import Bar
 
 if TYPE_CHECKING:
     from quant.backtest.order import Fill
+
+
+@dataclass(frozen=True, slots=True)
+class ParamSpec:
+    """单个策略参数的元信息（MS4-C §3.1）。
+
+    `PARAM_SPEC` 只声明「允许在线编辑」的参数：未列入的参数（如
+    `commission_rate`、`sr_*`）仍从 toml 读取，但页面不可编辑。
+
+    交叉校验（如 `fast_len < slow_len`）不在这里表达——把它塞进声明式
+    spec 只会变成半个表达式引擎，交给策略自己的 `on_init` 报错。
+    """
+
+    type: str  # int / float / decimal / bool / str / choice
+    default: Any
+    min: float | Decimal | None = None
+    max: float | Decimal | None = None
+    choices: tuple[str, ...] | None = None
+    description: str = ""
+    unit: str = ""  # 根 / % / USDT
 
 
 class Strategy(ABC):
@@ -33,6 +54,9 @@ class Strategy(ABC):
 
     子类必须实现 strategy_id / on_init / on_bar；其余为可选钩子。
     """
+
+    #: 允许在线编辑的参数元信息；空表示该策略只读（仍可用 toml 值）。
+    PARAM_SPEC: ClassVar[dict[str, ParamSpec]] = {}
 
     @property
     @abstractmethod
@@ -108,4 +132,4 @@ class Strategy(ABC):
         return None
 
 
-__all__ = ["Strategy"]
+__all__ = ["ParamSpec", "Strategy"]

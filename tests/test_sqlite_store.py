@@ -650,3 +650,148 @@ class TestAlertSilences:
         assert store.list_active_silences(3000) == []
         # 重复解除返回 False
         assert store.revoke_silence("s1", 3000) is False
+
+
+class TestStrategyParams:
+    def test_set_and_get(self, store) -> None:
+        assert store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+
+        rows = store.get_strategy_params("sma_cross")
+
+        assert rows == [{"param": "fast_len", "value": "8", "updated_at": 1000}]
+
+    def test_same_value_is_noop(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+
+        assert store.set_strategy_param("sma_cross", "fast_len", "8", 2000) is False
+        assert store.list_param_changes("sma_cross")[1] == 1
+
+    def test_change_history_records_old_and_new(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000, reason="调参")
+        store.set_strategy_param(
+            "sma_cross", "fast_len", "12", 2000,
+            reason="再调", changed_by="alice", git_commit="abc123",
+        )
+
+        rows, total = store.list_param_changes("sma_cross")
+
+        assert total == 2
+        assert rows[0]["new_value"] == "12"
+        assert rows[0]["old_value"] == "8"
+        assert rows[0]["changed_by"] == "alice"
+        assert rows[0]["git_commit"] == "abc123"
+        assert rows[1]["old_value"] is None
+
+    def test_strategy_isolation(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("rsi", "fast_len", "9", 1000)
+
+        assert len(store.get_strategy_params("sma_cross")) == 1
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
+
+
+class TestBacktestRuns:
+    def _create(self, store, run_id: str = "r1", **kwargs) -> None:
+        params = {
+            "strategy_id": "sma_cross",
+            "inst_id": "BTC-USDT",
+            "bar": "1H",
+            "start_ts": 1000,
+            "end_ts": 2000,
+            "params": '{"fast_len": 5}',
+            "kind": "backtest",
+            "status": "pending",
+            "created_at": 3000,
+        }
+        params.update(kwargs)
+        store.create_backtest_run(run_id, **params)
+
+    def test_create_and_get(self, store) -> None:
+        self._create(store)
+
+        row = store.get_backtest_run("r1")
+
+        assert row["status"] == "pending"
+        assert row["warmup_bars"] == 200
+        assert store.get_backtest_run("nope") is None
+
+    def test_update_status(self, store) -> None:
+        self._create(store)
+
+        assert store.update_run_status(
+            "r1", "running", started_at=4000
+        ) is True
+        row = store.get_backtest_run("r1")
+        assert row["status"] == "running"
+        assert row["started_at"] == 4000
+        assert store.update_run_status("nope", "done") is False
+
+    def test_fail_interrupted_only_touches_unfinished(self, store) -> None:
+        self._create(store, "a", status="running")
+        self._create(store, "b", status="pending")
+        self._create(store, "c", status="done")
+
+        assert store.fail_interrupted_runs(9000) == 2
+
+        assert store.get_backtest_run("a")["error"] == "interrupted"
+        assert store.get_backtest_run("b")["finished_at"] == 9000
+        assert store.get_backtest_run("c")["error"] is None
+
+    def test_list_filters_share_where(self, store) -> None:
+        self._create(store, "a", strategy_id="sma_cross", created_at=1000)
+        self._create(store, "b", strategy_id="rsi", bar="4H", created_at=2000)
+        store.update_run_status("b", "done")
+
+        rows, total = store.list_backtest_runs(
+            10, strategy_id="rsi", status="done"
+        )
+
+        assert total == 1
+        assert rows[0]["run_id"] == "b"
+
+    def test_list_pagination_and_order(self, store) -> None:
+        for i, run_id in enumerate(("a", "b", "c")):
+            self._create(store, run_id, created_at=1000 + i)
+
+        rows, total = store.list_backtest_runs(2, offset=1)
+
+        assert total == 3
+        assert [r["run_id"] for r in rows] == ["b", "a"]
+
+    def test_count_runs_with_prefix(self, store) -> None:
+        self._create(store, "20261031-sma_cross-BTC-USDT-001")
+        self._create(store, "20261031-sma_cross-BTC-USDT-002")
+        self._create(store, "20261030-sma_cross-BTC-USDT-001")
+
+        assert store.count_runs_with_prefix("20261031-sma_cross-BTC-USDT-") == 2
+
+    def test_metrics_roundtrip(self, store) -> None:
+        self._create(store)
+
+        store.save_backtest_metrics(
+            "r1", {"sharpe": "1.5", "trade_count": 4, "unknown": "x"}
+        )
+        store.save_backtest_metrics("r1", {"sharpe": "2.0"})
+
+        row = store.get_backtest_metrics("r1")
+        assert row["sharpe"] == "2.0"
+        assert row["trade_count"] == 4
+        assert "unknown" not in row
+
+    def test_metrics_empty_is_noop(self, store) -> None:
+        self._create(store)
+
+        store.save_backtest_metrics("r1", {"unknown": 1})
+
+        assert store.get_backtest_metrics("r1") is None
+
+    def test_artifacts(self, store) -> None:
+        self._create(store)
+
+        store.add_backtest_artifact("r1", "equity", "/tmp/e.parquet", 10, 5000)
+        store.add_backtest_artifact("r1", "trades", "/tmp/t.parquet", 20, 5000)
+
+        rows = store.list_backtest_artifacts("r1")
+
+        assert [r["kind"] for r in rows] == ["equity", "trades"]
+        assert rows[0]["size"] == 10

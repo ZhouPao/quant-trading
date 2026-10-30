@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from quant.backtest.context import Context
 from quant.backtest.signal import Signal
-from quant.backtest.strategy import Strategy
+from quant.backtest.strategy import ParamSpec, Strategy
 from quant.models.bar import Bar
 from quant.strategies.python.sr_exit import SrExitMixin
 
@@ -25,6 +25,18 @@ class RsiStrategy(SrExitMixin, Strategy):
         overbought: 超买阈值，默认 70
         commission_rate: 手续费率，用于下单量预留，默认 0.001
     """
+
+    PARAM_SPEC = {
+        "rsi_period": ParamSpec(
+            "int", 14, min=2, max=200, description="RSI 周期", unit="根"
+        ),
+        "oversold": ParamSpec(
+            "decimal", 30, min=0, max=100, description="超卖阈值"
+        ),
+        "overbought": ParamSpec(
+            "decimal", 70, min=0, max=100, description="超买阈值"
+        ),
+    }
 
     @property
     def strategy_id(self) -> str:

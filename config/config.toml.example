@@ -43,6 +43,11 @@ initial_cash = "10000"                    # 回测初始资金（USDT）
 commission_rate = "0.001"                 # 双边手续费率
 slippage_bps = "5"                        # 滑点（基点）
 window_size = 200                         # 策略可见历史 bar 数
+task_workers = 1                          # 回测任务消费者数（CPU 密集，默认串行）
+artifacts_dir = "./data/backtests"        # 回测产物目录（equity/trades/report）
+
+[params]
+resolve_from_db = true                    # 策略参数是否合并在线覆盖；false=只看 toml（回滚开关）
 
 [state]
 db_path = "./data/state/quant.db"         # SQLite 状态库

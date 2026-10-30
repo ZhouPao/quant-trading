@@ -171,6 +171,83 @@ _MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_overrides_effective
         ON risk_overrides(strategy_id, param, revoked_at);
     """,
+    # v4 -> v5：策略参数两层合并与回测结果落库（MS4-C §3.2 / §10）
+    #
+    # 详设 §10 把本切片标为 v6（MS4-B 预留了 v5），但 MS4-B 实际只用到 v4，
+    # 迁移版本又必须连续，所以这里按真实序列用 v5。
+    # strategy_bindings（§4.1）与 optimize_jobs（§6）留到各自切片再加迁移。
+    """
+    CREATE TABLE IF NOT EXISTS strategy_params (
+        strategy_id TEXT NOT NULL,
+        param       TEXT NOT NULL,
+        value       TEXT NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (strategy_id, param)
+    );
+
+    CREATE TABLE IF NOT EXISTS strategy_param_changes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id TEXT NOT NULL,
+        param       TEXT NOT NULL,
+        old_value   TEXT,
+        new_value   TEXT NOT NULL,
+        reason      TEXT,
+        changed_by  TEXT NOT NULL,
+        changed_at  INTEGER NOT NULL,
+        git_commit  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_param_changes
+        ON strategy_param_changes(strategy_id, changed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS backtest_runs (
+        run_id      TEXT PRIMARY KEY,
+        strategy_id TEXT NOT NULL,
+        inst_id     TEXT NOT NULL,
+        bar         TEXT NOT NULL,
+        start_ts    INTEGER NOT NULL,
+        end_ts      INTEGER NOT NULL,
+        warmup_bars INTEGER NOT NULL DEFAULT 200,
+        params      TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        started_at  INTEGER,
+        finished_at INTEGER,
+        error       TEXT,
+        git_commit  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_runs_created
+        ON backtest_runs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_runs_filter
+        ON backtest_runs(strategy_id, inst_id, bar, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_runs_status
+        ON backtest_runs(status, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS backtest_metrics (
+        run_id TEXT PRIMARY KEY REFERENCES backtest_runs(run_id),
+        total_return TEXT, annual_return TEXT, sharpe TEXT,
+        max_drawdown TEXT, win_rate TEXT, profit_factor TEXT,
+        trade_count INTEGER, avg_holding_bars TEXT,
+        calmar TEXT, sortino TEXT,
+        max_consecutive_losses INTEGER,
+        max_consecutive_loss_amount TEXT,
+        exposure_ratio TEXT,
+        monthly_returns TEXT,
+        compounded_return TEXT, profitable_segments INTEGER,
+        avg_oos_sharpe TEXT, total_oos_trades INTEGER, modal_params TEXT,
+        pine_total_return TEXT, pine_sharpe TEXT,
+        pine_max_drawdown TEXT, pine_deviation TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS backtest_artifacts (
+        run_id     TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        path       TEXT NOT NULL,
+        size       INTEGER,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, kind)
+    );
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -840,6 +917,261 @@ class SQLiteStore:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # strategy params（MS4-C §3.2 / §10.1 / §10.2）
+    # ------------------------------------------------------------------
+
+    def get_strategy_params(self, strategy_id: str) -> list[dict]:
+        """该策略的在线覆盖值，按参数名排序。"""
+        rows = self._query_all(
+            """
+            SELECT param, value, updated_at
+              FROM strategy_params
+             WHERE strategy_id = ?
+             ORDER BY param
+            """,
+            (strategy_id,),
+        )
+        return [dict(r) for r in rows]
+
+    def set_strategy_param(
+        self,
+        strategy_id: str,
+        param: str,
+        value: str,
+        now_ms: int,
+        *,
+        reason: str = "",
+        changed_by: str = "owner",
+        git_commit: str | None = None,
+    ) -> bool:
+        """写入覆盖值并记一条变更历史。
+
+        返回 False 表示新旧值相同（不写历史，避免审计表被无意义行淹没）。
+        """
+        row = self._query_one(
+            "SELECT value FROM strategy_params WHERE strategy_id = ? AND param = ?",
+            (strategy_id, param),
+        )
+        old_value = row["value"] if row else None
+        if old_value == value:
+            return False
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO strategy_params (strategy_id, param, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(strategy_id, param) DO UPDATE SET
+                    value=excluded.value, updated_at=excluded.updated_at
+                """,
+                (strategy_id, param, value, now_ms),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO strategy_param_changes
+                    (strategy_id, param, old_value, new_value, reason,
+                     changed_by, changed_at, git_commit)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    strategy_id, param, old_value, value, reason,
+                    changed_by, now_ms, git_commit,
+                ),
+            )
+            self._conn.commit()
+        return True
+
+    def list_param_changes(
+        self, strategy_id: str, limit: int = 50, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """变更历史（新→旧）与总数。"""
+        total = self._query_one(
+            "SELECT COUNT(*) AS n FROM strategy_param_changes WHERE strategy_id = ?",
+            (strategy_id,),
+        )
+        rows = self._query_all(
+            """
+            SELECT id, strategy_id, param, old_value, new_value, reason,
+                   changed_by, changed_at, git_commit
+              FROM strategy_param_changes
+             WHERE strategy_id = ?
+             ORDER BY changed_at DESC, id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (strategy_id, limit, offset),
+        )
+        return [dict(r) for r in rows], int(total["n"]) if total else 0
+
+    # ------------------------------------------------------------------
+    # backtest runs（MS4-C §10.4）
+    # ------------------------------------------------------------------
+
+    def create_backtest_run(
+        self,
+        run_id: str,
+        *,
+        strategy_id: str,
+        inst_id: str,
+        bar: str,
+        start_ts: int,
+        end_ts: int,
+        params: str,
+        kind: str,
+        status: str,
+        created_at: int,
+        warmup_bars: int = 200,
+        git_commit: str | None = None,
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO backtest_runs
+                (run_id, strategy_id, inst_id, bar, start_ts, end_ts,
+                 warmup_bars, params, kind, status, created_at, git_commit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, strategy_id, inst_id, bar, start_ts, end_ts,
+                warmup_bars, params, kind, status, created_at, git_commit,
+            ),
+        )
+
+    def update_run_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        started_at: int | None = None,
+        finished_at: int | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """更新任务状态；不存在返回 False。"""
+        return (
+            self._execute(
+                """
+                UPDATE backtest_runs
+                   SET status = ?,
+                       started_at = COALESCE(?, started_at),
+                       finished_at = COALESCE(?, finished_at),
+                       error = COALESCE(?, error)
+                 WHERE run_id = ?
+                """,
+                (status, started_at, finished_at, error, run_id),
+            )
+            > 0
+        )
+
+    def get_backtest_run(self, run_id: str) -> dict | None:
+        row = self._query_one(
+            "SELECT * FROM backtest_runs WHERE run_id = ?", (run_id,)
+        )
+        return dict(row) if row else None
+
+    def fail_interrupted_runs(self, now_ms: int) -> int:
+        """把上次进程留下的 running 任务标为 failed。
+
+        不自动重跑：重跑会生成第二份产物，静默覆盖用户对上一次结果的预期。
+        """
+        return self._execute(
+            """
+            UPDATE backtest_runs
+               SET status = 'failed', finished_at = ?, error = 'interrupted'
+             WHERE status IN ('pending', 'running')
+            """,
+            (now_ms,),
+        )
+
+    def count_runs_with_prefix(self, prefix: str) -> int:
+        """统计 run_id 前缀命中数，用于生成当天的递增序号。"""
+        row = self._query_one(
+            "SELECT COUNT(*) AS n FROM backtest_runs WHERE run_id LIKE ?",
+            (f"{prefix}%",),
+        )
+        return int(row["n"]) if row else 0
+
+    def list_backtest_runs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        strategy_id: str | None = None,
+        inst_id: str | None = None,
+        bar: str | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> tuple[list[dict], int]:
+        where, params = _run_filters(
+            strategy_id=strategy_id,
+            inst_id=inst_id,
+            bar=bar,
+            status=status,
+            kind=kind,
+            since_ms=since_ms,
+            until_ms=until_ms,
+        )
+        total = self._query_one(
+            f"SELECT COUNT(*) AS n FROM backtest_runs {where}", params
+        )
+        rows = self._query_all(
+            f"""
+            SELECT * FROM backtest_runs {where}
+             ORDER BY created_at DESC, run_id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows], int(total["n"]) if total else 0
+
+    def save_backtest_metrics(self, run_id: str, metrics: dict) -> None:
+        """写入指标行；只认表里存在的列，多余键忽略（扩展指标由各切片填）。"""
+        columns = {k: v for k, v in metrics.items() if k in _METRIC_COLUMNS}
+        if not columns:
+            return
+        names = ", ".join(columns)
+        marks = ", ".join("?" for _ in columns)
+        self._execute(
+            f"""
+            INSERT INTO backtest_metrics (run_id, {names})
+            VALUES (?, {marks})
+            ON CONFLICT(run_id) DO UPDATE SET
+                {", ".join(f"{k}=excluded.{k}" for k in columns)}
+            """,
+            (run_id, *columns.values()),
+        )
+
+    def get_backtest_metrics(self, run_id: str) -> dict | None:
+        row = self._query_one(
+            "SELECT * FROM backtest_metrics WHERE run_id = ?", (run_id,)
+        )
+        return dict(row) if row else None
+
+    def add_backtest_artifact(
+        self, run_id: str, kind: str, path: str, size: int | None, now_ms: int
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO backtest_artifacts (run_id, kind, path, size, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, kind) DO UPDATE SET
+                path=excluded.path, size=excluded.size,
+                created_at=excluded.created_at
+            """,
+            (run_id, kind, path, size, now_ms),
+        )
+
+    def list_backtest_artifacts(self, run_id: str) -> list[dict]:
+        rows = self._query_all(
+            """
+            SELECT kind, path, size, created_at
+              FROM backtest_artifacts
+             WHERE run_id = ?
+             ORDER BY kind
+            """,
+            (run_id,),
+        )
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # equity snapshots
     # ------------------------------------------------------------------
 
@@ -1047,6 +1379,69 @@ def _alert_filters(
         params.append(until_ms)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, tuple(params)
+
+
+def _run_filters(
+    *,
+    strategy_id: str | None,
+    inst_id: str | None,
+    bar: str | None,
+    status: str | None,
+    kind: str | None,
+    since_ms: int | None,
+    until_ms: int | None,
+) -> tuple[str, tuple]:
+    """拼 backtest_runs 的 WHERE 子句（全为等值/区间条件，无需转义）。"""
+    clauses: list[str] = []
+    params: list[object] = []
+    for column, value in (
+        ("strategy_id", strategy_id),
+        ("inst_id", inst_id),
+        ("bar", bar),
+        ("status", status),
+        ("kind", kind),
+    ):
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    if since_ms is not None:
+        clauses.append("created_at >= ?")
+        params.append(since_ms)
+    if until_ms is not None:
+        clauses.append("created_at <= ?")
+        params.append(until_ms)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, tuple(params)
+
+
+#: `backtest_metrics` 的可写列（与迁移 v5 保持一致）。
+_METRIC_COLUMNS = frozenset(
+    {
+        "total_return",
+        "annual_return",
+        "sharpe",
+        "max_drawdown",
+        "win_rate",
+        "profit_factor",
+        "trade_count",
+        "avg_holding_bars",
+        "calmar",
+        "sortino",
+        "max_consecutive_losses",
+        "max_consecutive_loss_amount",
+        "exposure_ratio",
+        "monthly_returns",
+        "compounded_return",
+        "profitable_segments",
+        "avg_oos_sharpe",
+        "total_oos_trades",
+        "modal_params",
+        "pine_total_return",
+        "pine_sharpe",
+        "pine_max_drawdown",
+        "pine_deviation",
+    }
+)
 
 
 def _realized_pnl(fills: list[Fill]) -> Decimal:

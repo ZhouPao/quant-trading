@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import math
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -65,6 +67,7 @@ def _settings(tmp_path) -> Settings:
         storage={"data_dir": tmp_path / "data"},
         state={"db_path": tmp_path / "quant.db"},
         engine={"config_dir": tmp_path / "strategies"},
+        backtest={"artifacts_dir": tmp_path / "backtests"},
     )
 
 
@@ -81,6 +84,18 @@ def service(tmp_path):
     _write_strategy(tmp_path)
     _write_bars(settings)
     return BacktestService(settings)
+
+
+async def _wait_done(client, run_id: str, timeout: float = 5.0) -> dict:
+    """轮询任务状态直到终态；超时直接失败，避免挂住测试。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = await client.get(f"/api/backtest/{run_id}")
+        body = response.json()
+        if body["status"] in {"done", "failed", "canceled"}:
+            return body
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"run {run_id} did not finish in {timeout}s")
 
 
 def _request(**overrides) -> BacktestRequest:
@@ -101,9 +116,13 @@ class TestStrategies:
     async def test_lists_config_with_params(self, service) -> None:
         items = await service.strategies()
 
-        assert items == [
-            {"id": "sma_cross", "params": {"fast_len": 5, "slow_len": 20}}
-        ]
+        assert [item["id"] for item in items] == ["sma_cross"]
+        assert items[0]["params"] == {"fast_len": 5, "slow_len": 20}
+        assert items[0]["sources"] == {"fast_len": "toml", "slow_len": "toml"}
+        # PARAM_SPEC 里声明的才可编辑；toml 里的其它键不出现
+        spec_names = [item["name"] for item in items[0]["param_spec"]]
+        assert items[0]["editable"] == spec_names
+        assert "commission_rate" not in spec_names
 
     async def test_skips_broken_config(self, tmp_path) -> None:
         settings = _settings(tmp_path)
@@ -253,12 +272,12 @@ class TestApp:
         assert response.status_code == 200
         assert response.json()["strategies"][0]["id"] == "sma_cross"
 
-    async def test_backtest_endpoint(self, app) -> None:
+    async def test_backtest_endpoint_sync_compat(self, app) -> None:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                "/api/backtest",
+                "/api/backtest?sync=1",
                 json={
                     "strategy": "sma_cross",
                     "start": "2026-09-05",
@@ -273,7 +292,48 @@ class TestApp:
         assert body["inst"] == "BTC-USDT"
         assert body["metrics"]["trade_count"] >= 0
 
-    async def test_backtest_error_is_400(self, app) -> None:
+    async def test_backtest_endpoint_returns_run_id(self, app) -> None:
+        """默认异步：立即返回 run_id，结果与产物随后落库。"""
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/api/backtest",
+                    json={
+                        "strategy": "sma_cross",
+                        "start": "2026-09-05",
+                        "end": "2026-09-10",
+                        "warmup_bars": 50,
+                    },
+                )
+                assert response.status_code == 200
+                run_id = response.json()["run_id"]
+                assert response.json()["status"] == "pending"
+
+                detail = await _wait_done(client, run_id)
+                assert detail["status"] == "done"
+                assert detail["inst"] == INST
+                assert detail["metrics"]["trade_count"] >= 0
+                assert {item["kind"] for item in detail["artifacts"]} == {
+                    "equity",
+                    "trades",
+                    "report",
+                }
+
+                equity = await client.get(f"/api/backtest/{run_id}/equity")
+                assert len(equity.json()["points"]) > 0
+
+                trades = (await client.get(f"/api/backtest/{run_id}/trades")).json()
+                # metrics.trade_count 是「回合数」，产物里是逐笔成交，两者口径不同
+                assert trades["total"] > 0
+                assert trades["total"] == len(trades["trades"])
+
+                history = await client.get("/api/backtest/runs")
+                assert history.json()["total"] == 1
+                assert history.json()["runs"][0]["run_id"] == run_id
+
+    async def test_backtest_endpoint_error_is_400(self, app) -> None:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
