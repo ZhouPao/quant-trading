@@ -1,8 +1,8 @@
 # 项目进度与经验总结
 
-> 更新时间：2026-10-29
+> 更新时间：2026-10-30
 > 项目：`quant-trading`（OKX 模拟盘量化交易系统）
-> 依据：[PRD v0.5](requirements/2026-10-17-quant-trading-platform-requirements.md)
+> 依据：[PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)
 
 ---
 
@@ -15,10 +15,10 @@ M1–M3 完成，M4 完成约 95%（含 engine 心跳与恢复通知；只差填
 
 | 指标 | 数值 |
 |---|---|
-| 源码 | 105 个 Python 文件 / 约 14,219 行 |
-| 测试 | 55 个测试文件 / 约 18,991 行 / **997 条全部通过** |
+| 源码 | 107 个 Python 文件 / 约 14,686 行 |
+| 测试 | 56 个测试文件 / 约 19,371 行 / **1,024 条全部通过** |
 | 前端 | 11 个文件 / 约 6,393 行（React 18 + TS + Vite + ECharts） |
-| CLI 子命令 | 19 个 |
+| CLI 子命令 | 20 个 |
 | 本地行情 | BTC-USDT-SWAP 与 BTC-USDT 均覆盖 5m/15m/30m/1H/4H/6H/12H/1D 八周期（10 MB parquet） |
 | 当前策略 | `sma_cross`（4H，fast=10 / slow=100 + EMA200 趋势过滤） |
 | 正在运行的进程 | supervisor + engine + monitor + dashboard |
@@ -1086,11 +1086,285 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
   站上 EMA 放行、死叉不受过滤影响、窗口不足不出信号），
   全量 **997 passed**，`ruff check` 通过。
 
+### 8.34 Walk-forward 验证（2026-10-30）
+
+- 背景：4H + EMA200 的 63.74% 来自单段「全历史当 IS」的回测，无法排除
+  参数是在整段历史上挑出来的。walk-forward 用滚动 IS/OOS 检验同一套参数
+  在未知区间是否还成立。
+- 新增能力：
+  - `src/quant/backtest/walkforward.py`：`build_segments()` 按 bar 根数切
+    滚动段，`WalkForward.run()` 每段在 IS 上按 metric 选参、再用该参数跑
+    紧随的 OOS；OOS 结果只做评估，不回流选参。
+  - `quant walk-forward` 子命令（第 20 个），参数 `--is-bars/--oos-bars/
+    --step-bars/--metric/--grid`，输出逐段表格与汇总。
+  - 预热口径：每段只取「该段起点之前」的 bar（IS 与 OOS 各自向前取
+    `--warmup-bars` 根），与实盘可见信息一致。
+- 首轮结果（BTC-USDT-SWAP 4H，2024-03-01..2026-10-29，预热 300，
+  网格 `slow_len=50,100,150 × ema_filter=false,true`，metric=sharpe）：
+
+  | 切分 | 段数 | OOS 复合收益 | 盈利段数 | OOS 平均夏普 | 参数众数 |
+  |---|---|---|---|---|---|
+  | IS 1500 / OOS 500 | 8 | 46.11% | 4/8 | 0.57 | 10/100 + EMA200 |
+  | IS 1000 / OOS 350 | 13 | 91.11% | 7/13 | 0.70 | 10/100 + 无过滤 |
+
+  - `slow_len=100`、`fast_len=10` 在两种切分下都是众数，参数本身稳定；
+  - `ema_filter` 的众数在两种切分下相反（True / False），说明过滤收益
+    依赖行情阶段：2024 年的震荡段关掉更好，2025 年之后的趋势段打开更好；
+  - 单段 OOS 表现分化明显（同一切分里既有 +28%、+19%，也有 -6%），
+    4/8 与 7/13 的胜率说明这套策略靠少数大段趋势赚钱，属趋势跟踪的正常形态；
+  - OOS 累计交易数只有 21 / 31 笔，样本偏少，结论应视为「方向可信、
+    幅度不可照搬」。
+- 结论：保留 10/100 + EMA200 的实盘配置（众数之一，且在 1500/500 切分下
+  为众数），但把「过滤开关随行情切换」列入后续观察项，必要时改成可配置的
+  自适应阈值而不是二值开关。
+- 测试：新增 `tests/test_walkforward.py` 18 条（切分相邻/重叠/越界、
+  选参不回流、预热不足、复合收益、参数众数、CLI 解析），
+  全量 **1,015 passed**，`ruff check` 通过。
+
+### 8.35 EMA 过滤改为 ATR 自适应阈值（2026-10-30）
+
+- 动因：§8.34 显示 `ema_filter` 的最优取值随行情阶段翻转（2024 震荡段关掉
+  更好、2025 后趋势段打开更好）。把二值判断换成随波动自适应的门槛。
+- 实现（`sma_cross.py`）：
+  - 门槛 = `EMA(ema_len) + ema_band_atr × ATR(atr_len)`，`close > 门槛` 才开仓。
+  - 新增参数 `ema_band_atr`（默认 0）、`atr_len`（默认 14）；`ema_band_atr = 0`
+    时门槛退化为 EMA，与 §8.33 的旧行为逐笔一致（有单测固定）。
+  - `ema_filter` 仍是总开关：关闭时整段趋势判定直接放行。
+  - 负的 `ema_band_atr`、非正的 `atr_len` 直接报错。
+- **口径调整（与设计稿的差异）**：ATR 用「最近 `atr_len` 个真实波幅的等权
+  平均」，不做 Wilder 递推。Wilder 平滑会让 ATR 依赖可用窗口长度，
+  `window_size` 或预热根数一改结果就漂移，回测/实盘可见窗口不一致时会静默
+  偏差；等权窗口完全由最近 `atr_len + 1` 根决定，跨环境可复现。
+- 直接回测（BTC-USDT-SWAP 4H，2024-03-01..2026-10-29，10/100 + EMA200）：
+
+  | k | 收益 | 最大回撤 | 夏普 | 盈亏比 | 交易数 |
+  |---|---|---|---|---|---|
+  | **0** | **63.56%** | 17.64% | 0.89 | 1.82 | 28 |
+  | 0.5 | 63.76% | 17.64% | 0.91 | 1.94 | 25 |
+  | 1 | 46.29% | 15.05% | 0.80 | 1.97 | 20 |
+  | 1.5 | 35.39% | 18.76% | 0.67 | 1.76 | 18 |
+  | 2 | 19.94% | 17.93% | 0.48 | 1.53 | 13 |
+  | 3 | 15.10% | 11.86% | 0.45 | 1.88 | 6 |
+
+  k ≥ 1 后收益单调下降，回撤只在 k=3 才明显改善；k=0.5 与 k=0 实质等价。
+  带宽的主要作用是**减少交易次数**，而不是提升单笔质量。
+- walk-forward（同一网格 `ema_band_atr=0,0.5,1,1.5`，slow=100，ema_filter=true）：
+
+  | 切分 | 段数 | OOS 复合收益 | 盈利段数 | 平均夏普 | 参数众数 |
+  |---|---|---|---|---|---|
+  | IS 1500 / OOS 500 | 8 | 84.07% | 5/8 | 1.29 | k=1 |
+  | IS 1000 / OOS 350 | 13 | 75.56% | 4/13 | 0.70 | k=0 |
+
+  两种切分给出的众数相反，且 1500/500 那组全期 OOS 只有 13 笔成交，
+  复合收益被少数几笔主导，不足以支撑 k>0。
+- **结论**：能力保留、线上配置保持 `ema_band_atr = 0`。带宽没有呈现出
+  稳定的超额收益，属于「换了风险形状但没有证据说更好」，按 YAGNI 不启用。
+  若后续出现明显的高波动假突破行情，可直接把 k 调到 0.5–1 复测，无需改代码。
+- 配置：`config/strategies/sma_cross.toml` 显式写明 `ema_band_atr = 0`、
+  `atr_len = 14`（该文件在 `.gitignore` 中）。engine 每轮都会重新加载策略
+  参数，改完无需重启。
+- 测试：新增 7 条（ATR 等权窗口数值、跳空用前收盘、样本不足、窗口外数据
+  不参与、带宽拦截刚站上 EMA 的收盘、k=0 等价旧行为、负 k/非正 atr_len 报错），
+  全量 **1,024 passed**，`ruff check` 通过。
+
+### 8.36 PRD 重构为 10 个产品模块（2026-10-30）
+
+- 背景：v0.5 按 F1–F5 横向切分（数据/回测/模拟盘/实盘/监控），与看板页面结构
+  对不上，也把「因子库」「组合管理」这类能力漏在视野外。
+- 新文档 `docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md`：
+  10 个模块 = 看板导航项，每模块内按 `M<模块号>-<序号>` 编号，每条带
+  「来源」（原 F 编号或「新增」）与「状态」（✅/🟡/⬜）。
+- 模块与现有实现的对应：
+  - 市场监控、回测分析、交易执行 → ✅ 基本实现
+  - 首页总览、策略研究、风险控制、日志告警、系统设置 → 🟡 部分实现
+  - 因子库、组合管理 → ⬜ 未开始（新写基础设计，排 M7+）
+- 非目标调整：删除 v0.5 的「不做 Web UI 界面」，改为「本机单用户看板」。
+- 里程碑改为「模块 × 里程碑」矩阵，M1–M3 已完成的交付不变，只做归属映射。
+- 链接同步：`PROGRESS.md`、`PROJECT_STRUCTURE.md`、两份 spec、`README.md`
+  的 PRD 引用改指 v0.6；v0.5 保留为历史版本。
+
+### 8.37 因子库与组合管理需求细化（2026-10-30）
+
+- PRD 4.5/4.6 由各 6 条基础设计扩写为完整设计，两个模块仍标 ⬜ 未开始、排 MS7+。
+- 因子库：15 条需求 + 3 个数据模型（`FactorDef`/`FactorValue`/`FactorEval`）
+  + `data/factors/{factor}/{bar}/{year}.parquet` 存储布局 + 5 个接口
+  （注册、时序 `compute`、横截面 `compute_panel`、`evaluate`、`FactorProvider`）。
+  范围含时序与横截面两类；关键约束是「全量重算与增量更新必须逐点相等」。
+- 组合管理：14 条需求 + 4 个数据模型（`PortfolioConfig`/`PortfolioUnit`/
+  `RebalancePlan`/`PortfolioSnapshot`）+ `config/portfolios/<id>.toml` 与
+  SQLite 两张新表 + 3 个接口（`Allocator.allocate`/`Rebalancer.evaluate`/
+  `Attribution.report`）。边界明确：组合层只出目标权重与调仓计划，
+  下单走 M8、风控走 M7，不新增第二条下单路径。
+- 编号去歧义：PRD 里程碑由 `M1–M6` 改为 `MS1–MS6`，与模块编号 `M1–M10` 区分，
+  第 3 章补了说明，8.2 矩阵表头同步。
+
+### 8.38 回测分析需求细化（2026-10-30）
+
+- PRD 4.4 由 8 条扩写为 **16 条** + 5 个数据模型 + 4 张 SQLite 表
+  （`backtest_runs` / `backtest_metrics` / `backtest_artifacts` / `optimize_jobs`）
+  + `data/backtests/{run_id}/` 文件布局 + 4 个接口。
+- 新增条目针对现有缺口：
+  - 结果不落库 → M4-9 持久化、M4-10 历史列表与重跑、M4-11 多组对比
+  - 长任务卡请求 → M4-12 后台任务 + 轮询、M4-13 寻优并发与进度
+  - 指标偏少 → M4-14 补 Calmar/Sortino/月度/连亏/暴露度
+  - 永续未计资金费率 → M4-15 按 8 小时结算
+  - 无 Pine 对比入口 → M4-16 导入 `metric,value` CSV 算偏离度
+- 存储约定：DB 只存登记与指标，曲线/成交/段结果落 parquet，DB 存路径；
+  金额 TEXT 存 Decimal，指标 REAL。
+- 目录结构补 `src/quant/research/`（任务编排与结果持久化）与
+  `data/backtests/`；MS4 范围同步纳入 M4-9 ~ M4-14。
+
+### 8.39 交易执行需求细化（2026-10-30）
+
+- PRD 4.8 由 13 条扩写为 **19 条** + 6 个数据模型 + **2 张新 SQLite 表**
+  （`dead_letters` / `reconciliations`）+ `orders` 加 3 列
+  （`filled_qty` / `avg_price` / `source`）+ 5 个接口
+  （`PositionSizer.size` / `OrderStateMachine.transition` /
+  `DeadLetterService` / `Reconciler.reconcile` / `ManualTrader`）。
+- 新增 6 条针对现有缺口：
+  - 信号强制带 qty 与「Python 端算仓位」矛盾 → M8-14 服务端仓位计算
+  - `partially_filled` 无状态推进 → M8-15 订单状态机
+  - 死信只有计数无入口 → M8-16 查看与重放/丢弃
+  - 撤单改单已实现但未暴露 → M8-17 手工下单与撤改
+  - 对账只覆盖订单 → M8-18 订单 + 持仓 + 余额三项对账
+  - 超时不明单重复提交风险 → M8-19 幂等与重试边界
+- 修正 9.2 决策表：`qty` 由必填改为可选，缺省由服务端按权益比例计算。
+- 里程碑：MS4 纳入 M8-14 ~ M8-16、M8-19（执行可靠性）；
+  MS5 纳入 M8-17、M8-18（手工交易与三项对账）。
+
+### 8.40 风险控制需求细化（2026-10-30）
+
+- PRD 4.7 由 9 条扩写为 **17 条** + 5 个数据模型 + **2 张新 SQLite 表**
+  （`risk_events` / `risk_overrides`）+ 5 个接口
+  （`resolve_limits` / `RiskChecker.check` 扩展 `hits` /
+  `RiskOverrideService` / `CircuitBreaker` / `RiskEventService`）。
+- **修正一处误标**：M7-6「极端行情熔断」在 v0.6 初稿标 ✅，但代码中
+  完全不存在（全仓无 `circuit`/振幅相关实现），已改为 ⬜ 并补齐需求。
+- 新增 8 条针对现有缺口：
+  - 风控参数只有策略级、总仓位却汇总全品种 → M7-10 两层取严合并
+  - 拒绝与减量只在日志里 → M7-11 事件落库、M7-16 边界单测
+  - 阈值改完无法即时生效 → M7-8 在线覆盖、M7-14 变更审计
+  - 熔断缺失且与 kill switch 语义混淆 → M7-6、M7-12、M7-13
+  - 权益口径混用 `initial_equity` → M7-15 统一取 monitor 快照
+  - 风控与告警不同步 → M7-17
+- 规则执行顺序明确为：日亏损 → 连亏 → 熔断（硬停止）→ 单笔名义价值
+  → 单品种比例 → 总仓位比例（软限，可下调数量）。
+- 里程碑：MS2 补入 M7-1 ~ M7-3；MS4 纳入 M7-10/M7-11/M7-15/M7-16；
+  MS5 纳入 M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17。
+
+### 8.41 日志告警需求细化（2026-10-30）
+
+- PRD 4.9 由 7 条扩写为 **14 条** + 3 个数据模型 + **2 张新 SQLite 表**
+  （`alerts` / `alert_silences`）+ 3 个接口
+  （`AlertService.publish` / `list` / `ack`+`silence`）。
+- **修正一处口径错误**：M9-1 原写「按模块+日期分文件」，实际是 loguru
+  单文件 `logs/quant-trading.log`（10MB 轮转、30 天保留），模块名只在行内。
+  已改为「单文件 + 行内模块标签」，与实现一致。
+- **引入新状态标记 🚫**（明确不做），M9-6 日志检索改标 🚫：本期不做检索页，
+  日志走 `grep` + 时间段。第 3 章状态定义已同步。
+- 新增 7 条针对现有缺口：
+  - 告警只写 Redis list（keep 200），重启丢 → M9-8 SQLite 主存
+  - `Alert` 只有 4 字段、无状态 → M9-7 已读、M9-10 静音粒度
+  - 规则清单未成文 → M9-2 明确 11 条已实现规则
+  - 去重逻辑隐式 → M9-9 显式化（冷却 600s、kill switch 例外、INFO 例外）
+  - 事件来源分散 → M9-11 统一 `AlertService.publish` 入口
+  - 无保留策略与统计 → M9-12 按级别保留、M9-14 趋势统计
+- 里程碑：MS4 纳入 M9-1 ~ M9-5、M9-8、M9-9、M9-11、M9-13；
+  MS5 纳入 M9-7、M9-10、M9-12、M9-14。
+
+### 8.42 策略研究需求细化（2026-10-30）
+
+- PRD 4.3 由 8 条扩写为 **15 条** + 5 个数据模型 + **3 张新 SQLite 表**
+  （`strategy_params` / `strategy_param_changes` / `strategy_bindings`）+ 4 个接口
+  （`spec` / `effective_params` / `StrategyParamService.update` /
+  `StrategyBindingService`）。
+- 现状核对：看板只有 `GET /api/strategies` 只读清单，**没有参数编辑与启停接口**，
+  参数校验只靠策略 `on_init` 里 `raise ValueError`，无声明式 schema，
+  参数变更无任何留痕 —— 这三处是本节新增条目的直接来源。
+- 新增 7 条：
+  - 参数 schema 无处可查 → M3-9 声明式 `PARAM_SPEC`
+  - 回测与实盘可能读到不同参数 → M3-10 两层合并共用一份
+  - 启停只有进程级 → M3-11 策略×品种矩阵、M3-12 即时生效
+  - Pine 与 Python 可能漂移 → M3-13 一致性校验
+  - 改错参数无法回退 → M3-14 变更回滚
+  - 信息分散在多个页面 → M3-15 策略详情页
+- 关键约束：**同一策略同一品种只允许一个周期**（`bar` 记在绑定上但不是键），
+  避免两个周期对同一持仓重复下单。
+- 里程碑：MS4 纳入 M3-9 ~ M3-12（参数与启停基础设施）；
+  MS5 纳入 M3-3、M3-4、M3-8、M3-13 ~ M3-15（页面与治理）。
+
+### 8.43 首页总览需求细化（2026-10-30）
+
+- PRD 4.1 由 7 条扩写为 **10 条** + 4 个只读聚合视图（**不新增 SQLite 表**）
+  + 3 个接口变更（`/api/overview` 扩展 `processes[]`、新增 `/api/timeline`
+  与 `/api/freshness`）。
+- 现状核对发现两处不一致：
+  - **M1-4 权益曲线**：PRD 原写「7/30/90 天切换」，实际前端只有
+    24h/7d/30d，后端 `hours` 硬上限 720（30 天）。已改为 24h/7d/30d。
+  - **M1-5 进程健康**：PRD 原写「7 个进程各自心跳」，实际只有
+    worker/monitor 写心跳键、engine 用自己的 status 键；
+    candles/webhook/dashboard/supervisor **完全没有心跳**。
+- 新增 3 条：M1-8 今日盈亏汇总、M1-9 告警摘要卡、M1-10 降级与时效标注；
+  M1-6/M1-7 补充实现规范（四表 UNION、只盖引擎消费的组合）。
+- 新增 Redis 键约定：`quant:heartbeat:{name}`（TTL = 2 × 轮询间隔）、
+  `quant:process:{name}`（pid/started_at/restarts，由 supervisor 写入）。
+- 里程碑：MS4 扩为 M1-1 ~ M1-7、M1-10；MS5 纳入 M1-8、M1-9；
+  **MS6 移除重复的 M1-5**（进程自愈归 M8-11）。
+
+### 8.44 市场监控需求细化（2026-10-30）
+
+- PRD 4.2 由 13 条扩写为 **15 条** + 5 个数据模型 + 1 个新接口
+  （`GET /api/quality`）+ 1 个新落盘目录（`data/quality/`）。
+- **修正三处与实现不符**：
+  - **M2-2**：原写「订阅 tickers/books/trades + 缓存最近 N 条」。
+    实际 [ws_client.py](src/quant/okx/ws_client.py) 只有 `tickers`；
+    [LivePriceBook](src/quant/execution/price.py) 每品种**只存最新一条**。
+    改为「仅 tickers、只留最新」，状态 🟡（重连退避饱和待修）。
+  - **M2-4**：原写「资金费率与持仓量」。全仓 grep 无任何 open interest 实现，
+    只有 `funding_rate_fetcher.py`。拆为 M2-4 资金费率 ✅ + M2-14 持仓量 ⬜。
+  - **M2-10**：原写「SMA/EMA 多条均线」，实际看板可叠加 MA/BOLL/SuperTrend/
+    撑压线/VOL/MACD/KDJ 共 7 类，描述已改全。
+- 新增 2 条：M2-14 持仓量（⬜）、M2-15 数据质量报告（⬜，含
+  `DataQualityReport` 模型）；M2-13 自选与对比改标 🚫。
+- 顺带明确两处实现口径：`DataValidator` 返回值扩展为结构化报告；
+  `WSClient` 退避加 ±20% 抖动并把连接状态写 Redis（供 M1-5 复用）。
+- 里程碑：MS4 纳入 M2-15（数据质量报告）。
+
+### 8.45 系统设置需求细化（2026-10-30）
+
+- PRD 4.10 由 8 条扩写为 **15 条** + 4 个数据模型（`ConfigView` /
+  `CredentialStatus` / `ProcessCommand` / `BackupManifest`）+ 5 组接口
+  + 3 个新 CLI（`quant backup` / `restore` / `doctor`）。
+  **不新增 SQLite 表**：热改复用已有覆盖层。
+- **修正四处与实现不符**：
+  - **M10-1** 配置查看：原标 🟡，实际看板**没有任何 `/api/config`**，
+    改为 ⬜。
+  - **M10-3** 数据保留：原标 ✅，实际
+    [retention.py](src/quant/storage/retention.py) 只覆盖 bars/reports/
+    signals/orders/fills/equity_snapshots，且是**单一全局 `retention_days`**，
+    缺 alerts/dead_letters/funding_rates 与按周期分档，改为 🟡。
+  - **M10-4** 通知设置：原标 🟡，实际看板无通知接口，改为 ⬜。
+  - **M10-2** 凭证管理：重写为「健康看板 + 模拟盘验证按钮」，
+    只读不落盘 secret。
+- 新增 7 条：M10-9 配置来源标注、M10-10 热改白名单、M10-11 凭证到期提醒、
+  M10-12 备份完整性校验、M10-13 保留策略分档、M10-14 进程命令审计、
+  M10-15 部署自检。
+- 关键边界：M10 **不自己实现参数覆盖**，热改白名单委托
+  M7-8 `risk_overrides`（风控阈值）与 M3-10 `strategy_params`（策略参数），
+  审计分别复用 M7-14 与 M3-8。
+- 进程控制：命令走 **Redis 命令通道**（`quant:supervisor:cmd`），
+  supervisor 轮询执行并回写结果，避免看板直连进程。
+- 新增配置项：`retention_bars_days`（按周期分档，如
+  `{ "1m" = 365, "1H" = 1095 }`）、`retention_alerts_days`、
+  `retention_dead_letters_days`、`retention_funding_days`。
+- 里程碑：MS5 纳入 M10-1 ~ M10-4、M10-9 ~ M10-15；
+  MS6 保留 M10-6、M10-7（上云、systemd 托管与开机自启）。
+
 ---
 
 ## 9. 相关文档
 
-- [PRD v0.5](requirements/2026-10-17-quant-trading-platform-requirements.md)
+- [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）
 - [M1 详设](specs/2026-10-17-m1-data-foundation-design.md)
 - [M2 详设](specs/2026-10-17-m2-backtest-webhook-design.md)
 - [模拟盘运行手册](reference/RUNBOOK_PAPER_TRADING.md)

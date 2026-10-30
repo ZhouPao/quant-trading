@@ -3,7 +3,7 @@
 > 文档版本：v1.1
 > 创建日期：2026-10-17
 > 状态：待用户审阅
-> 上游需求：[2026-10-17-quant-trading-platform-requirements.md v0.5](../requirements/2026-10-17-quant-trading-platform-requirements.md)
+> 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（本文档编写时对应 v0.5）
 > 关联参考：[OKX API速查](../reference/OKX_API_REFERENCE.md)
 > 设计方案：方案A（最小依赖、自封装、同步优先）。M1 本身不变；本版仅更新 §12 接口契约以适配 PRD v0.5 选定的 webhook 方案B（FastAPI+Redis+worker）。
 

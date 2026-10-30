@@ -50,7 +50,7 @@ quant-trading/
 | M5 实盘 | 接 TV 真 webhook + VPS 部署 3 进程 | 待设计 |
 | M6 上云 | systemd 编排 + 自愈 | 待设计 |
 
-详见 [PRD v0.5](docs/requirements/2026-10-17-quant-trading-platform-requirements.md) 与 [M1 spec v1.1](docs/specs/2026-10-17-m1-data-foundation-design.md)。
+详见 [PRD v0.6](docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) 与 [M1 spec v1.1](docs/specs/2026-10-17-m1-data-foundation-design.md)。
 
 ## 快速开始
 

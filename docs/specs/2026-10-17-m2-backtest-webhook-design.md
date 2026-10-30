@@ -3,7 +3,7 @@
 > 文档版本：v1.0
 > 创建日期：2026-10-17
 > 状态：待用户审阅
-> 上游需求：[2026-10-17-quant-trading-platform-requirements.md v0.5](../requirements/2026-10-17-quant-trading-platform-requirements.md)
+> 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（本文档编写时对应 v0.5）
 > 上游设计：[M1 数据底座详设 v1.1](2026-10-17-m1-data-foundation-design.md)
 > 关联参考：[OKX API速查](../reference/OKX_API_REFERENCE.md)
 > 设计方案：方案B（FastAPI + Redis + worker），延续 M1 §12.2 接口契约
