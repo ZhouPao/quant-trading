@@ -85,6 +85,9 @@ host = "127.0.0.1"                        # 只读看板监听地址，默认仅
 port = 8080
 web_dir = "./web/dist"                    # 前端构建产物目录
 
+[monitor]
+alerts_persist = true                     # 告警写 SQLite；false 退回「只写 Redis」的旧行为
+
 [report]
 enabled = false                           # true=monitor 每日定时出模拟盘偏离日报
 at = "08:00"                              # 本地时间 HH:MM（monitor 在该时刻后的第一轮生成）

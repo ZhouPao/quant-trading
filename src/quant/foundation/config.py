@@ -241,6 +241,8 @@ class MonitorSettings(BaseModel):
     dashboard_alert_keep: int = 200
     # 同一规则在冷却窗口内只发布一次，避免持续状态刷屏（0=不去重）
     dashboard_alert_cooldown_seconds: int = 600
+    # 告警落库总开关；置 false 退回「只写 Redis」的旧行为（MS4-A §13 回滚用）
+    alerts_persist: bool = True
     # worker 每轮发布生效风控参数（键后缀 :{strategy}），看板只读
     risk_limits_key: str = "quant:risk:limits"
     risk_limits_ttl_seconds: int = 300

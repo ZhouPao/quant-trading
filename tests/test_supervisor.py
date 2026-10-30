@@ -11,12 +11,17 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
+import time
 from pathlib import Path
 
 from quant.cli import build_parser
 from quant.cli.supervisor import (
     RESTART_MAX_SECONDS,
+    SUPERVISOR_KEY,
+    SUPERVISOR_TTL,
     ProcessSpec,
     Supervisor,
     _Child,
@@ -220,3 +225,59 @@ class TestStopAll:
         sup._children["webhook"] = _Child(spec=sup._children["webhook"].spec, proc=proc)
         sup._stop_all()
         assert proc.terminated is False
+
+
+class TestPublishProcessTable:
+    """进程表写 Redis，作为 supervisor 自己的判活信号（MS4-A §7.2）。"""
+
+    def _supervisor(self, tmp_path: Path, redis_client) -> Supervisor:
+        return Supervisor(
+            [ProcessSpec("webhook", ("py",))],
+            log_dir=tmp_path,
+            stop_event=threading.Event(),
+            redis_client=redis_client,
+        )
+
+    def test_writes_table_with_ttl(self, tmp_path: Path) -> None:
+        fake = _FakeSyncRedis()
+        sup = self._supervisor(tmp_path, fake)
+        sup._children["webhook"] = _Child(
+            spec=sup._children["webhook"].spec,
+            proc=_FakeProc(code=None),
+            started_at=time.monotonic() - 10,
+            failures=3,
+        )
+
+        sup._publish_process_table()
+
+        key, raw, ex = fake.calls[0]
+        assert key == SUPERVISOR_KEY
+        assert ex == SUPERVISOR_TTL
+        payload = json.loads(raw)
+        assert payload["pid"] == os.getpid()
+        child = payload["children"]["webhook"]
+        assert child["pid"] == 4321
+        assert child["restarts"] == 3
+        assert child["last_exit"] is None
+        assert child["started_at"] <= payload["ts"]
+
+    def test_skips_without_redis(self, tmp_path: Path) -> None:
+        sup = self._supervisor(tmp_path, None)
+        sup._publish_process_table()  # 不应抛出
+
+    def test_redis_failure_is_logged_not_raised(self, tmp_path: Path) -> None:
+        sup = self._supervisor(tmp_path, _BrokenSyncRedis())
+        sup._publish_process_table()  # 写不进去不影响托管
+
+
+class _FakeSyncRedis:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int | None]] = []
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.calls.append((key, value, ex))
+
+
+class _BrokenSyncRedis:
+    def set(self, *_args, **_kwargs) -> None:
+        raise RuntimeError("redis down")

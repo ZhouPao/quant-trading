@@ -11,6 +11,7 @@ import json
 import os
 import time
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 import fakeredis.aioredis
 import httpx
@@ -626,8 +627,37 @@ class TestReports:
 
 
 class TestAlerts:
-    async def test_newest_first_and_invalid_skipped(self, env) -> None:
+    async def test_reads_sqlite_newest_first(self, env) -> None:
+        """落库开启时以 SQLite 为准，`ts`（事件时间）排序。"""
+        service, store, _redis, settings = env
+        for ts, level in ((NOW - 1000, "WARNING"), (NOW, "ERROR")):
+            store.insert_alert(
+                f"a-{ts}", "worker_heartbeat", level, f"m{ts}", "fp",
+                created_at=ts,
+            )
+
+        data = await service.alerts(10)
+
+        assert data["total"] == 2
+        assert [a["alert_id"] for a in data["alerts"]] == [f"a-{NOW}", f"a-{NOW - 1000}"]
+        assert data["degraded"] == []
+
+    async def test_filters_and_pagination(self, env) -> None:
+        service, store, _redis, settings = env
+        for i in range(5):
+            store.insert_alert(
+                f"a-{i}", "margin_ratio" if i % 2 else "queue_backlog",
+                "ERROR", f"m{i}", "fp", created_at=NOW + i,
+            )
+
+        page = await service.alerts(2, offset=1, rule="margin_ratio")
+
+        assert page["total"] == 2
+        assert [a["alert_id"] for a in page["alerts"]] == ["a-1"]
+
+    async def test_falls_back_to_redis_when_persist_disabled(self, env) -> None:
         service, _store, redis, settings = env
+        settings.monitor.alerts_persist = False
         key = settings.monitor.dashboard_alerts_key
         await redis.lpush(
             key,
@@ -646,11 +676,15 @@ class TestAlerts:
 
         assert len(data["alerts"]) == 1
         assert data["alerts"][0]["rule"] == "worker_heartbeat"
+        # 回落路径拿不到总数，UI 据此提示「仅显示最近 N 条」
+        assert data["total"] is None
         assert data["degraded"] == []
 
     async def test_degraded_when_redis_down(self, tmp_path) -> None:
         store = SQLiteStore(tmp_path / "quant.db")
-        service = DashboardService(store, _BrokenRedis(), _settings())
+        settings = _settings()
+        settings.monitor.alerts_persist = False
+        service = DashboardService(store, _BrokenRedis(), settings)
         try:
             data = await service.alerts(10)
         finally:
@@ -658,6 +692,222 @@ class TestAlerts:
 
         assert data["alerts"] == []
         assert data["degraded"] == ["redis"]
+
+    async def test_degraded_when_sqlite_down(self, env) -> None:
+        """SQLite 读失败要显式降级并回落 Redis，而不是返回空列表。"""
+        service, store, redis, settings = env
+        await redis.lpush(
+            settings.monitor.dashboard_alerts_key,
+            json.dumps(
+                {"rule": "margin_ratio", "level": "ERROR", "message": "m", "ts": NOW}
+            ),
+        )
+        store.list_alerts = MagicMock(side_effect=RuntimeError("db locked"))
+
+        data = await service.alerts(10)
+
+        assert data["degraded"] == ["sqlite"]
+        assert data["total"] is None
+        assert len(data["alerts"]) == 1
+
+    async def test_includes_active_silences(self, env) -> None:
+        service, store, _redis, _settings = env
+        store.insert_silence(
+            "s-1", "margin_ratio", inst_id=None,
+            until_ts=NOW + 3600_000, reason="维护", created_by="owner",
+            created_at=NOW,
+        )
+
+        data = await service.alerts(10)
+
+        assert [s["silence_id"] for s in data["silences"]] == ["s-1"]
+
+
+class TestProcesses:
+    def _table(self, names: list[str]) -> str:
+        return json.dumps(
+            {
+                "ts": NOW,
+                "pid": 100,
+                "children": {
+                    name: {
+                        "pid": 200,
+                        "started_at": NOW - 60_000,
+                        "restarts": 2,
+                        "last_exit": 1,
+                    }
+                    for name in names
+                },
+            }
+        )
+
+    async def _beat(self, redis, name: str, ts: int = NOW) -> None:
+        await redis.set(
+            f"quant:heartbeat:{name}",
+            json.dumps({"ts": ts, "pid": 999}),
+        )
+
+    async def test_all_online(self, env) -> None:
+        service, _store, redis, _settings = env
+        names = ["candles", "webhook", "worker", "engine", "monitor", "dashboard"]
+        await redis.set("quant:process:supervisor", self._table(names))
+        for name in names:
+            await self._beat(redis, name)
+
+        data = await service.processes()
+
+        assert data["online"] == 7
+        assert data["offline"] == []
+        assert data["degraded"] == []
+        by_name = {p["name"]: p for p in data["processes"]}
+        assert by_name["worker"]["restarts"] == 2
+        assert by_name["worker"]["reason"] is None
+
+    async def test_stale_heartbeat_reports_reason(self, env) -> None:
+        service, _store, redis, settings = env
+        await redis.set("quant:process:supervisor", self._table(["worker"]))
+        await self._beat(redis, "worker", NOW - 10 * 60 * 1000)
+
+        data = await service.processes()
+
+        worker = next(p for p in data["processes"] if p["name"] == "worker")
+        assert worker["online"] is False
+        assert worker["reason"] == "stale"
+        assert worker["age_seconds"] >= 600
+
+    async def test_missing_key_is_no_key(self, env) -> None:
+        service, _store, redis, _settings = env
+        await redis.set("quant:process:supervisor", self._table(["worker"]))
+
+        data = await service.processes()
+
+        worker = next(p for p in data["processes"] if p["name"] == "worker")
+        assert worker["reason"] == "no_key"
+
+    async def test_unmanaged_process_is_not_managed(self, env) -> None:
+        service, _store, redis, _settings = env
+        # supervisor 在线，但只托管了 worker（如 --no-dashboard）
+        await redis.set("quant:process:supervisor", self._table(["worker"]))
+        await self._beat(redis, "worker")
+
+        data = await service.processes()
+
+        dashboard = next(p for p in data["processes"] if p["name"] == "dashboard")
+        assert dashboard["online"] is False
+        assert dashboard["reason"] == "not_managed"
+
+    async def test_monitor_uses_300s_ttl(self, env) -> None:
+        """monitor 写的是 300s TTL，按 120s 判活会误报离线。"""
+        service, _store, redis, _settings = env
+        await redis.set(
+            "quant:process:supervisor", self._table(["monitor"])
+        )
+        await self._beat(redis, "monitor", NOW - 200_000)
+
+        data = await service.processes()
+
+        monitor = next(p for p in data["processes"] if p["name"] == "monitor")
+        assert monitor["online"] is True
+
+    async def test_redis_down_degrades(self, tmp_path) -> None:
+        store = SQLiteStore(tmp_path / "quant.db")
+        service = DashboardService(store, _BrokenRedis(), _settings())
+        try:
+            data = await service.processes()
+        finally:
+            store.close()
+
+        assert data["degraded"] == ["redis"]
+        assert all(p["online"] is False for p in data["processes"])
+
+
+class TestAlertsApi:
+    LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
+
+    async def test_list_with_filters(self, env, tmp_path) -> None:
+        service, store, _redis, _settings = env
+        store.insert_alert(
+            "a-1", "margin_ratio", "ERROR", "m", "fp", created_at=NOW
+        )
+        store.insert_alert(
+            "a-2", "queue_backlog", "WARNING", "q", "fp", created_at=NOW + 1
+        )
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.get("/api/alerts?level=ERROR&limit=10")
+
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["total"] == 1
+        assert body["alerts"][0]["alert_id"] == "a-1"
+
+    async def test_ack_requires_guard(self, env, tmp_path) -> None:
+        service, store, _redis, _settings = env
+        store.insert_alert("a-1", "margin_ratio", "ERROR", "m", "fp", created_at=NOW)
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            denied = await client.post(
+                "/api/alerts/a-1/ack",
+                json={"by": "alice"},
+                headers={"host": "127.0.0.1:8080"},
+            )
+            ok = await client.post(
+                "/api/alerts/a-1/ack", json={"by": "alice"}, headers=self.LOCAL
+            )
+
+        assert denied.status_code == 400
+        assert ok.json()["acked"] is True
+        row = store.list_alerts(10)[0][0]
+        assert row["acked_by"] == "alice"
+
+    async def test_silence_create_and_revoke(self, env, tmp_path) -> None:
+        service, store, _redis, _settings = env
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post(
+                "/api/alerts/silence",
+                json={"rule": "margin_ratio", "hours": 2, "reason": "维护"},
+                headers=self.LOCAL,
+            )
+            silence_id = created.json()["silence_id"]
+            listed = await client.get("/api/alerts?limit=5")
+            revoked = await client.delete(
+                f"/api/alerts/silence/{silence_id}", headers=self.LOCAL
+            )
+
+        assert listed.json()["silences"][0]["silence_id"] == silence_id
+        assert revoked.json()["revoked"] is True
+        assert store.list_active_silences(int(time.time() * 1000)) == []
+
+    async def test_processes_endpoint(self, env, tmp_path) -> None:
+        service, _store, redis, _settings = env
+        await redis.set(
+            "quant:process:supervisor",
+            json.dumps({"ts": NOW, "pid": 1, "children": {}}),
+        )
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.get("/api/processes")
+
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["total"] == 7
+        assert {p["name"] for p in body["processes"]} == {
+            "supervisor", "candles", "webhook", "worker",
+            "engine", "monitor", "dashboard",
+        }
 
 
 class TestEquity:

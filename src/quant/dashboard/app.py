@@ -9,7 +9,11 @@
 - GET /api/pnl       成交盈亏汇总（FIFO 回合，含手续费）
 - GET /api/risk-limits 生效风控限额与当前已用额度（worker 发布 + 本地现算）
 - GET /api/reports   模拟盘偏离日报（读取 reports/daily/*.csv）
-- GET /api/alerts    最近告警
+- GET /api/alerts    告警列表（SQLite 为准，支持级别/规则/状态/时间区间与分页）
+- POST /api/alerts/{id}/ack 确认告警（写操作）
+- POST /api/alerts/silence  创建静音（写操作）
+- DELETE /api/alerts/silence/{id} 解除静音（写操作）
+- GET /api/processes 7 个常驻进程健康
 - GET /api/equity    权益时序（默认近 24 小时）
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
 - GET /api/candles   K 线面板（本地 parquet + 成交 + 持仓均价）
@@ -72,6 +76,22 @@ class FlattenRequest(BaseModel):
 
     reason: str
     confirm: str
+
+
+class AckRequest(BaseModel):
+    """告警确认：记录操作人。"""
+
+    by: str = "owner"
+
+
+class SilenceRequest(BaseModel):
+    """创建静音：inst_id 为空表示该规则全部品种。"""
+
+    rule: str
+    inst_id: str | None = None
+    hours: float = 4
+    reason: str = ""
+    by: str = "owner"
 
 
 def _host_only(raw: str) -> str:
@@ -161,8 +181,59 @@ def create_app(
     @app.get("/api/alerts")
     async def alerts(
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+        level: str | None = Query(None),
+        rule: str | None = Query(None),
+        state: str | None = Query(None),
+        since: int | None = Query(None),
+        until: int | None = Query(None),
     ) -> JSONResponse:
-        return JSONResponse(await service.alerts(limit))
+        return JSONResponse(
+            await service.alerts(
+                limit,
+                offset,
+                level=level,
+                rule=rule,
+                state=state,
+                since_ms=since,
+                until_ms=until,
+            )
+        )
+
+    @app.post("/api/alerts/{alert_id}/ack")
+    async def ack_alert(
+        request: Request, alert_id: str, req: AckRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(
+            await service.ack_alert(alert_id, req.by.strip() or "owner")
+        )
+
+    @app.post("/api/alerts/silence")
+    async def create_silence(
+        request: Request, req: SilenceRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(
+            await service.create_silence(
+                req.rule,
+                inst_id=req.inst_id,
+                hours=req.hours,
+                reason=req.reason,
+                by=req.by.strip() or "owner",
+            )
+        )
+
+    @app.delete("/api/alerts/silence/{silence_id}")
+    async def revoke_silence(
+        request: Request, silence_id: str
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(await service.revoke_silence(silence_id))
+
+    @app.get("/api/processes")
+    async def processes() -> JSONResponse:
+        return JSONResponse(await service.processes())
 
     @app.get("/api/equity")
     async def equity(

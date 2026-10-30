@@ -12,6 +12,7 @@ from quant.backtest.signal import Signal
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import MonitorSettings, SmtpSettings
 from quant.models.instrument import Instrument
+from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import Alert, EmailAlerter
 from quant.monitor.monitor import Monitor
 from quant.monitor.snapshot import (
@@ -1330,4 +1331,186 @@ async def test_alive_email_persists_across_restart(redis) -> None:
     )
     await restarted.run_once()
     assert second.sent == []
+
+
+# =====================================================================
+# 冷却迁 Redis + AlertService 接入（MS4-A §5.4 / §7）
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_cooldown_survives_restart(redis) -> None:
+    """冷却放 Redis：monitor 重启后不会立刻把同一规则再报一遍。"""
+    import time
+
+    now = int(time.time() * 1000)
+    first = _monitor(redis, _balance("10000"))
+    await first._publish_alerts([Alert("margin_ratio", "ERROR", "低", now)])
+    assert await redis.llen("quant:dashboard:alerts") == 1
+
+    # 新实例：进程内状态全部丢失，只剩 Redis
+    restarted = _monitor(redis, _balance("10000"))
+    await restarted._publish_alerts([Alert("margin_ratio", "ERROR", "低", now + 1)])
+
+    assert await redis.llen("quant:dashboard:alerts") == 1
+
+
+@pytest.mark.asyncio
+async def test_cooldown_is_per_instrument(redis) -> None:
+    """多品种下 BTC 的告警不能吞掉 ETH 的同类告警。"""
+    import time
+
+    now = int(time.time() * 1000)
+    monitor = _monitor(redis, _balance("10000"))
+
+    await monitor._publish_alerts(
+        [Alert("position_drift", "ERROR", "btc", now, inst_id="BTC-USDT")]
+    )
+    await monitor._publish_alerts(
+        [Alert("position_drift", "ERROR", "eth", now + 1, inst_id="ETH-USDT")]
+    )
+    await monitor._publish_alerts(
+        [Alert("position_drift", "ERROR", "btc again", now + 2, inst_id="BTC-USDT")]
+    )
+
+    assert await redis.llen("quant:dashboard:alerts") == 2
+
+
+@pytest.mark.asyncio
+async def test_publish_writes_alert_to_sqlite(redis, tmp_path) -> None:
+    import time
+
+    from quant.state.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "quant.db")
+    now = int(time.time() * 1000)
+    try:
+        settings = MonitorSettings()
+        monitor = Monitor(
+            client=FakeClient(_balance("10000")),
+            redis=redis,
+            settings=settings,
+            alerter=EmailAlerter(SmtpSettings()),
+            alert_service=AlertService(
+                store, redis, EmailAlerter(SmtpSettings()), settings
+            ),
+        )
+
+        await monitor._publish_alerts(
+            [Alert("margin_ratio", "ERROR", "保证金率过低", now)]
+        )
+
+        rows, total = store.list_alerts(10)
+        assert total == 1
+        assert rows[0]["rule"] == "margin_ratio"
+        assert rows[0]["state"] == "open"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_resolves_open_alerts(redis, tmp_path) -> None:
+    import time
+
+    from quant.state.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "quant.db")
+    now = int(time.time() * 1000)
+    try:
+        settings = MonitorSettings()
+        service = AlertService(
+            store, redis, EmailAlerter(SmtpSettings()), settings
+        )
+        monitor = Monitor(
+            client=FakeClient(_balance("10000")),
+            redis=redis,
+            settings=settings,
+            alerter=EmailAlerter(SmtpSettings()),
+            alert_service=service,
+        )
+
+        await monitor._publish_alerts(
+            [Alert("margin_ratio", "ERROR", "保证金率过低", now)]
+        )
+        await monitor._publish_alerts(
+            [Alert("margin_ratio", "INFO", "已恢复", now + 1)]
+        )
+
+        rows, _ = store.list_alerts(10)
+        states = {r["level"]: r["state"] for r in rows}
+        # ERROR 被恢复通知关闭；INFO 本身不是「待处理问题」，同样立即 resolved
+        assert states == {"ERROR": "resolved", "INFO": "resolved"}
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_inst_scope(redis, tmp_path) -> None:
+    """恢复通知要带上 inst_id，否则只会关掉 inst_id IS NULL 的记录。"""
+    import time
+
+    from quant.state.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "quant.db")
+    now = int(time.time() * 1000)
+    try:
+        settings = MonitorSettings()
+        service = AlertService(
+            store, redis, EmailAlerter(SmtpSettings()), settings
+        )
+        monitor = Monitor(
+            client=FakeClient(_balance("10000")),
+            redis=redis,
+            settings=settings,
+            alerter=EmailAlerter(SmtpSettings()),
+            alert_service=service,
+        )
+        alert = Alert(
+            "position_drift", "ERROR", "btc drift", now, inst_id="BTC-USDT"
+        )
+        monitor._active_rules = {"position_drift": alert}
+
+        recovered = monitor._with_recovery([], now + 1)
+        assert recovered[0].inst_id == "BTC-USDT"
+        await monitor._publish_alerts(recovered)
+
+        # 恢复通知带 inst_id → 关掉的是 BTC-USDT 那条，而不是全 NULL 记录
+        rows, _ = store.list_alerts(10)
+        assert {r["state"] for r in rows} == {"resolved"}
+        assert {r["inst_id"] for r in rows} == {"BTC-USDT"}
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_email_is_per_alert(redis, tmp_path) -> None:
+    """接入 AlertService 后邮件逐条发送，不再一轮聚合一封。"""
+    import time
+
+    from quant.state.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "quant.db")
+    now = int(time.time() * 1000)
+    alerter = RecordingAlerter()
+    try:
+        settings = MonitorSettings()
+        service = AlertService(store, redis, alerter, settings)
+        monitor = Monitor(
+            client=FakeClient(_balance("10000")),
+            redis=redis,
+            settings=settings,
+            alerter=alerter,
+            alert_service=service,
+        )
+
+        await monitor._publish_alerts(
+            [
+                Alert("margin_ratio", "ERROR", "低", now),
+                Alert("queue_backlog", "WARNING", "堆积", now + 1),
+            ]
+        )
+
+        assert len(alerter.sent) == 2
+    finally:
+        store.close()
 

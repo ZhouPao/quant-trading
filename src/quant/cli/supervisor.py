@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -24,7 +25,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from redis import Redis as SyncRedis
+
 from quant.foundation.config import Settings
+from quant.foundation.heartbeat import SUPERVISOR_KEY, SUPERVISOR_TTL
 from quant.foundation.logger import get_logger, setup_logger
 
 POLL_INTERVAL_SECONDS = 1.0
@@ -113,6 +117,7 @@ class Supervisor:
         stop_event: threading.Event,
         cwd: Path | None = None,
         shutdown_timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+        redis_client: SyncRedis | None = None,
     ) -> None:
         self._children = {
             spec.name: _Child(spec=spec, proc=None) for spec in specs
@@ -121,11 +126,14 @@ class Supervisor:
         self._stop = stop_event
         self._cwd = cwd or Path.cwd()
         self._shutdown_timeout = shutdown_timeout
+        # 进程表写 Redis，供看板 /api/processes 读取；为 None 时静默跳过
+        self._redis = redis_client
         self._log = get_logger("cli.supervisor")
 
     def run(self) -> int:
         for name in list(self._children):
             self._children[name] = self._spawn(self._children[name].spec, failures=0)
+        self._publish_process_table()
         self._log.info(
             f"supervisor started processes={','.join(self._children)} "
             f"log_dir={self._log_dir}"
@@ -161,6 +169,40 @@ class Supervisor:
                 failures=failures,
                 next_start_at=now + delay,
             )
+        self._publish_process_table()
+
+    def _publish_process_table(self) -> None:
+        """把子系统 pid/重启次数写到 Redis（TTL 15s）。
+
+        这张表本身就是 supervisor 的判活信号：它挂了键就过期，不需要再
+        单独写一个心跳键——同一进程写两个键只会让「哪个才是真的」变成
+        一个额外问题。
+        """
+        if self._redis is None:
+            return
+        now_ms = int(time.time() * 1000)
+        children: dict[str, dict[str, object]] = {}
+        for name, child in self._children.items():
+            proc = child.proc
+            children[name] = {
+                "pid": proc.pid if proc else None,
+                "started_at": (
+                    int(now_ms - (time.monotonic() - child.started_at) * 1000)
+                    if proc
+                    else None
+                ),
+                "restarts": child.failures,
+                "last_exit": proc.poll() if proc else None,
+            }
+        payload = {"ts": now_ms, "pid": os.getpid(), "children": children}
+        try:
+            self._redis.set(
+                SUPERVISOR_KEY,
+                json.dumps(payload, ensure_ascii=False),
+                ex=SUPERVISOR_TTL,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._log.warning(f"publish process table failed: {e}")
 
     def _spawn(self, spec: ProcessSpec, failures: int) -> _Child:
         self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -226,4 +268,25 @@ def main(args) -> int:
         signal.signal(signal.SIGHUP, _handle)
 
     log_dir = Path(settings.logging.file).parent
-    return Supervisor(specs, log_dir, stop).run()
+    redis_client = _connect_redis(settings, log)
+    try:
+        return Supervisor(
+            specs, log_dir, stop, redis_client=redis_client
+        ).run()
+    finally:
+        if redis_client is not None:
+            try:
+                redis_client.close()
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"close redis failed: {e}")
+
+
+def _connect_redis(settings: Settings, log) -> SyncRedis | None:
+    """进程表写不进去不该阻塞托管；连不上就退化为不发布。"""
+    try:
+        client = SyncRedis.from_url(settings.redis.url, decode_responses=True)
+        client.ping()
+        return client
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"redis unavailable, process table disabled: {e}")
+        return None

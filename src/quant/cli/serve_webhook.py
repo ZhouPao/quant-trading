@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from uvicorn import run as uvicorn_run
 
 from quant.foundation.config import Settings
+from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger, setup_logger
 from quant.queue.signal_queue import Deduper, SignalQueue
 from quant.webhook.server import WebhookServer
@@ -37,6 +38,8 @@ def main(args) -> int:
         deduper,
         auth_token=settings.webhook.auth_token,
         path=settings.webhook.path,
+        # 心跳周期 30s，TTL 由 max(2×周期, 60s) 派生
+        heartbeat=Heartbeat(redis, "webhook", interval=30),
     )
 
     log.info(

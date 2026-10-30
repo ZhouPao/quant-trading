@@ -18,12 +18,17 @@ log = get_logger("monitor.alerter")
 
 @dataclass(frozen=True, slots=True)
 class Alert:
-    """告警条目。"""
+    """告警条目。
+
+    `inst_id` 必须追加在末尾且带默认值：现有代码与单测大量使用位置参数
+    构造，插到中间不会报错，只会让 `ts` 与 `inst_id` 悄悄错位。
+    """
 
     rule: str
     level: str  # WARNING / ERROR
     message: str
     ts: int
+    inst_id: str | None = None
 
 
 class EmailAlerter:

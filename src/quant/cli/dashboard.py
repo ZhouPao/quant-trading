@@ -19,6 +19,7 @@ from quant.dashboard.app import create_app
 from quant.dashboard.manual import ManualTrader
 from quant.dashboard.service import DashboardService
 from quant.foundation.config import Settings
+from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger, setup_logger
 from quant.state.sqlite_store import SQLiteStore
 
@@ -32,6 +33,11 @@ async def _serve(args, settings: Settings, log) -> int:
     app = create_app(
         DashboardService(store, redis, settings), web_dir, manual=manual
     )
+    # 心跳由进程自己写而不是借 supervisor：事件循环卡死时 supervisor
+    # 仍会认为子进程活着，只有自写心跳能反映出「进程在但不干活」
+    heartbeat = Heartbeat(redis, "dashboard", interval=30)
+    await heartbeat.beat()
+    heartbeat.start()
 
     host = args.host or settings.dashboard.host
     port = args.port or settings.dashboard.port
@@ -50,6 +56,7 @@ async def _serve(args, settings: Settings, log) -> int:
         await server.serve()
         return 0
     finally:
+        await heartbeat.stop()
         await redis.aclose()
         store.close()
 

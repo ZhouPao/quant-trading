@@ -30,6 +30,7 @@ from quant.backtest.signal import Signal
 from quant.execution.account import read_account_field
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import Settings
+from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger
 from quant.models import Bar
 from quant.queue.signal_queue import Deduper, SignalQueue
@@ -91,6 +92,9 @@ class LiveSignalEngine:
         )
         self._bars = bars or BarStorage(settings.storage.data_dir)
         self._kill = KillSwitch(redis)
+        self._heartbeat = Heartbeat(
+            redis, "engine", interval=self._cfg.interval_seconds
+        )
         self._running = False
         self._started_ts = int(time.time() * 1000)
         # 进程内累计计数，随状态 JSON 发布给看板（重启归零）
@@ -119,6 +123,9 @@ class LiveSignalEngine:
                 tick = await self.run_once()
                 self._log_tick(tick)
                 await self.publish_status(tick)
+                await self._heartbeat.beat(
+                    {"strategy": self._cfg.strategy, "inst": self._cfg.inst}
+                )
             except Exception as e:  # noqa: BLE001
                 log.exception(f"engine cycle failed: {e}")
             elapsed = time.monotonic() - started

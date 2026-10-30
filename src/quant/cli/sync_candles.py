@@ -11,12 +11,47 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import time
+
+from redis import Redis as SyncRedis
 
 from quant.fetcher.candle_fetcher import CandleFetcher
 from quant.foundation.config import Settings
+from quant.foundation.heartbeat import HEARTBEAT_PREFIX, default_ttl
 from quant.foundation.logger import get_logger, setup_logger
 from quant.okx.client import OKXClient
+
+
+def _beat(redis_client, interval: int, log) -> None:
+    """写一轮心跳（同步进程，不额外起后台 task）。
+
+    candles 是同步 CLI，用同步 Redis 客户端逐轮写；写失败只记日志，
+    不能让 Redis 抖动打断 K 线同步。
+    """
+    if redis_client is None:
+        return
+    payload = {"ts": int(time.time() * 1000), "pid": os.getpid()}
+    try:
+        redis_client.set(
+            f"{HEARTBEAT_PREFIX}:candles",
+            json.dumps(payload),
+            ex=default_ttl(interval),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"heartbeat write failed: {e}")
+
+
+def _connect_redis(settings: Settings, log):
+    """连接同步 Redis；失败返回 None（心跳缺失不影响 K 线同步）。"""
+    try:
+        client = SyncRedis.from_url(settings.redis.url, decode_responses=True)
+        client.ping()
+        return client
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"redis unavailable, heartbeat disabled: {e}")
+        return None
 
 
 def _sync_once(fetcher: CandleFetcher, insts: list[str], bars: list[str],
@@ -70,6 +105,7 @@ def main(args) -> int:
     )
 
     client = OKXClient(settings.okx)
+    redis_client = None
     try:
         fetcher = CandleFetcher(client, settings.storage.data_dir)
         if not args.loop:
@@ -80,6 +116,7 @@ def main(args) -> int:
         if interval <= 0:
             log.error(f"--loop requires positive interval, got {interval}")
             return 1
+        redis_client = _connect_redis(settings, log)
         log.info(
             f"candle sync loop started insts={insts} bars={bars} "
             f"interval={interval}s lookback={lookback}"
@@ -87,9 +124,15 @@ def main(args) -> int:
         while True:
             started = time.monotonic()
             total = _sync_once(fetcher, insts, bars, lookback, log)
+            _beat(redis_client, interval, log)
             log.info(f"sync round done insts={insts} bars={bars} new={total}")
             # 扣除本轮耗时，避免慢网络下间隔不断被拉长
             elapsed = time.monotonic() - started
             time.sleep(max(1.0, interval - elapsed))
     finally:
+        if redis_client is not None:
+            try:
+                redis_client.close()
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"close redis failed: {e}")
         client.close()

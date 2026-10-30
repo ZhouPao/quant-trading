@@ -528,3 +528,125 @@ class TestEffectiveOverrides:
             "a:max_position_pct": "0.2",
             "b:max_position_pct": "0.4",
         }
+
+
+class TestAlerts:
+    """alerts 落库与状态机（MS4-A §4.2 / §5.3）。"""
+
+    def _insert(self, store, alert_id: str = "a1", **kwargs) -> bool:
+        params = {
+            "rule": "margin_ratio",
+            "level": "ERROR",
+            "message": "保证金率过低",
+            "fingerprint": "fp",
+            "created_at": 1000,
+        }
+        params.update(kwargs)
+        return store.insert_alert(alert_id, **params)
+
+    def test_insert_and_list(self, store) -> None:
+        self._insert(store)
+
+        rows, total = store.list_alerts(10)
+
+        assert total == 1
+        assert rows[0]["alert_id"] == "a1"
+        assert rows[0]["state"] == "open"
+        assert rows[0]["suppressed"] == 0
+
+    def test_duplicate_id_is_ignored(self, store) -> None:
+        assert self._insert(store) is True
+        assert self._insert(store) is False
+        assert store.list_alerts(10)[1] == 1
+
+    def test_newest_first(self, store) -> None:
+        self._insert(store, "a1", created_at=1000)
+        self._insert(store, "a2", created_at=2000)
+
+        rows, _ = store.list_alerts(10)
+
+        assert [r["alert_id"] for r in rows] == ["a2", "a1"]
+
+    def test_filters_share_where_clause(self, store) -> None:
+        self._insert(store, "a1", rule="margin_ratio", created_at=1000)
+        self._insert(store, "a2", rule="queue_backlog", level="WARNING",
+                     created_at=2000)
+        store.resolve_alerts("queue_backlog", inst_id=None, now_ms=3000)
+
+        rows, total = store.list_alerts(10, rule="queue_backlog", state="resolved")
+
+        assert total == 1
+        assert rows[0]["alert_id"] == "a2"
+
+    def test_time_range(self, store) -> None:
+        self._insert(store, "a1", created_at=1000)
+        self._insert(store, "a2", created_at=2000)
+
+        rows, total = store.list_alerts(10, since_ms=1500)
+
+        assert total == 1
+        assert rows[0]["alert_id"] == "a2"
+
+    def test_ack_is_idempotent(self, store) -> None:
+        self._insert(store)
+
+        assert store.ack_alert("a1", "alice", 5000) is True
+        row1 = store.list_alerts(10)[0][0]
+        assert store.ack_alert("a1", "bob", 6000) is True
+        row2 = store.list_alerts(10)[0][0]
+
+        assert row1["state"] == "acked"
+        assert row2["acked_by"] == "alice"
+        assert row2["acked_at"] == 5000
+
+    def test_ack_unknown(self, store) -> None:
+        assert store.ack_alert("nope", "alice", 1) is False
+
+    def test_resolve_scopes_by_inst(self, store) -> None:
+        self._insert(store, "a1", inst_id="BTC-USDT")
+        self._insert(store, "a2", inst_id="ETH-USDT")
+        self._insert(store, "a3", inst_id=None)
+
+        assert store.resolve_alerts(
+            "margin_ratio", inst_id="BTC-USDT", now_ms=9000
+        ) == 1
+        assert store.resolve_alerts(
+            "margin_ratio", inst_id=None, now_ms=9000
+        ) == 1
+
+        states = {r["alert_id"]: r["state"] for r in store.list_alerts(10)[0]}
+        assert states == {"a1": "resolved", "a2": "open", "a3": "resolved"}
+
+    def test_resolve_leaves_resolved_untouched(self, store) -> None:
+        self._insert(store)
+        store.resolve_alerts("margin_ratio", inst_id=None, now_ms=1000)
+
+        assert store.resolve_alerts("margin_ratio", inst_id=None, now_ms=2000) == 0
+
+
+class TestAlertSilences:
+    def _insert(self, store, silence_id: str = "s1", **kwargs) -> None:
+        params = {
+            "rule": "margin_ratio",
+            "inst_id": None,
+            "until_ts": 5000,
+            "reason": "维护",
+            "created_by": "owner",
+            "created_at": 1000,
+        }
+        params.update(kwargs)
+        store.insert_silence(silence_id, params.pop("rule"), **params)
+
+    def test_active_before_until(self, store) -> None:
+        self._insert(store)
+
+        assert len(store.list_active_silences(4000)) == 1
+        assert store.list_active_silences(5000) == []
+
+    def test_revoke(self, store) -> None:
+        self._insert(store)
+
+        assert store.revoke_silence("s1", 2000) is True
+        assert store.list_active_silences(3000) == []
+        # 重复解除返回 False
+        assert store.revoke_silence("s1", 3000) is False

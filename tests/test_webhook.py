@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from quant.foundation.errors import ParseError
+from quant.foundation.heartbeat import Heartbeat
 from quant.queue.signal_queue import Deduper, SignalQueue
 from quant.webhook.auth import verify_signature, verify_token
 from quant.webhook.parser import AlertParser
@@ -134,6 +135,24 @@ def _client(fake_redis, **kwargs) -> tuple[httpx.AsyncClient, SignalQueue]:
 
 
 class TestWebhookServer:
+    async def test_lifespan_writes_heartbeat(self, fake_redis) -> None:
+        """webhook 是 7 个常驻进程之一，必须能被 /api/processes 判活。"""
+        heartbeat = Heartbeat(fake_redis, "webhook", interval=30)
+        server = WebhookServer(
+            SignalQueue(fake_redis), Deduper(fake_redis), heartbeat=heartbeat
+        )
+        app = server.create_app()
+
+        # ASGITransport 默认不跑 lifespan，直接进上下文管理器
+        async with app.router.lifespan_context(app):
+            raw = await fake_redis.get("quant:heartbeat:webhook")
+            ttl = await fake_redis.ttl("quant:heartbeat:webhook")
+
+        assert json.loads(raw)["pid"] > 0
+        assert 0 < ttl <= 60
+        # 退出 lifespan 后轮询任务要停掉，否则测试进程里留孤儿
+        assert heartbeat._task is None
+
     async def test_post_ok(self, fake_redis) -> None:
         client, queue = _client(fake_redis)
         async with client:

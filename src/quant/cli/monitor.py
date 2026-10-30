@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger, setup_logger
+from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import EmailAlerter
 from quant.monitor.monitor import Monitor
 from quant.okx.client import OKXClient
@@ -58,11 +59,13 @@ async def _run(args, settings: Settings) -> int:
         store=store,
         daily=daily,
         retention=RetentionPurger(settings, store, redis),
+        alert_service=AlertService(store, redis, alerter, monitor_settings),
     )
 
     log.info(
         f"monitor started interval={settings.monitor.interval_seconds}s "
         f"smtp={'on' if alerter.enabled() else 'off'} "
+        f"alerts_persist={'on' if settings.monitor.alerts_persist else 'off'} "
         f"engine_heartbeat={'on' if engine_key else 'off'} "
         f"daily_report={'on' if daily else 'off'} "
         f"retention={'on' if settings.storage.retention_enabled else 'off'}"

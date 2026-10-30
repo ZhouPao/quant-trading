@@ -664,6 +664,182 @@ class SQLiteStore:
         }
 
     # ------------------------------------------------------------------
+    # alerts / silences
+    # ------------------------------------------------------------------
+
+    def insert_alert(
+        self,
+        alert_id: str,
+        rule: str,
+        level: str,
+        message: str,
+        fingerprint: str,
+        *,
+        created_at: int,
+        inst_id: str | None = None,
+        strategy_id: str | None = None,
+        suppressed: bool = False,
+    ) -> bool:
+        """写入一条告警。`alert_id` 由事件内容派生，重复发布视为幂等。
+
+        Returns:
+            是否真的插入了新行（重复 ID 返回 False）。
+        """
+        return (
+            self._execute(
+                """
+                INSERT OR IGNORE INTO alerts (
+                    alert_id, rule, level, message, fingerprint, inst_id,
+                    strategy_id, state, suppressed, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                """,
+                (
+                    alert_id,
+                    rule,
+                    level,
+                    message,
+                    fingerprint,
+                    inst_id,
+                    strategy_id,
+                    1 if suppressed else 0,
+                    created_at,
+                ),
+            )
+            > 0
+        )
+
+    def list_alerts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        level: str | None = None,
+        rule: str | None = None,
+        state: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """按条件分页查询告警，返回 (行, 命中总数)。
+
+        总数与分页用同一组 WHERE 条件：分别拼两次会因漏条件让 `total`
+        与实际翻页结果对不上。
+        """
+        where, params = _alert_filters(
+            level=level,
+            rule=rule,
+            state=state,
+            since_ms=since_ms,
+            until_ms=until_ms,
+        )
+        total_row = self._query_one(
+            f"SELECT COUNT(*) AS n FROM alerts {where}", tuple(params)
+        )
+        total = int(total_row["n"]) if total_row else 0
+        rows = self._query_all(
+            f"""
+            SELECT alert_id, rule, level, message, fingerprint, inst_id,
+                   strategy_id, state, suppressed, created_at, acked_at,
+                   acked_by, resolved_at
+              FROM alerts {where}
+             ORDER BY created_at DESC, alert_id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows], total
+
+    def ack_alert(self, alert_id: str, by: str, now_ms: int) -> bool:
+        """标记已读。幂等：已确认的再调不覆盖首次确认时间与人。
+
+        Returns:
+            记录是否存在。
+        """
+        row = self._query_one(
+            "SELECT state, acked_at, acked_by FROM alerts WHERE alert_id = ?",
+            (alert_id,),
+        )
+        if row is None:
+            return False
+        if row["state"] != "open":
+            # 已 acked / resolved：保持首次确认信息，不重复写
+            return True
+        self._execute(
+            """
+            UPDATE alerts SET state = 'acked', acked_at = ?, acked_by = ?
+             WHERE alert_id = ? AND state = 'open'
+            """,
+            (now_ms, by, alert_id),
+        )
+        return True
+
+    def resolve_alerts(
+        self, rule: str, *, inst_id: str | None, now_ms: int
+    ) -> int:
+        """把该规则（+品种）下所有未关闭记录置为 resolved，返回影响行数。"""
+        if inst_id is None:
+            where = "rule = ? AND inst_id IS NULL"
+            params: tuple = (rule,)
+        else:
+            where = "rule = ? AND inst_id = ?"
+            params = (rule, inst_id)
+        return self._execute(
+            f"""
+            UPDATE alerts SET state = 'resolved', resolved_at = ?
+             WHERE {where} AND state IN ('open', 'acked')
+            """,
+            (now_ms, *params),
+        )
+
+    def insert_silence(
+        self,
+        silence_id: str,
+        rule: str,
+        *,
+        inst_id: str | None,
+        until_ts: int,
+        reason: str,
+        created_by: str,
+        created_at: int,
+    ) -> None:
+        """创建静音记录。`inst_id=None` 表示该规则全部品种。"""
+        self._execute(
+            """
+            INSERT INTO alert_silences (
+                silence_id, rule, inst_id, until_ts, reason,
+                created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (silence_id, rule, inst_id, until_ts, reason, created_by, created_at),
+        )
+
+    def revoke_silence(self, silence_id: str, now_ms: int) -> bool:
+        """提前解除静音；重复解除返回 False（已撤销）。"""
+        return (
+            self._execute(
+                """
+                UPDATE alert_silences SET revoked_at = ?
+                 WHERE silence_id = ? AND revoked_at IS NULL
+                """,
+                (now_ms, silence_id),
+            )
+            > 0
+        )
+
+    def list_active_silences(self, now_ms: int) -> list[dict]:
+        """当前生效的静音（未撤销且未到期），按到期时间升序。"""
+        rows = self._query_all(
+            """
+            SELECT silence_id, rule, inst_id, until_ts, reason,
+                   created_by, created_at, revoked_at
+              FROM alert_silences
+             WHERE revoked_at IS NULL AND until_ts > ?
+             ORDER BY until_ts
+            """,
+            (now_ms,),
+        )
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # equity snapshots
     # ------------------------------------------------------------------
 
@@ -790,11 +966,13 @@ class SQLiteStore:
             for r in rows
         ]
 
-    def _execute(self, sql: str, params: tuple) -> None:
+    def _execute(self, sql: str, params: tuple) -> int:
+        """执行写语句，返回受影响行数（调用方不关心时可忽略）。"""
         with self._lock:
             try:
-                self._conn.execute(sql, params)
+                cursor = self._conn.execute(sql, params)
                 self._conn.commit()
+                return cursor.rowcount
             except sqlite3.Error as e:
                 raise StateError(f"sqlite execute failed: {e}") from e
 
@@ -838,6 +1016,35 @@ def _risk_event_filters(
     if until is not None:
         clauses.append("ts <= ?")
         params.append(until)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, tuple(params)
+
+
+def _alert_filters(
+    *,
+    level: str | None,
+    rule: str | None,
+    state: str | None,
+    since_ms: int | None,
+    until_ms: int | None,
+) -> tuple[str, tuple]:
+    """拼 alerts 的 WHERE 子句（全为等值/区间条件，无需转义）。"""
+    clauses: list[str] = []
+    params: list[object] = []
+    for column, value in (
+        ("level", level),
+        ("rule", rule),
+        ("state", state),
+    ):
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    if since_ms is not None:
+        clauses.append("created_at >= ?")
+        params.append(since_ms)
+    if until_ms is not None:
+        clauses.append("created_at <= ?")
+        params.append(until_ms)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, tuple(params)
 

@@ -23,6 +23,7 @@ from redis.asyncio import Redis
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import MonitorSettings, SmtpSettings
 from quant.foundation.logger import get_logger
+from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.monitor.alerter import Alert, EmailAlerter
 from quant.monitor.snapshot import (
     AccountSnapshot,
@@ -105,6 +106,7 @@ class Monitor:
         store: SQLiteStore | None = None,
         daily: DailyReporter | None = None,
         retention: RetentionPurger | None = None,
+        alert_service: AlertService | None = None,
     ) -> None:
         self._client = client
         self._redis = redis
@@ -115,15 +117,17 @@ class Monitor:
         self._store = store
         self._daily = daily
         self._retention = retention
+        self._alert_service = alert_service
         self._kill_switch = KillSwitch(redis)
         self._last_equity: Decimal | None = None
         self._last_dead_length: int | None = None
         self._last_alive_ts = 0
         self._peak_equity: Decimal | None = None
         self._peak_loaded = False
-        self._alert_last_published: dict[str, int] = {}
-        # 上一轮仍在命中的持续型规则（rule -> message），用于识别恢复
-        self._active_rules: dict[str, str] = {}
+        # 上一轮仍在命中的持续型规则（rule -> 最近一条告警），用于识别恢复。
+        # 存整条告警而非消息，是为了恢复时能带上 inst_id 去 resolve
+        # 对应品种的记录（多品种下否则只会关掉 inst_id IS NULL 的行）。
+        self._active_rules: dict[str, Alert] = {}
         # 已提示过「成本基数未知」的品种，避免每轮重复刷日志
         self._cost_warned: set[str] = set()
         # 上一轮开始的墙钟时间，用于识别宿主机休眠/进程挂起
@@ -182,8 +186,9 @@ class Monitor:
             else:
                 log.warning(f"[{alert.rule}] {alert.message}")
 
-        # 邮件聚合
-        if alerts and self._alerter.enabled():
+        # 邮件：有 AlertService 时逐条发送（静音可精确到单条）；
+        # 没有 service 的旧路径（未接库的调用方/单测）保留一轮一封的聚合。
+        if self._alert_service is None and alerts and self._alerter.enabled():
             body = "\n".join(
                 f"[{a.level}] [{a.rule}] {a.message}" for a in alerts
             )
@@ -269,55 +274,85 @@ class Monitor:
         except Exception as e:  # noqa: BLE001
             log.warning(f"publish dashboard snapshot failed: {e}")
 
-    async def _publish_alerts(self, alerts: list[Alert]) -> None:
-        """把本轮告警追加到 Redis 列表，保留最近 N 条。
+    async def _in_cooldown(self, rule: str, inst_id: str | None, ts: int) -> bool:
+        """同一规则（+品种）在冷却窗口内只产生一次告警。
 
-        同一规则在冷却窗口内只发布一次：心跳丢失、队列堆积这类持续状态
-        每轮都会命中，不去重会迅速占满列表并淹没真正的突发异常。
+        状态放 Redis 而非进程内存：monitor 重启后冷却不会清零，避免重启
+        立刻重发一轮。键带 `inst_id` 维度——多品种下 BTC 的告警不该把
+        ETH 的同类告警吞掉。
+        """
+        if rule in _NO_COOLDOWN_RULES:
+            return False
+        window = self._settings.dashboard_alert_cooldown_seconds
+        if window <= 0:
+            return False
+        key = f"quant:dashboard:alert-cooldown:{rule}:{inst_id or '-'}"
+        try:
+            if await self._redis.exists(key):
+                return True
+            await self._redis.set(key, ts, ex=window)
+        except Exception as e:  # noqa: BLE001
+            # Redis 不可用时不能反过来吞掉告警，宁可多发
+            log.warning(f"alert cooldown check failed: {e}")
+            return False
+        return False
+
+    async def _publish_alerts(self, alerts: list[Alert]) -> None:
+        """先冷却过滤，再逐条发布（落库 + Redis 缓存 + 通知）。
+
+        恢复通知（INFO）与 kill_switch 不受冷却约束：前者是状态跃迁，
+        后者每次激活都必须留痕。
         """
         if not alerts:
             return
 
-        cooldown_ms = self._settings.dashboard_alert_cooldown_seconds * 1000
-        fresh: list[Alert] = []
         for alert in alerts:
-            # 恢复通知是状态跃迁，只发生一次，不受冷却窗口约束
-            if alert.level == "INFO":
-                fresh.append(alert)
-                continue
-            # kill switch 每次激活都要能看到，不参与冷却去重
-            if alert.rule in _NO_COOLDOWN_RULES:
-                fresh.append(alert)
-                continue
-            last = self._alert_last_published.get(alert.rule)
-            if (
-                last is not None
-                and cooldown_ms > 0
-                and alert.ts - last < cooldown_ms
-            ):
-                continue
-            self._alert_last_published[alert.rule] = alert.ts
-            fresh.append(alert)
-        if not fresh:
-            return
+            if alert.level != "INFO" and alert.rule not in _NO_COOLDOWN_RULES:
+                if await self._in_cooldown(alert.rule, alert.inst_id, alert.ts):
+                    continue
 
-        key = self._settings.dashboard_alerts_key
-        try:
-            for alert in fresh:
-                await self._redis.lpush(
-                    key,
-                    json.dumps(
-                        {
-                            "rule": alert.rule,
-                            "level": alert.level,
-                            "message": alert.message,
-                            "ts": alert.ts,
-                        },
-                        ensure_ascii=False,
-                    ),
+            if self._alert_service is None:
+                await self._push_alert_cache(alert)
+                continue
+
+            await self._alert_service.publish(
+                AlertEvent(
+                    rule=alert.rule,
+                    level=alert.level,
+                    message=alert.message,
+                    ts=alert.ts,
+                    inst_id=alert.inst_id,
                 )
+            )
+            # 恢复通知同时把该规则下未关闭的记录置为 resolved
+            if alert.level == "INFO":
+                try:
+                    await self._alert_service.resolve(
+                        alert.rule, inst_id=alert.inst_id
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"resolve alerts failed rule={alert.rule}: {e}")
+
+    async def _push_alert_cache(self, alert: Alert) -> None:
+        """未接 AlertService 时退回只写 Redis 列表的旧行为。"""
+        try:
+            await self._redis.lpush(
+                self._settings.dashboard_alerts_key,
+                json.dumps(
+                    {
+                        "rule": alert.rule,
+                        "level": alert.level,
+                        "message": alert.message,
+                        "ts": alert.ts,
+                        "inst_id": alert.inst_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             await self._redis.ltrim(
-                key, 0, self._settings.dashboard_alert_keep - 1
+                self._settings.dashboard_alerts_key,
+                0,
+                self._settings.dashboard_alert_keep - 1,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"publish dashboard alerts failed: {e}")
@@ -600,7 +635,7 @@ class Monitor:
         让邮件/看板能看出故障已自愈，而不是一直停在上一条告警。
         """
         current = {
-            a.rule: a.message for a in alerts if a.rule in _STATEFUL_RULES
+            a.rule: a for a in alerts if a.rule in _STATEFUL_RULES
         }
         # 持续命中且消息没变 → 这条已经在上一轮报过了，不再重复发布。
         # 解除后 `_active_rules` 会被清空，所以再次激活仍会新增一条。
@@ -609,17 +644,21 @@ class Monitor:
             for a in alerts
             if not (
                 a.rule in _DEDUPE_RULES
-                and self._active_rules.get(a.rule) == a.message
+                and (
+                    prev := self._active_rules.get(a.rule)
+                ) is not None
+                and prev.message == a.message
             )
         ]
         recovered = [
             Alert(
                 rule=rule,
                 level="INFO",
-                message=f"已恢复（此前：{message}）",
+                message=f"已恢复（此前：{alert.message}）",
                 ts=ts,
+                inst_id=alert.inst_id,
             )
-            for rule, message in self._active_rules.items()
+            for rule, alert in self._active_rules.items()
             if rule not in current
         ]
         self._active_rules = current

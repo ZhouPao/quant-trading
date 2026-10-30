@@ -20,9 +20,18 @@ from pathlib import Path
 from redis.asyncio import Redis
 
 from quant.execution.kill_switch import KillSwitch
-from quant.foundation.config import Settings
+from quant.foundation.config import Settings, SmtpSettings
+from quant.foundation.heartbeat import (
+    HEARTBEAT_PREFIX,
+    PROCESS_SPECS,
+    SUPERVISOR_KEY,
+    default_ttl,
+    parse_heartbeat,
+)
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
+from quant.monitor.alert_service import AlertService
+from quant.monitor.alerter import EmailAlerter
 from quant.risk.config import RiskConfig
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
@@ -200,15 +209,68 @@ def _heartbeat(
     offline = {"online": False, "last_ts": None, "age_seconds": None}
     if raw is None:
         return offline
-    try:
-        last = int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    last, _pid = parse_heartbeat(raw)
+    if last is None:
         return offline
     age = _age_seconds(last, now_ms)
     return {
         "online": age is not None and age <= timeout_seconds,
         "last_ts": last,
         "age_seconds": age,
+    }
+
+
+def _child_int(child: dict, field: str) -> int | None:
+    """读取 supervisor 进程表里的整数字段；缺失或非法返回 None。"""
+    value = child.get(field) if isinstance(child, dict) else None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _process_item(
+    name: str,
+    *,
+    raw_present: bool,
+    ts: int | None,
+    pid: int | None,
+    ttl: int,
+    now_ms: int,
+    interval_seconds: int,
+    restarts: int | None,
+    last_exit: int | None,
+    child_pid: int | None = None,
+    reason: str | None = None,
+) -> dict[str, object]:
+    """单个进程的判活结果。
+
+    `reason` 区分四种离线原因：没写过键（no_key）、键过期（stale）、
+    值解析不出来（parse_error）、supervisor 没托管（not_managed）——
+    UI 需要知道是「死了」还是「本来就没开」。
+    """
+    if reason is None:
+        if not raw_present:
+            reason = "no_key"
+        elif ts is None:
+            reason = "parse_error"
+        else:
+            age = (now_ms - ts) / 1000
+            if age > ttl:
+                reason = "stale"
+    age_seconds = None if ts is None else (now_ms - ts) / 1000
+    return {
+        "name": name,
+        "online": reason is None,
+        "last_ts": ts,
+        "age_seconds": age_seconds,
+        "pid": child_pid if child_pid is not None else pid,
+        "restarts": restarts,
+        "last_exit_code": last_exit,
+        "interval_seconds": interval_seconds,
+        "reason": reason,
     }
 
 
@@ -285,6 +347,10 @@ class DashboardService:
         self._settings = settings
         self._kill_switch = KillSwitch(redis)
         self._bars = BarStorage(settings.storage.data_dir)
+        # 看板只做「查告警 / 确认 / 静音」，不发邮件，故用未配置的 alerter
+        self._alerts = AlertService(
+            store, redis, EmailAlerter(SmtpSettings()), settings.monitor
+        )
 
     @property
     def settings(self) -> Settings:
@@ -916,22 +982,214 @@ class DashboardService:
             "degraded": [],
         }
 
-    async def alerts(self, limit: int = 50) -> dict[str, object]:
+    async def alerts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        level: str | None = None,
+        rule: str | None = None,
+        state: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> dict[str, object]:
+        """告警列表：以 SQLite 为准，读失败回落 Redis 实时缓存。
+
+        回落时 `total=None`、`degraded=["sqlite"]`——让 UI 明示「只有最近
+        200 条」，而不是把不完整结果当成全量。
+        """
         now = int(time.time() * 1000)
-        key = self._settings.monitor.dashboard_alerts_key
+        silences: list[dict] = []
+        rows: list[dict] = []
+        total: int | None = None
+        degraded: list[str] = []
+
+        if self._settings.monitor.alerts_persist:
+            try:
+                rows, total = await asyncio.to_thread(
+                    self._alerts.list,
+                    limit,
+                    level=level,
+                    rule=rule,
+                    state=state,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                    offset=offset,
+                )
+                silences = await asyncio.to_thread(
+                    self._alerts.active_silences, now
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"alerts sqlite read failed: {e}")
+                degraded.append("sqlite")
+                rows, total = [], None
+
+        if total is None:
+            try:
+                raw_items = await self._redis.lrange(
+                    self._settings.monitor.dashboard_alerts_key,
+                    0,
+                    limit - 1,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"alerts redis read failed: {e}")
+                degraded.append("redis")
+                raw_items = []
+            rows = [
+                parsed
+                for raw in raw_items
+                if (parsed := _loads(raw)) is not None
+            ]
+
+        return {
+            "ts": now,
+            "total": total,
+            "alerts": rows,
+            "silences": silences,
+            "degraded": degraded,
+        }
+
+    async def ack_alert(self, alert_id: str, by: str) -> dict[str, object]:
+        ok = await self._alerts.ack(alert_id, by)
+        return {"alert_id": alert_id, "acked": ok}
+
+    async def create_silence(
+        self,
+        rule: str,
+        *,
+        inst_id: str | None,
+        hours: float,
+        reason: str,
+        by: str,
+    ) -> dict[str, object]:
+        silence_id = await self._alerts.silence(
+            rule, inst_id=inst_id, hours=hours, reason=reason, by=by
+        )
+        return {"silence_id": silence_id}
+
+    async def revoke_silence(self, silence_id: str) -> dict[str, object]:
+        revoked = await self._alerts.revoke_silence(silence_id)
+        return {"silence_id": silence_id, "revoked": revoked}
+
+    # ------------------------------------------------------------------
+    # 进程健康
+    # ------------------------------------------------------------------
+
+    async def processes(self) -> dict[str, object]:
+        """7 个常驻进程的判活视图。
+
+        `online` 用**该进程自己的 TTL**（不是统一 2×interval）：monitor 的
+        写方是 300s，按 120s 判会得到「键还在但页面说离线」。
+        """
+        now = int(time.time() * 1000)
+        degraded: list[str] = []
+
+        supervisor_raw: object = None
         try:
-            raw_items = await self._redis.lrange(key, 0, limit - 1)
+            supervisor_raw = await self._redis.get(SUPERVISOR_KEY)
         except Exception as e:  # noqa: BLE001
-            log.warning(f"alerts redis read failed: {e}")
-            return {"ts": now, "alerts": [], "degraded": ["redis"]}
+            log.warning(f"processes redis read failed: {e}")
+            degraded.append("redis")
+
+        table = _loads(supervisor_raw)
+        children: dict = {}
+        if isinstance(table, dict) and isinstance(table.get("children"), dict):
+            children = table["children"]
 
         items: list[dict[str, object]] = []
-        for raw in raw_items:
-            parsed = _loads(raw)
-            if parsed is None:
+        for spec in PROCESS_SPECS:
+            ttl = self._process_ttl(spec.name, spec.ttl_seconds)
+            interval = self._process_interval(spec.name, spec.interval_seconds)
+            if spec.name == "supervisor":
+                sup_ts, sup_pid = parse_heartbeat(supervisor_raw)
+                items.append(
+                    _process_item(
+                        spec.name,
+                        raw_present=supervisor_raw is not None,
+                        ts=sup_ts,
+                        pid=sup_pid,
+                        ttl=ttl,
+                        now_ms=now,
+                        interval_seconds=interval,
+                        restarts=None,
+                        last_exit=None,
+                    )
+                )
                 continue
-            items.append(parsed)
-        return {"ts": now, "alerts": items, "degraded": []}
+
+            if table is not None and spec.name not in children:
+                # supervisor 在线但没托管这个进程（如 --no-dashboard）
+                items.append(
+                    _process_item(
+                        spec.name,
+                        raw_present=False,
+                        ts=None,
+                        pid=None,
+                        ttl=ttl,
+                        now_ms=now,
+                        interval_seconds=interval,
+                        restarts=None,
+                        last_exit=None,
+                        reason="not_managed",
+                    )
+                )
+                continue
+
+            try:
+                raw_key = await self._redis.get(
+                    f"{HEARTBEAT_PREFIX}:{spec.name}"
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"process heartbeat read failed {spec.name}: {e}")
+                raw_key = None
+            raw_ts, pid = parse_heartbeat(raw_key)
+            child = children.get(spec.name) or {}
+            items.append(
+                _process_item(
+                    spec.name,
+                    raw_present=raw_key is not None,
+                    ts=raw_ts,
+                    pid=pid,
+                    ttl=ttl,
+                    now_ms=now,
+                    interval_seconds=interval,
+                    restarts=_child_int(child, "restarts"),
+                    last_exit=_child_int(child, "last_exit"),
+                    child_pid=_child_int(child, "pid"),
+                )
+            )
+
+        online = sum(1 for i in items if i["online"])
+        return {
+            "ts": now,
+            "processes": items,
+            "online": online,
+            "total": len(items),
+            "offline": [i["name"] for i in items if not i["online"]],
+            "degraded": degraded,
+        }
+
+    def _process_ttl(self, name: str, fallback: int) -> int:
+        """优先用配置里的实际周期派生，避免与写入方的 TTL 不一致。"""
+        monitor = self._settings.monitor
+        if name == "worker":
+            return monitor.worker_heartbeat_timeout_seconds
+        if name == "monitor":
+            return monitor.monitor_heartbeat_timeout_seconds
+        if name == "candles":
+            return default_ttl(self._settings.candles.interval_seconds)
+        if name == "engine":
+            return default_ttl(self._settings.engine.interval_seconds)
+        return fallback
+
+    def _process_interval(self, name: str, fallback: int) -> int:
+        if name == "candles":
+            return self._settings.candles.interval_seconds
+        if name == "engine":
+            return self._settings.engine.interval_seconds
+        if name == "monitor":
+            return self._settings.monitor.interval_seconds
+        return fallback
 
     async def equity(self, hours: int = 24) -> dict[str, object]:
         """权益时序（monitor 每轮落库的一条快照）。"""

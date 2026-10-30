@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 
+from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger
 from quant.queue.signal_queue import Deduper, SignalQueue
 from quant.webhook.auth import verify_signature, verify_token
@@ -32,6 +35,7 @@ class WebhookServer:
         auth_token: str = "",
         hmac_secret: str = "",
         path: str = "/webhook/tv",
+        heartbeat: Heartbeat | None = None,
     ) -> None:
         self._queue = queue
         self._deduper = deduper
@@ -39,9 +43,21 @@ class WebhookServer:
         self._auth_token = auth_token
         self._hmac_secret = hmac_secret
         self._path = path
+        self._heartbeat = heartbeat
 
     def create_app(self) -> FastAPI:
-        app = FastAPI(title="quant-trading webhook")
+        @asynccontextmanager
+        async def lifespan(_app: FastAPI):
+            if self._heartbeat is not None:
+                await self._heartbeat.beat()
+                self._heartbeat.start()
+            try:
+                yield
+            finally:
+                if self._heartbeat is not None:
+                    await self._heartbeat.stop()
+
+        app = FastAPI(title="quant-trading webhook", lifespan=lifespan)
 
         @app.post(self._path)
         async def receive_alert(request: Request) -> dict:
