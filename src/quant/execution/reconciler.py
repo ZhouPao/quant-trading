@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
+from decimal import Decimal
 
 from quant.execution.okx_broker import OkxBroker, detail_to_fill
 from quant.foundation.logger import get_logger
@@ -76,8 +78,7 @@ class Reconciler:
                 inst_id, order_id, remote, fallback_ts=now, ct_val=ct_val
             )
             if fill is not None:
-                mismatches += 1
-                await self._apply_fill(fill)
+                mismatches += await self._apply_fill(fill, state, now)
                 continue
 
             if state in _OPEN_STATES and self._is_stale(order, now):
@@ -131,21 +132,50 @@ class Reconciler:
                 )
         return canceled
 
-    async def _apply_fill(self, fill) -> None:
-        """以远端成交为准，补写订单成交与持仓。"""
+    async def _apply_fill(self, fill, remote_state: str, now_ms: int) -> int:
+        """以远端成交为准，按**增量**补写订单成交与持仓。
+
+        `detail_to_fill` 返回的是订单累计成交（OKX 的 `accFillSz` 语义），
+        而 `update_order_fill` 负责累加。因此这里必须先与本地已落库的量
+        相减，否则每次对账都会把累计量再加一遍，成交量翻倍膨胀。
+
+        增量成交的时间戳用**本次对账时间**：远端 `fillTime` 在多次部分
+        成交之间可能相同，用它会让 `fills(order_id, ts)` 主键冲突，后一条
+        冲掉前一条，成交明细合计就少于实际成交量。
+
+        Returns:
+            1 表示有状态推进（计入 mismatches），0 表示无变化。
+        """
+        prior = await asyncio.to_thread(
+            self.store.get_order_fill_state, fill.order_id
+        )
+        delta_qty = fill.qty - prior["filled_qty"]
+        if delta_qty <= 0:
+            # 已记录的成交不再重复入账；但状态可能仍需推进（如部分→全部）
+            target = "filled" if remote_state in ("filled",) else "partially_filled"
+            changed = await asyncio.to_thread(
+                self.store.update_order_status, fill.order_id, target
+            )
+            return 1 if changed else 0
+
+        delta_fee = max(fill.fee - prior["fee"], Decimal("0"))
+        delta = replace(fill, qty=delta_qty, fee=delta_fee, ts=now_ms)
+        target = "filled" if remote_state in ("filled",) else "partially_filled"
+
+        await asyncio.to_thread(self.store.save_fill, delta)
         await asyncio.to_thread(
-            self.store.update_order_fill, fill.order_id, fill
+            self.store.update_order_fill, fill.order_id, delta, target
         )
-        await asyncio.to_thread(self.store.save_fill, fill)
         position = await asyncio.to_thread(
-            self.store.get_position, fill.inst_id
+            self.store.get_position, delta.inst_id
         )
-        position.apply_fill(fill)
+        position.apply_fill(delta)
         await asyncio.to_thread(self.store.update_position, position)
         log.warning(
-            f"reconciled {fill.order_id}: pending -> filled "
-            f"qty={fill.qty} px={fill.price}"
+            f"reconciled {fill.order_id}: -> {target} "
+            f"delta_qty={delta_qty} px={fill.price}"
         )
+        return 1
 
 
 __all__ = ["Reconciler"]

@@ -23,36 +23,29 @@ from quant.state.sqlite_store import SQLiteStore
 
 
 async def _cancel_open_orders(settings: Settings, log) -> int:
-    """用批量接口撤销本地记录中所有 pending 挂单，返回撤销数量。"""
+    """撤销交易所侧全部挂单，并把本地未终结订单标记为 canceled。
+
+    以**交易所的挂单列表**为准，而不是本地 `orders` 表：本地漏记或状态
+    漂移时，只撤本地记录会留下真正裸露在交易所的挂单。撤完再把本地状态
+    同步过来，避免下次启动时对账重复处理。
+    """
     store = SQLiteStore(settings.state.db_path)
     client = OKXClient(settings.okx)
     broker = OkxBroker(client)
     try:
-        pairs = [
-            (str(o["inst_id"]), str(o["order_id"]))
-            for o in store.get_open_orders()
-            if o.get("inst_id") and o.get("order_id")
-        ]
-        if not pairs:
-            log.info("no open orders to cancel")
-            return 0
-
         try:
-            results = await broker.cancel_orders(pairs)
+            canceled = await broker.cancel_all_open_orders()
         except Exception as e:  # noqa: BLE001
-            log.error(f"batch cancel failed: {e}")
+            log.error(f"cancel all open orders failed: {e}")
             return 0
 
-        canceled = 0
-        for inst_id, ord_id in pairs:
-            code = results.get(ord_id, "-1")
-            if code == "0":
-                canceled += 1
-            else:
-                log.warning(
-                    f"cancel failed inst={inst_id} ordId={ord_id} sCode={code}"
+        for order in store.get_open_orders():
+            order_id = str(order.get("order_id") or "")
+            if order_id:
+                await asyncio.to_thread(
+                    store.update_order_status, order_id, "canceled"
                 )
-        log.info(f"canceled {canceled}/{len(pairs)} open orders")
+        log.info(f"canceled {canceled} open orders on exchange")
         return canceled
     finally:
         client.close()

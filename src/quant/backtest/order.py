@@ -11,7 +11,9 @@ from typing import Literal
 
 from quant.backtest.signal import Signal
 
-OrderStatus = Literal["pending", "filled", "canceled", "rejected"]
+OrderStatus = Literal[
+    "pending", "live", "partially_filled", "filled", "canceled", "rejected", "expired"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +25,8 @@ class Order:
     Attributes:
         order_id: 订单唯一 ID（worker/Executor 生成 UUID）
         signal: 触发该订单的 Signal
-        status: 订单状态 pending/filled/canceled/rejected
+        status: 订单状态，见 OrderStatus（pending/live/partially_filled/
+            filled/canceled/rejected/expired）
         created_ts: 订单创建时间戳 UTC ms
     """
 
@@ -36,10 +39,16 @@ class Order:
         """构造时校验：order_id 非空 + status 枚举 + ts 非负。"""
         if not self.order_id:
             raise ValueError("order_id must be non-empty")
-        if self.status not in ("pending", "filled", "canceled", "rejected"):
-            raise ValueError(
-                f"status must be pending/filled/canceled/rejected, got {self.status!r}"
-            )
+        if self.status not in (
+            "pending",
+            "live",
+            "partially_filled",
+            "filled",
+            "canceled",
+            "rejected",
+            "expired",
+        ):
+            raise ValueError(f"unknown order status {self.status!r}")
         if self.created_ts < 0:
             raise ValueError(f"created_ts must be non-negative, got {self.created_ts}")
 

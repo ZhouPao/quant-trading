@@ -844,6 +844,132 @@ class TestApplyPaperMode:
 
 
 # =====================================================================
+# kill-switch 撤单测试
+# =====================================================================
+
+
+class TestKillSwitchCancelOpenOrders:
+    @pytest.mark.asyncio
+    async def test_marks_local_open_orders_canceled(self, tmp_path) -> None:
+        from quant.backtest.order import Order
+        from quant.backtest.signal import Signal
+        from quant.cli.kill_switch import _cancel_open_orders
+        from quant.foundation.config import LoggingSettings, StateSettings
+        from quant.state.sqlite_store import SQLiteStore
+
+        settings = Settings(
+            okx=OKXSettings(
+                api_key="k", secret="s", passphrase="p", demo=True
+            ),
+            storage=StorageSettings(data_dir=tmp_path),
+            state=StateSettings(db_path=tmp_path / "quant.db"),
+            logging=LoggingSettings(),
+        )
+        store = SQLiteStore(tmp_path / "quant.db")
+        signal = Signal(
+            strategy_id="sma_cross",
+            side="buy",
+            order_type="market",
+            inst_id="BTC-USDT",
+            qty=Decimal("1"),
+            ts=1_700_000_000_000,
+            signal_id="sig-1",
+        )
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1",
+                signal=signal,
+                status="live",
+                created_ts=1_700_000_000_000,
+            )
+        )
+        store.close()
+
+        with patch("quant.cli.kill_switch.OKXClient"), patch(
+            "quant.cli.kill_switch.OkxBroker"
+        ) as broker_cls:
+            broker_cls.return_value.cancel_all_open_orders = _async_return(2)
+
+            canceled = await _cancel_open_orders(settings, MagicMock())
+
+        assert canceled == 2
+        check = SQLiteStore(tmp_path / "quant.db")
+        try:
+            assert check.get_open_orders() == []
+        finally:
+            check.close()
+
+    @pytest.mark.asyncio
+    async def test_exchange_failure_leaves_local_intact(self, tmp_path) -> None:
+        from quant.backtest.order import Order
+        from quant.backtest.signal import Signal
+        from quant.cli.kill_switch import _cancel_open_orders
+        from quant.foundation.config import LoggingSettings, StateSettings
+        from quant.state.sqlite_store import SQLiteStore
+
+        settings = Settings(
+            okx=OKXSettings(
+                api_key="k", secret="s", passphrase="p", demo=True
+            ),
+            storage=StorageSettings(data_dir=tmp_path),
+            state=StateSettings(db_path=tmp_path / "quant.db"),
+            logging=LoggingSettings(),
+        )
+        store = SQLiteStore(tmp_path / "quant.db")
+        signal = Signal(
+            strategy_id="sma_cross",
+            side="buy",
+            order_type="market",
+            inst_id="BTC-USDT",
+            qty=Decimal("1"),
+            ts=1_700_000_000_000,
+            signal_id="sig-1",
+        )
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1",
+                signal=signal,
+                status="live",
+                created_ts=1_700_000_000_000,
+            )
+        )
+        store.close()
+
+        with patch("quant.cli.kill_switch.OKXClient"), patch(
+            "quant.cli.kill_switch.OkxBroker"
+        ) as broker_cls:
+            broker_cls.return_value.cancel_all_open_orders = _async_raise(
+                RuntimeError("api down")
+            )
+
+            canceled = await _cancel_open_orders(settings, MagicMock())
+
+        assert canceled == 0
+        check = SQLiteStore(tmp_path / "quant.db")
+        try:
+            # 交易所没撤成功就不能谎报本地已撤，否则会留下真实挂单
+            assert len(check.get_open_orders()) == 1
+        finally:
+            check.close()
+
+
+def _async_return(value):
+    async def _inner(*_args, **_kwargs):
+        return value
+
+    return _inner
+
+
+def _async_raise(exc):
+    async def _inner(*_args, **_kwargs):
+        raise exc
+
+    return _inner
+
+
+# =====================================================================
 # fetch_instruments.main 测试
 # =====================================================================
 

@@ -201,7 +201,7 @@ class TestOrderConstruction:
     def test_invalid_status_rejected(self) -> None:
         with pytest.raises(ValueError, match="status"):
             Order(order_id="o1", signal=self._make_signal(),
-                  status="expired", created_ts=1)
+                  status="unknown", created_ts=1)
 
     def test_negative_created_ts_rejected(self) -> None:
         with pytest.raises(ValueError, match="created_ts"):

@@ -213,3 +213,62 @@ async def test_reconcile_cancel_failure_keeps_pending(store) -> None:
 def test_reconciler_rejects_negative_timeout(store) -> None:
     with pytest.raises(ValueError):
         Reconciler(store, FakeBroker({}), order_timeout_seconds=-1)
+
+
+def _partial_detail(qty: str, state: str = "partially_filled") -> dict:
+    detail = _filled_detail(qty=qty)
+    detail["state"] = state
+    return detail
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_recorded_as_partially_filled(store) -> None:
+    _seed_pending(store, "o-1")
+    broker = FakeBroker({"o-1": _partial_detail("0.2")})
+    reconciler = Reconciler(store, broker)
+
+    changed = await reconciler.reconcile()
+
+    assert changed == 1
+    state = store.get_order_fill_state("o-1")
+    assert state["status"] == "partially_filled"
+    assert state["filled_qty"] == Decimal("0.2")
+    assert store.get_position("BTC-USDT").qty == Decimal("0.2")
+    # 部分成交仍需继续对账
+    assert len(store.get_open_orders()) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_fills_use_increment_not_cumulative(store) -> None:
+    """OKX 的 accFillSz 是累计值，落本地时必须相减。"""
+    _seed_pending(store, "o-1")
+    broker = FakeBroker({"o-1": _partial_detail("0.2")})
+    reconciler = Reconciler(store, broker)
+    await reconciler.reconcile(now_ms=1_700_000_100_000)
+
+    # 第二轮远端累计成交 0.5 → 本次增量应为 0.3
+    broker.orders["o-1"] = _partial_detail("0.5", state="filled")
+    await reconciler.reconcile(now_ms=1_700_000_200_000)
+
+    state = store.get_order_fill_state("o-1")
+    assert state["status"] == "filled"
+    assert state["filled_qty"] == Decimal("0.5")
+    assert store.get_position("BTC-USDT").qty == Decimal("0.5")
+    assert store.get_open_orders() == []
+    # 两条成交明细，合计 0.5，不是 0.2 + 0.5
+    trades = store.get_recent_trades(10)
+    assert sum((t.qty for t in trades), Decimal("0")) == Decimal("0.5")
+
+
+@pytest.mark.asyncio
+async def test_repeated_reconcile_does_not_double_count(store) -> None:
+    _seed_pending(store, "o-1")
+    broker = FakeBroker({"o-1": _filled_detail(qty="0.5")})
+    reconciler = Reconciler(store, broker)
+    await reconciler.reconcile()
+
+    # 订单已终结，第二轮不应再进对账集合
+    changed = await reconciler.reconcile()
+
+    assert changed == 0
+    assert store.get_order_fill_state("o-1")["filled_qty"] == Decimal("0.5")

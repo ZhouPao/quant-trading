@@ -133,6 +133,80 @@ class TestOrderPersistence:
         assert open_orders[0]["status"] == "pending"
         assert open_orders[0]["created_ts"] == 1_700_000_000_000
 
+    def test_open_orders_include_live_and_partial(self, store) -> None:
+        """live / partially_filled 也必须在对账范围内。"""
+        for order_id, status in (
+            ("o-live", "live"),
+            ("o-part", "partially_filled"),
+        ):
+            signal = _signal(f"sig-{order_id}")
+            store.save_signal(signal, "executed")
+            store.save_order(
+                Order(
+                    order_id=order_id, signal=signal, status=status,
+                    created_ts=1_700_000_000_000,
+                )
+            )
+
+        ids = {o["order_id"] for o in store.get_open_orders()}
+
+        assert ids == {"o-live", "o-part"}
+
+    def test_partial_fills_accumulate(self, store) -> None:
+        """两次部分成交必须累加，不能后一次覆盖前一次。"""
+        signal = _signal()
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1", signal=signal, status="pending",
+                created_ts=1_700_000_000_000,
+            )
+        )
+
+        store.update_order_fill(
+            "o-1", _fill(qty="0.4", price="100"),
+            status="partially_filled",
+        )
+        store.update_order_fill(
+            "o-1", _fill(qty="0.6", price="120", ts=1_700_000_001_000),
+            status="filled",
+        )
+
+        state = store.get_order_fill_state("o-1")
+        assert state["filled_qty"] == Decimal("1.0")
+        # 加权均价 (0.4*100 + 0.6*120) / 1.0 = 112
+        assert state["filled_price"] == Decimal("112")
+        assert state["status"] == "filled"
+
+    def test_illegal_transition_is_ignored(self, store) -> None:
+        """终态不可回退：非法迁移只跳过，不抛异常。"""
+        signal = _signal()
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1", signal=signal, status="filled",
+                created_ts=1_700_000_000_000,
+            )
+        )
+
+        assert store.update_order_status("o-1", "canceled") is False
+        assert store.get_order_fill_state("o-1")["status"] == "filled"
+
+    def test_same_status_is_noop(self, store) -> None:
+        signal = _signal()
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1", signal=signal, status="pending",
+                created_ts=1_700_000_000_000,
+            )
+        )
+
+        assert store.update_order_status("o-1", "pending") is False
+
+    def test_update_status_missing_order(self, store) -> None:
+        assert store.update_order_status("nope", "canceled") is False
+
 
 class TestPositionPersistence:
     def test_default_flat(self, store) -> None:

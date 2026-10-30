@@ -189,8 +189,13 @@ class Worker:
 
         if result.fill is not None:
             fill = result.fill
+            # 状态以 broker 判定为准：部分成交必须记 partially_filled，
+            # 否则本地会把它当成整单成交，成交量与持仓都偏大
             await asyncio.to_thread(
-                self.store.update_order_fill, result.order.order_id, fill
+                self.store.update_order_fill,
+                result.order.order_id,
+                fill,
+                result.order.status,
             )
             await asyncio.to_thread(self.store.save_fill, fill)
 

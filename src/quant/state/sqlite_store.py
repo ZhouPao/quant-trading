@@ -24,6 +24,10 @@ from quant.backtest.order import Fill, Order
 from quant.backtest.position import Position
 from quant.backtest.signal import Signal
 from quant.foundation.errors import StateError
+from quant.foundation.logger import get_logger
+from quant.state.order_state import can_transition
+
+log = get_logger("state.sqlite")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -273,33 +277,135 @@ class SQLiteStore:
             ),
         )
 
-    def update_order_fill(self, order_id: str, fill: Fill) -> None:
+    def update_order_fill(
+        self, order_id: str, fill: Fill, status: str = "filled"
+    ) -> bool:
+        """**累加**成交并重算均价，同时推进状态。
+
+        部分成交会分多次到达（REST 分批回包或 WS 逐笔推送）。旧实现直接
+        覆盖 `filled_qty/filled_price`，第二次部分成交会把第一次的量冲掉，
+        导致本地成交量偏小、均价错误，进而影响持仓与盈亏。
+
+        Args:
+            fill: 本次新增的成交（**增量**，不是累计量）
+            status: 推进到的目标状态；`partially_filled` 或 `filled`
+
+        Returns:
+            状态是否被推进（成交累加总是执行）。
+        """
+        row = self._query_one(
+            "SELECT status, filled_qty, filled_price, fee FROM orders "
+            "WHERE order_id = ?",
+            (order_id,),
+        )
+        if row is None:
+            raise StateError(f"order not found: {order_id}")
+
+        prev_qty = Decimal(str(row["filled_qty"] or "0"))
+        prev_px = Decimal(str(row["filled_price"] or "0"))
+        prev_fee = Decimal(str(row["fee"] or "0"))
+
+        total_qty = prev_qty + fill.qty
+        if total_qty > 0:
+            avg_px = (
+                prev_qty * prev_px + fill.qty * fill.price
+            ) / total_qty
+        else:
+            avg_px = fill.price
+
+        current = str(row["status"])
+        target = status if can_transition(current, status) else current
+        if target != status:
+            log.warning(
+                f"illegal transition {order_id}: {current} -> {status}, ignored"
+            )
+
         self._execute(
             """
-            UPDATE orders SET status='filled', filled_ts=?, filled_price=?,
+            UPDATE orders SET status=?, filled_ts=?, filled_price=?,
                               filled_qty=?, fee=?
             WHERE order_id=?
             """,
-            (fill.ts, str(fill.price), str(fill.qty), str(fill.fee), order_id),
+            (
+                target,
+                fill.ts,
+                str(avg_px),
+                str(total_qty),
+                str(prev_fee + fill.fee),
+                order_id,
+            ),
         )
+        return target != current
 
-    def update_order_status(self, order_id: str, status: str) -> None:
-        """更新订单状态（对账以远端为准时使用）。"""
+    def get_order_fill_state(self, order_id: str) -> dict:
+        """订单的累计成交状态（部分成交时用于算增量）。"""
+        row = self._query_one(
+            "SELECT status, filled_qty, filled_price, fee FROM orders "
+            "WHERE order_id = ?",
+            (order_id,),
+        )
+        if row is None:
+            return {
+                "status": "",
+                "filled_qty": Decimal("0"),
+                "filled_price": Decimal("0"),
+                "fee": Decimal("0"),
+            }
+        return {
+            "status": str(row["status"]),
+            "filled_qty": Decimal(str(row["filled_qty"] or "0")),
+            "filled_price": Decimal(str(row["filled_price"] or "0")),
+            "fee": Decimal(str(row["fee"] or "0")),
+        }
+
+    def update_order_status(self, order_id: str, status: str) -> bool:
+        """更新订单状态（对账以远端为准时使用）。
+
+        走状态机校验：非法迁移（如 `filled → pending`）只记 WARNING 并保持
+        原状态，不抛异常——否则一轮对账会被单个脏数据整体打断。
+
+        Returns:
+            是否实际写入。
+        """
+        row = self._query_one(
+            "SELECT status FROM orders WHERE order_id = ?", (order_id,)
+        )
+        if row is None:
+            return False
+        current = str(row["status"])
+        if not can_transition(current, status):
+            log.warning(
+                f"illegal transition {order_id}: {current} -> {status}, ignored"
+            )
+            return False
+        if current == status:
+            return False
         self._execute(
             "UPDATE orders SET status = ? WHERE order_id = ?",
             (status, order_id),
         )
+        return True
+
+    #: 仍需对账的订单状态（未终结且有成交/挂单可能）。
+    OPEN_ORDER_STATUSES = ("pending", "live", "partially_filled")
 
     def get_open_orders(self) -> list[dict]:
-        """返回本地 status='pending' 的订单（含 inst_id/created_ts，供对账使用）。"""
+        """返回本地未终结订单（含 inst_id/created_ts，供对账使用）。
+
+        必须覆盖 pending/live/partially_filled 三态：只看 pending 会漏掉
+        已进挂单簿（live）与部分成交（partially_filled）的订单，那些恰恰
+        是最需要继续跟踪的。
+        """
+        placeholders = ", ".join("?" for _ in self.OPEN_ORDER_STATUSES)
         rows = self._query_all(
-            """
+            f"""
             SELECT o.order_id, o.signal_id, o.status, o.created_ts, s.inst_id
             FROM orders o
             LEFT JOIN signals s ON o.signal_id = s.signal_id
-            WHERE o.status = 'pending'
+            WHERE o.status IN ({placeholders})
             ORDER BY o.created_ts
-            """
+            """,
+            self.OPEN_ORDER_STATUSES,
         )
         return [dict(r) for r in rows]
 

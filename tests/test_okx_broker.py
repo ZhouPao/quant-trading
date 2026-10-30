@@ -20,7 +20,7 @@ from quant.backtest.signal import Signal
 from quant.execution.broker import Broker
 from quant.execution.executor import Executor
 from quant.execution.okx_broker import OkxBroker, _cl_ord_id, _fmt, detail_to_fill
-from quant.foundation.errors import OrderError
+from quant.foundation.errors import NetworkError, OrderError
 
 
 def _signal(side="buy", order_type="market", price=None, signal_id="sig-001"):
@@ -129,13 +129,14 @@ class TestOkxBrokerMarket:
         assert "px" not in body
 
     @pytest.mark.asyncio
-    async def test_market_pending_when_not_filled(self):
+    async def test_market_live_when_not_filled(self):
         client = FakeOKXClient(order_details=[_pending_detail()])
         broker = OkxBroker(client, poll_attempts=1)
 
         result = await broker.execute(_signal(), Decimal("0.001"))
 
-        assert result.order.status == "pending"
+        # 已进挂单簿记为 live（不是 pending）；两者都算未终结
+        assert result.order.status == "live"
         assert result.fill is None
 
     @pytest.mark.asyncio
@@ -149,19 +150,25 @@ class TestOkxBrokerMarket:
         assert result.fill is None
 
     @pytest.mark.asyncio
-    async def test_partial_fill_reports_pending(self):
+    async def test_partial_fill_reports_partially_filled(self):
         client = FakeOKXClient(
             order_details=[
-                _pending_detail(state="partially_filled", accFillSz="0.0005", avgPx="65000")
+                _pending_detail(
+                    state="partially_filled",
+                    accFillSz="0.0005",
+                    avgPx="65000",
+                    side="buy",
+                )
             ]
         )
         broker = OkxBroker(client, poll_attempts=1)
 
         result = await broker.execute(_signal(), Decimal("0.001"))
 
-        assert result.order.status == "pending"
-        # 部分成交不产生 Fill（由后续订单查询/成交推送补齐）
-        assert result.fill is None
+        # 部分成交必须落 Fill（累计口径），否则成交量与持仓都会偏小
+        assert result.order.status == "partially_filled"
+        assert result.fill is not None
+        assert result.fill.qty == Decimal("0.0005")
 
 
 class TestOkxBrokerLimit:
@@ -252,7 +259,7 @@ class TestOkxBrokerPolling:
 
         result = await broker.execute(_signal(), Decimal("0.001"))
 
-        assert result.order.status == "pending"
+        assert result.order.status == "live"
         assert len(client.gets) == 2
 
     @pytest.mark.asyncio
@@ -608,3 +615,130 @@ class TestContractUnits:
             _signal(), Decimal("0.001")
         )
         assert spot_client.posts[0][1]["tdMode"] == "cash"
+
+
+class TimeoutThenFindClient:
+    """post 抛网络错误，GET 能按 clOrdId 查到已落地的订单。"""
+
+    def __init__(self, found: dict | None, detail: dict | None = None):
+        self.found = found
+        self.detail = detail or _filled_detail()
+        self.posts: list[tuple[str, dict]] = []
+        self.gets: list[tuple[str, dict]] = []
+
+    def post(self, path, body):
+        self.posts.append((path, body))
+        raise NetworkError("timeout: read timed out")
+
+    def get(self, path, params=None):
+        self.gets.append((path, params or {}))
+        if path == "/api/v5/trade/orders":
+            return [self.found] if self.found else []
+        return [self.detail]
+
+    def get_instrument(self, inst_id):
+        return None
+
+
+class TestSubmitIdempotency:
+    @pytest.mark.asyncio
+    async def test_timeout_queries_cl_ord_id_before_retry(self):
+        client = TimeoutThenFindClient(found={"ordId": "ord-9", "state": "filled"})
+        broker = OkxBroker(client, poll_attempts=1)
+
+        result = await broker.execute(_signal(), Decimal("0.001"))
+
+        # 超时后不重发，直接复用已落地订单
+        assert len(client.posts) == 1
+        query = client.gets[0]
+        assert query[0] == "/api/v5/trade/orders"
+        assert query[1]["clOrdId"] == _cl_ord_id(_signal())
+        # 必须显式 state=all，否则已成交会被查成空
+        assert query[1]["state"] == "all"
+        assert result.order.order_id == "ord-9"
+
+    @pytest.mark.asyncio
+    async def test_timeout_without_existing_order_retries_then_raises(
+        self, monkeypatch
+    ):
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(
+            "quant.execution.okx_broker.asyncio.sleep", _no_sleep
+        )
+        client = TimeoutThenFindClient(found=None)
+        broker = OkxBroker(client, poll_attempts=1)
+
+        with pytest.raises(NetworkError):
+            await broker.execute(_signal(), Decimal("0.001"))
+
+        assert len(client.posts) == 3
+
+    @pytest.mark.asyncio
+    async def test_duplicated_cl_ord_id_is_reused(self):
+        client = FakeOKXClient(
+            post_resp=[{"ordId": "", "sCode": "51016", "sMsg": "Duplicated clOrdId"}],
+            order_details=[_filled_detail()],
+        )
+        client.get = lambda path, params=None: (
+            client.gets.append((path, params or {}))
+            or [{"ordId": "ord-dup", "state": "filled"}]
+        )
+        broker = OkxBroker(client, poll_attempts=1)
+
+        result = await broker.execute(_signal(), Decimal("0.001"))
+
+        assert result.order.order_id == "ord-dup"
+        assert client.gets[0][1]["state"] == "all"
+
+
+class PagedPendingClient:
+    def __init__(self, pages: dict[str | None, list[dict]]):
+        self.pages = pages
+        self.calls: list[dict] = []
+
+    def post(self, path, body):
+        self.calls.append({"path": path, "body": body})
+        return [{"ordId": row["ordId"], "sCode": "0"} for row in body]
+
+    def get(self, path, params=None):
+        params = params or {}
+        self.calls.append({"path": path, "params": params})
+        return self.pages.get(params.get("after"), [])
+
+
+class TestListAndCancelAll:
+    @pytest.mark.asyncio
+    async def test_list_pending_follows_after_cursor(self):
+        page1 = [{"ordId": f"o{i}", "instId": "BTC-USDT"} for i in range(100)]
+        page2 = [{"ordId": "last", "instId": "BTC-USDT"}]
+        client = PagedPendingClient({None: page1, "o99": page2})
+        broker = OkxBroker(client)
+
+        orders = await broker.list_pending_orders("SWAP")
+
+        assert len(orders) == 101
+        cursors = [c["params"].get("after") for c in client.calls if "params" in c]
+        assert cursors == [None, "o99"]
+        assert client.calls[0]["params"]["instType"] == "SWAP"
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_returns_true_cancel_count(self):
+        pending = [{"ordId": "o1", "instId": "BTC-USDT"}]
+        client = PagedPendingClient({None: pending})
+        broker = OkxBroker(client)
+
+        canceled = await broker.cancel_all_open_orders()
+
+        assert canceled == 1
+        assert client.calls[-1]["path"] == "/api/v5/trade/cancel-batch-orders"
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_without_pending_makes_no_cancel_request(self):
+        client = PagedPendingClient({None: []})
+        broker = OkxBroker(client)
+
+        assert await broker.cancel_all_open_orders() == 0
+        paths = [c["path"] for c in client.calls]
+        assert "/api/v5/trade/cancel-batch-orders" not in paths
