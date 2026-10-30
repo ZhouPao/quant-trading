@@ -938,6 +938,7 @@ quant-trading/
 
 - 已标记 ✅ 但未在上表列出的条目（M2-9 ~ M2-12、M3-2、M3-6、M8-9、M8-10、M10-5、M10-8）随 MS1–MS3 一并交付，不单列。
 - 标记 🚫 的条目（M2-13、M9-6）本就不进入任何里程碑，若后续重启需先改状态。
+- MS1 ~ MS4 已有详设：[MS1 数据底座](../specs/2026-10-17-ms1-data-foundation-design.md)、[MS2 回测与 Webhook](../specs/2026-10-17-ms2-backtest-webhook-design.md)、[MS4-A 告警与首页](../specs/2026-10-30-ms4a-alerts-overview-design.md)、[MS4-B 风控与执行](../specs/2026-10-30-ms4b-risk-execution-design.md)、[MS4-C 回测与策略](../specs/2026-10-30-ms4c-backtest-strategy-design.md)。MS5/MS6 尚未出详设。
 
 ### 8.2 模块 × 里程碑矩阵
 

@@ -2,7 +2,7 @@
 
 > 本文档解释 `quant-trading` 项目每个目录与关键文件的作用。
 > 创建日期：2026-10-17
-> 对应设计文档：[PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) §7、[M1 spec v1.1](specs/2026-10-17-m1-data-foundation-design.md) §3
+> 对应设计文档：[PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) §7、[MS1 spec v1.2](specs/2026-10-17-ms1-data-foundation-design.md) §3
 
 ---
 
@@ -41,7 +41,11 @@ quant-trading/
 **关键文件**：
 - `docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md` — PRD v0.6（当前）
 - `docs/requirements/2026-10-17-quant-trading-platform-requirements.md` — PRD v0.5（历史）
-- `docs/specs/2026-10-17-m1-data-foundation-design.md` — M1 详设 v1.1
+- `docs/specs/2026-10-17-ms1-data-foundation-design.md` — MS1 详设 v1.2
+- `docs/specs/2026-10-17-ms2-backtest-webhook-design.md` — MS2 详设 v1.1
+- `docs/specs/2026-10-30-ms4a-alerts-overview-design.md` — MS4-A 详设（告警 + 首页）
+- `docs/specs/2026-10-30-ms4b-risk-execution-design.md` — MS4-B 详设（风控 + 执行）
+- `docs/specs/2026-10-30-ms4c-backtest-strategy-design.md` — MS4-C 详设（回测 + 策略）
 - `docs/reference/OKX_API_REFERENCE.md` — OKX V5 API 速查
 
 ---
@@ -323,5 +327,5 @@ git 忽略规则。**入 git**。
 ## 参考资料
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) §7 项目结构
-- [M1 spec v1.1](specs/2026-10-17-m1-data-foundation-design.md) §3 模块清单、§12 接口契约
+- [MS1 spec v1.2](specs/2026-10-17-ms1-data-foundation-design.md) §3 模块清单、§12 接口契约
 - [OKX API 速查](reference/OKX_API_REFERENCE.md)

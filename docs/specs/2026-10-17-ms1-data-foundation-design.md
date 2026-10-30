@@ -1,11 +1,17 @@
-# M1 数据底座 详细设计文档
+# MS1 数据底座 详细设计文档
 
-> 文档版本：v1.1
+> 文档版本：v1.2
 > 创建日期：2026-10-17
-> 状态：待用户审阅
+> 最后更新：2026-10-30
+> 状态：已实现（MS1 已交付，见 PRD §8.1）
 > 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（本文档编写时对应 v0.5）
 > 关联参考：[OKX API速查](../reference/OKX_API_REFERENCE.md)
-> 设计方案：方案A（最小依赖、自封装、同步优先）。M1 本身不变；本版仅更新 §12 接口契约以适配 PRD v0.5 选定的 webhook 方案B（FastAPI+Redis+worker）。
+> 设计方案：方案A（最小依赖、自封装、同步优先）。MS1 本身不变；本版仅更新 §12 接口契约以适配 PRD v0.5 选定的 webhook 方案B（FastAPI+Redis+worker）。
+
+> **编号约定（重要）**：本文档标题中的 **MS1** 是**里程碑编号**（Milestone），对应 PRD v0.6 §8.1 的 MS1「数据底座」。
+> 它与 PRD 的**模块编号** M1（首页总览）、M2（市场监控）**不是一回事**。
+> 原文件名 `m1-data-foundation-design.md` 中的「M1」是里程碑，已于 2026-10-30 更名为 `ms1-*` 以消除歧义。
+> 下文正文若出现「M1/M2/M3…M6」，**一律指里程碑**，与 PRD 的模块编号无关。
 
 ---
 
@@ -1810,6 +1816,33 @@ M1 不实现 `Signal`/`Order`/`Position`/`RiskConfig` 等类型，留待 M2 spec
 | 是否引入 `apscheduler` 做定时校时？ | M3 启动时决定 |
 | `CandleFetcher` 的断点续传存哪里（SQLite/JSON）？ | M1 实施时决定 |
 
+### 15.3 实现状态对账（2026-10-30 复核）
+
+本节记录 MS1 交付后设计与代码的实际差异，供后续维护者对照，**不回改正文历史章节**。
+
+**已按设计实现**
+
+OKX REST/WS 客户端、限频器（50011 睡眠重试）、`Bar`/`Tick`/`Instrument` 模型（`vol_quote`/`confirm` 均在位）、parquet 按「品种/周期/年份」分层存储、同 ts 去重保留最新、`.checkpoints/{inst_id}_{bar_size}.json` 断点续传、`DataValidator`、`DataAligner`、配置 `${ENV}` 展开、日志、CLI。
+
+**与设计的偏差**
+
+| 项 | 设计 | 实际 | 影响 |
+|---|---|---|---|
+| Python 版本 | 3.11+ | 运行于 3.13 | 无，仅记录 |
+| `data/quality/` | 未设计 | 已规划 M2-15 数据质量报告落 `data/quality/{inst}/{bar}.json` | 属 M2 增量，不改变 MS1 结构 |
+| 保留策略 | 单一 `storage.retention_days = 365` | 实现即为单一全局天数，覆盖 bars/reports/signals/orders/fills/equity_snapshots | PRD M10-13 要求按周期分档并覆盖 alerts/dead_letters/funding_rates，**未实现** |
+| WS 重连 | §15.2 列为开放问题 | 已实现指数退避 5s → 60s 封顶 | 退避会饱和到 60s 上限（已知问题，见 PROGRESS） |
+
+**开放问题裁决**
+
+| 问题 | 裁决 |
+|---|---|
+| parquet 用 DECIMAL 还是 string | 保持 string，实测体积可接受 |
+| 是否引入 polars | 未引入，仍用 pandas |
+| WSClient 是否实现完整重连 | 已实现，退避 5→60s |
+| 是否引入 apscheduler | 未引入，自研 `foundation/schedule.py`（`is_due`/`parse_at`/`day_start_ms_utc8`） |
+| 断点续传存哪里 | JSON，`.checkpoints/{inst_id}_{bar_size}.json` |
+
 ---
 
 ## 16. 变更记录
@@ -1818,3 +1851,4 @@ M1 不实现 `Signal`/`Order`/`Position`/`RiskConfig` 等类型，留待 M2 spec
 |---|---|---|---|
 | 2026-10-17 | v1.0 | AI起草 | 初版。基于 PRD v0.4 与 OKX API 速查 v1.0。覆盖 M1 全部详设；M2-M6 仅接口契约 |
 | 2026-10-17 | v1.1 | 架构调整 + AI更新 | 适配 PRD v0.5（webhook 方案B：FastAPI+Redis+worker）。M1 本身不变；§7 config.toml 预留 `[redis]`/`[webhook]` 段（M1 不实现）；§12 接口契约重写：M2 加双回测注释、新增 §12.2 WebhookServer/SignalQueue/Deduper/Worker/Executor/RiskChecker、§12.3 加 AlertSimulator、§12.4 Monitor 加队列/心跳监控、§12.5 加 StrategyRouter、§12.6 改 systemd 编排 3 进程+Redis AOF、§12.7 数据契约加 Settings 扩展点说明 |
+| 2026-10-30 | v1.2 | AI复核 | 里程碑编号 M1 → **MS1**，文件更名 `m1-*` → `ms1-*`，消除与 PRD 模块编号 M1（首页总览）的歧义；新增 §15.3 实现状态对账（4 处偏差、5 项开放问题裁决）；状态改为「已实现」 |

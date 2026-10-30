@@ -41,16 +41,19 @@ quant-trading/
 
 ## 里程碑
 
+> 里程碑编号统一为 **MS** 前缀（Milestone），与 PRD 的模块编号 M1–M10 区分。详见 [PRD §8](docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)。
+
 | 阶段 | 范围 | 状态 |
 |---|---|---|
-| M1 数据底座 | OKX 客户端 + parquet 存储 + 校验/对齐 | 设计完成，待实施 |
-| M2 回测 + Webhook 框架 | Python 回测 + webhook server + worker | 待设计 |
-| M3 模拟盘 | 本地脚本模拟 TV alert + 模拟盘跑通 | 待设计 |
-| M4 监控 | 账户/持仓监控 + 邮件告警 + 心跳 | 待设计 |
-| M5 实盘 | 接 TV 真 webhook + VPS 部署 3 进程 | 待设计 |
-| M6 上云 | systemd 编排 + 自愈 | 待设计 |
+| MS1 数据底座 | OKX 客户端 + parquet 存储 + 校验/对齐 | 已交付 |
+| MS2 回测 + Webhook 框架 | Python 回测 + webhook server + worker + 风控骨架 | 已交付 |
+| MS3 模拟盘跑通 | 本地脚本模拟 TV alert，模拟盘端到端跑通 | 已交付 |
+| MS4 告警 + 总览 + 可靠性 | 告警持久化、首页总览、风控参数体系、回测落库、执行可靠性、策略参数启停 | 进行中 |
+| MS5 实盘接入 | 真 webhook、手工下单、三项对账、熔断与在线调阈值、告警静音 | 未开始 |
+| MS6 上云 | systemd 托管 + 开机自启 | 未开始 |
+| MS7+ 扩展 | 因子库、组合管理 | 候选 |
 
-详见 [PRD v0.6](docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) 与 [M1 spec v1.1](docs/specs/2026-10-17-m1-data-foundation-design.md)。
+详见 [PRD v0.6](docs/requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) 与 [MS1 spec v1.2](docs/specs/2026-10-17-ms1-data-foundation-design.md)。
 
 ## 快速开始
 

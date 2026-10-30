@@ -1317,8 +1317,8 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
   （`GET /api/quality`）+ 1 个新落盘目录（`data/quality/`）。
 - **修正三处与实现不符**：
   - **M2-2**：原写「订阅 tickers/books/trades + 缓存最近 N 条」。
-    实际 [ws_client.py](src/quant/okx/ws_client.py) 只有 `tickers`；
-    [LivePriceBook](src/quant/execution/price.py) 每品种**只存最新一条**。
+    实际 [ws_client.py](../src/quant/okx/ws_client.py) 只有 `tickers`；
+    [LivePriceBook](../src/quant/execution/price.py) 每品种**只存最新一条**。
     改为「仅 tickers、只留最新」，状态 🟡（重连退避饱和待修）。
   - **M2-4**：原写「资金费率与持仓量」。全仓 grep 无任何 open interest 实现，
     只有 `funding_rate_fetcher.py`。拆为 M2-4 资金费率 ✅ + M2-14 持仓量 ⬜。
@@ -1340,7 +1340,7 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
   - **M10-1** 配置查看：原标 🟡，实际看板**没有任何 `/api/config`**，
     改为 ⬜。
   - **M10-3** 数据保留：原标 ✅，实际
-    [retention.py](src/quant/storage/retention.py) 只覆盖 bars/reports/
+    [retention.py](../src/quant/storage/retention.py) 只覆盖 bars/reports/
     signals/orders/fills/equity_snapshots，且是**单一全局 `retention_days`**，
     缺 alerts/dead_letters/funding_rates 与按周期分档，改为 🟡。
   - **M10-4** 通知设置：原标 🟡，实际看板无通知接口，改为 ⬜。
@@ -1367,20 +1367,20 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - **v0.5 遗留口径（与模块章节自相矛盾）**：
   - §5.3「日志按模块+日期分文件」→ 改为单文件 + 行内前缀，与 M9-1 一致。
   - §9.1 风险表「M6 上云；M5 前小资金试错」→ 旧里程碑编号，改为 MS6/MS5。
-  - §7 `data/` 目录漏了 `instruments/`（[instrument_storage.py](src/quant/storage/instrument_storage.py)）、
-    `funding_rates/`（[funding_rate_fetcher.py](src/quant/fetcher/funding_rate_fetcher.py)）
+  - §7 `data/` 目录漏了 `instruments/`（[instrument_storage.py](../src/quant/storage/instrument_storage.py)）、
+    `funding_rates/`（[funding_rate_fetcher.py](../src/quant/fetcher/funding_rate_fetcher.py)）
     与 `.checkpoints/`，已补。
   - §5.1「WebSocket 重连 < 5 秒」与 M2-2 的 5s→60s 退避冲突，改为
     「首次重连 < 5 秒、最大退避 60 秒」。
   - §5.4「写接口需 token」与 M10-8 的「token 可选」冲突，已对齐。
 - **状态错标**：
   - **M9-2 ✅→🟡**：11 条规则齐备、阈值在 `[monitor]` 可配，但**没有规则级启停**。
-  - **M2-4 ✅→🟡**：[client.py](src/quant/okx/client.py) 的 `get_funding_rate` 只取
+  - **M2-4 ✅→🟡**：[client.py](../src/quant/okx/client.py) 的 `get_funding_rate` 只取
     `/public/funding-rate` 最新一条，未接 `/public/funding-rate-history`，
     **无法回补历史区间**；M4-15 的资金费率成本回测需先补此能力，前置条件已写明。
 - **口径补充**：`PineBaseline` 复用 `backtest_metrics` 的 `pine_*` 列（5 模型 ↔ 4 表，
   避免读者以为漏了一张表）；`max_order_qty` 沿用旧名但实际是**名义价值（USDT）**
-  （见 [risk/config.py](src/quant/risk/config.py)）。
+  （见 [risk/config.py](../src/quant/risk/config.py)）。
 - **里程碑**：M4-6（walk-forward）已在本轮实现，从「随 MS1–MS3 交付」的口径说明里
   移出，正式列入 MS4。
 - 复核结论：全文 1007 行、150 条需求且无重复编号；MS 覆盖差集只剩 M5/M6（由 MS7+
@@ -1396,13 +1396,13 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 | 条目 | 原 | 现 | 依据 |
 |---|---|---|---|
 | M3-3 参数表单 | 🟡 | ⬜ | 看板只有 `GET /api/strategies` 返回 `{id, params}`，无表单无写入 |
-| M3-4 策略启停矩阵 | 🟡 | ⬜ | [config.py](src/quant/foundation/config.py#L148-L151) 的 `[engine]` 只有单个 `strategy`/`inst`；engine 是单进程单组合 |
+| M3-4 策略启停矩阵 | 🟡 | ⬜ | [config.py](../src/quant/foundation/config.py#L148-L151) 的 `[engine]` 只有单个 `strategy`/`inst`；engine 是单进程单组合 |
 | M3-5 信号预览 | ✅ | 🟡 | 只有 `waiting_data`/`no_signal`/`skipped`/`duplicate`/`error` 粗粒度状态，策略内部的趋势过滤/撑压拦截拿不到 |
 | M3-7 研究工作流 | 🟡 | ⬜ | `notebooks/` 只有 `.gitkeep` |
 | M4-7 批量回测 | 🟡 | ⬜ | 只有单策略单品种回测与单策略网格寻优，无跨品种/跨周期批量 |
 | M4-8 与实盘偏离 | ✅ | 🟡 | 判定结论只进日报 CSV 与邮件，未写 `alerts`，未进告警体系 |
 | M7-4 kill switch | ✅ | 🟡 | 撤单只在 CLI `quant kill-switch --on` 里做，看板按钮仅写标志 |
-| M8-14 服务端仓位 | 🟡 | ⬜ | [signal.py](src/quant/backtest/signal.py#L62-L63) 与 [parser.py](src/quant/webhook/parser.py#L19) 均要求 `qty` 必填，无 `PositionSizer` |
+| M8-14 服务端仓位 | 🟡 | ⬜ | [signal.py](../src/quant/backtest/signal.py#L62-L63) 与 [parser.py](../src/quant/webhook/parser.py#L19) 均要求 `qty` 必填，无 `PositionSizer` |
 | M9-5 告警列表 | ✅ | 🟡 | 只有级别 + 规则筛选与分组折叠，无时间区间、无状态筛选 |
 
 **反向修正（原标 ⬜ 但实际已有部分）**
@@ -1418,7 +1418,7 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
   因子 `lookback` 超出时只会拿到截断历史并**静默算错**。已要求 engine/回测装配
   `FactorProvider` 时硬校验 `窗口 ≥ max(lookback)+1`，不足直接报错，不降级。
 - **M7 日切口径冲突**：风控「日亏损」按 UTC+8 切日（`day_start_ms_utc8`，
-  [worker.py](src/quant/execution/worker.py#L154) 实际调用），而 §5.6 写「跨日聚合按
+  [worker.py](../src/quant/execution/worker.py#L154) 实际调用），而 §5.6 写「跨日聚合按
   UTC 日」。不是 bug 而是两套口径并存，已在 M7 加口径说明并在 §5.6 标注例外，
   同时要求 UI 显示时区，否则「今日亏损」会出现两个数。
 
@@ -1438,13 +1438,61 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 **复核结果**：150 条 / 1014 行；状态分布 ✅43 / 🟡24 / ⬜81 / 🚫2；
 MS 覆盖差集只剩 12 条 ✅（随 MS1–MS3 交付，已在口径说明列出）与 2 条 🚫；无悬挂引用。
 
+### 8.48 详设补全：编号消歧 + MS4 三份详设（2026-10-30）
+
+PRD 细化到 150 条后，详设侧暴露出两个问题：一是文件名与标题用旧里程碑编号 `M1/M2`，
+与 PRD 模块编号 `M1 首页总览`、`M2 市场监控` 直接撞车；二是 MS4（进行中）覆盖 7 个模块
+切片、约 35 条需求，**完全没有设计文档**。
+
+**编号消歧**
+
+- `m1-data-foundation-design.md` → `ms1-data-foundation-design.md`，标题 `M1 数据底座` → `MS1 数据底座`
+- `m2-backtest-webhook-design.md` → `ms2-backtest-webhook-design.md`，标题同理
+- 两份文件头部各加「编号约定」声明：MS = 里程碑，M1–M10 = PRD 模块
+- 同步更新 README / PROJECT_STRUCTURE / PROGRESS 中 7 处引用
+- 顺带修 README 里程碑表：原文仍是「M1 设计完成待实施 / M2 待设计」，已改为 MS1–MS3
+  已交付、MS4 进行中、MS5/MS6 未开始、MS7+ 候选
+
+**老 spec 对账**（不回改历史章节，新增对账小节）
+
+- MS1 §15.3：4 处偏差（Python 3.13、`data/quality` 新增、保留策略仍单一天数、WS 退避
+  饱和到 60s）+ 5 项开放问题裁决（parquet 仍 string、不用 polars、WS 重连已实现、
+  不用 apscheduler、断点存 JSON）
+- MS2 §17.3：6 处偏差（风控规则顺序中熔断不在 checker 内、`max_order_qty` 实为名义价值、
+  kill switch 看板不撤单、`Reconciler` 已实现、服务端仓位未实现、walk-forward 已实现）
+  + 4 项开放问题裁决
+
+**MS4 三份详设**
+
+| 文档 | 覆盖条目 | 核心设计 |
+|---|---|---|
+| [MS4-A 告警与首页](specs/2026-10-30-ms4a-alerts-overview-design.md) | M1-1~7/9/10、M9-1~5/7~13 | SQLite 迁移机制（`user_version`）首次引入；`alerts`/`alert_silences` 两表；`AlertService`（落库→Redis→按静音决定是否发信）；7 进程心跳；四表 UNION 事件流；parquet 统计 O(1) 读新鲜度 |
+| [MS4-B 风控与执行](specs/2026-10-30-ms4b-risk-execution-design.md) | M7-4/5/10/11/15/16、M8-14~16/19 | 风控三层参数（默认/全局/策略/在线覆盖）与来源标注；`risk_events` 审计；`risk_overrides` 单表兼当前值与变更史；权益缺失改为拒绝；kill switch 走命令通道撤单；订单状态机与成交累加（**修真实缺陷**）；`PositionSizer`；下单幂等 |
+| [MS4-C 回测与策略](specs/2026-10-30-ms4c-backtest-strategy-design.md) | M2-15、M3-9~12、M4-6/9~14 | `PARAM_SPEC` + `resolve_params` 让回测与实盘共用同一真相源；`strategy_bindings` 与引擎多绑定；`TaskRunner` + 4 张表落库；寻优进程池；7 项扩展指标；`data/quality` 质量报告 |
+
+**三份详设共同确立的约定**
+
+- 迁移版本占用：MS4-A = v2/v3，MS4-B = v4/v5，MS4-C = v6，避免并行开发时冲突
+- 所有「无法计算」的指标一律返回 `None` 而非 0，与 PRD M1-10「不把缺失静默渲染成 0」一致
+- 每个切片都写「回滚开关」：`alerts_persist`、`allow_initial_equity_fallback`、
+  `multi_binding`、`resolve_from_db` 等，出问题可只关功能不回滚代码
+
+**对账中发现的实现缺陷（已写入详设，待 MS4 修复）**
+
+- 订单两次部分成交时第二次覆盖第一次 → `filled_qty` 偏小、均价错误
+- 权益快照缺失时退回 `initial_cash` 做风控判定 → 敞口可能放大数倍
+- kill switch 看板按钮不撤单 → 按下后交易所挂单仍在
+
 ---
 
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）
-- [M1 详设](specs/2026-10-17-m1-data-foundation-design.md)
-- [M2 详设](specs/2026-10-17-m2-backtest-webhook-design.md)
+- [MS1 详设](specs/2026-10-17-ms1-data-foundation-design.md)
+- [MS2 详设](specs/2026-10-17-ms2-backtest-webhook-design.md)
+- [MS4-A 详设：告警与首页](specs/2026-10-30-ms4a-alerts-overview-design.md)
+- [MS4-B 详设：风控与执行](specs/2026-10-30-ms4b-risk-execution-design.md)
+- [MS4-C 详设：回测与策略](specs/2026-10-30-ms4c-backtest-strategy-design.md)
 - [模拟盘运行手册](reference/RUNBOOK_PAPER_TRADING.md)
 - [M3 模拟盘测试报告](tests/2026-10-24-m3-paper-trading-test-report.md)
 - [项目结构说明](PROJECT_STRUCTURE.md)

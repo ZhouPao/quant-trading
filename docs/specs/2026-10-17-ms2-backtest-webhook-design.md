@@ -1,12 +1,18 @@
-# M2 回测 + Webhook 框架 详细设计文档
+# MS2 回测 + Webhook 框架 详细设计文档
 
-> 文档版本：v1.0
+> 文档版本：v1.1
 > 创建日期：2026-10-17
-> 状态：待用户审阅
+> 最后更新：2026-10-30
+> 状态：已实现（MS2 已交付，见 PRD §8.1）
 > 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（本文档编写时对应 v0.5）
-> 上游设计：[M1 数据底座详设 v1.1](2026-10-17-m1-data-foundation-design.md)
+> 上游设计：[MS1 数据底座详设 v1.2](2026-10-17-ms1-data-foundation-design.md)
 > 关联参考：[OKX API速查](../reference/OKX_API_REFERENCE.md)
-> 设计方案：方案B（FastAPI + Redis + worker），延续 M1 §12.2 接口契约
+> 设计方案：方案B（FastAPI + Redis + worker），延续 MS1 §12.2 接口契约
+
+> **编号约定（重要）**：本文档标题中的 **MS2** 是**里程碑编号**，对应 PRD v0.6 §8.1 的 MS2「回测 + Webhook」。
+> 它与 PRD 的**模块编号** M2（市场监控）、M4（回测分析）**不是一回事**。
+> 原文件名 `m2-backtest-webhook-design.md` 已于 2026-10-30 更名为 `ms2-*`。
+> 下文正文若出现「M1/M2/M3…M6」，**一律指里程碑**。
 
 ---
 
@@ -1157,6 +1163,34 @@ worker 主循环异常**不上抛**，捕获后入死信队列继续循环，保
 3. **Worker 并行度**：M2 单进程；多进程方案留 M5 实盘前评估
 4. **策略参数 toml 加载**：M2 用 `dynaconf` 或 `tomllib` 手动加载，留实施时决定
 
+### 17.3 实现状态对账（2026-10-30 复核）
+
+本节记录 MS2 交付后设计与代码的实际差异，供后续维护者对照，**不回改正文历史章节**。
+
+**已按设计实现**
+
+`Strategy` 基类（`on_init`/`on_bar`/`on_trade`/`protective_exit`/`on_finish`）、事件驱动回测、撮合口径「本根收盘出信号 → 下一根开盘成交」、绩效指标、CSV/HTML 报告、网格寻优、FastAPI webhook、Redis 队列（LPUSH/BRPOP + inflight + dead）、信号去重、worker 主循环（BRPOP → 风控 → 下单 → 持久化 + 心跳）、5 条风控规则、SQLite 状态表、双副本策略。
+
+**与设计的偏差**
+
+| 项 | 设计 | 实际 | 影响 |
+|---|---|---|---|
+| 风控规则顺序 | 日亏损 → 连亏 → 熔断 → 单笔 → 单品种 → 总仓位 | `RiskChecker.check` 内为 日亏损 → 连亏 → 单笔名义 → 单品种 → 总仓位；**熔断不在 checker 内**，是独立开关（`kill_switch`） | 语义等价，但读代码时容易误以为熔断缺失；PRD M7 的「规则顺序」应理解为「跨组件的求值顺序」 |
+| `max_order_qty` 语义 | 注释写「单笔最大下单量（USDT）」 | 实际是**单笔最大名义价值（USDT）**，超限时按 `max_qty = max_order_qty / price` 下调数量 | 字段名沿用历史未改；PRD M7 已加注明 |
+| kill switch | 未设计 | 已实现：CLI `quant kill-switch`、看板按钮（仅写标志）、monitor `kill_switch` 告警 | **看板按钮不撤单**，撤单只在 CLI `--on` 分支；PRD M7-4 已标 🟡 并列入 MS4 补齐 |
+| 订单对账 `Reconciler` | 未设计 | 已实现：worker 启动 + 运行期定时对账，挂单超 `order_timeout_seconds` 批量撤单 | 属 M8 增量；「三项对账」（订单/持仓/资金）仍归 MS5（M8-17/M8-18） |
+| 服务端仓位计算 | 未设计 | 未实现，`Signal.qty` 与 webhook `qty` 仍为必填 | PRD M8-14 已标 ⬜，归 MS4 |
+| walk-forward | 未设计 | 已实现 `backtest/walkforward.py` + `quant walk-forward` | 见 MS4-C 详设 |
+
+**开放问题裁决**
+
+| 问题 | 裁决 |
+|---|---|
+| Pine 回测 trades.csv 来源 | 未获取；`PineBaseline` 改为登记已有回测结果做对比，不依赖 TV 导出（见 MS4-C） |
+| Redis 部署形态 | 本地 brew 安装；VPS 留 MS6 |
+| Worker 并行度 | 仍单进程；多绑定改造见 MS4-C |
+| 策略参数 toml 加载 | 用 `tomllib` 手动加载，未引入 dynaconf |
+
 ---
 
 ## 18. 变更记录
@@ -1164,3 +1198,4 @@ worker 主循环异常**不上抛**，捕获后入死信队列继续循环，保
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1.0 | 2026-10-17 | 初版。涵盖回测引擎（§4-5）+ webhook/queue/worker/risk/state 框架（§6-11） |
+| v1.1 | 2026-10-30 | 里程碑编号 M2 → **MS2**，文件更名 `m2-*` → `ms2-*`；新增 §17.3 实现状态对账（6 处偏差、4 项开放问题裁决）；状态改为「已实现」 |
