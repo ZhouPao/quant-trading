@@ -32,6 +32,7 @@ from quant.cli.supervisor import main as supervisor_main
 from quant.cli.sync_candles import main as sync_candles_main
 from quant.cli.test_email import main as test_email_main
 from quant.cli.validate_data import main as validate_data_main
+from quant.cli.walkforward import main as walk_forward_main
 
 # OKX 支持的 K线周期；6H/12H 为本地扩展口径，OKX 原生返回
 BAR_CHOICES = ["1m", "5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D"]
@@ -226,6 +227,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.choices["optimize"].add_argument(
         "--top", type=int, default=10, help="输出前 N 组，默认 10"
+    )
+
+    # walk-forward
+    _add_backtest_args(sub, "walk-forward")
+    p_wf = sub.choices["walk-forward"]
+    p_wf.add_argument(
+        "--grid",
+        required=True,
+        help='参数网格，如 "slow_len=50,100;ema_filter=false,true"',
+    )
+    p_wf.add_argument(
+        "--metric", default="sharpe", help="IS 段选参指标，默认 sharpe"
+    )
+    p_wf.add_argument(
+        "--is-bars", type=int, default=1500, help="样本内根数，默认 1500"
+    )
+    p_wf.add_argument(
+        "--oos-bars", type=int, default=500, help="样本外根数，默认 500"
+    )
+    p_wf.add_argument(
+        "--step-bars",
+        type=int,
+        default=None,
+        help="相邻段 IS 起点间隔，默认等于 --oos-bars（OOS 不重叠）",
     )
 
     # prune
@@ -541,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
         return backtest_main(args)
     elif args.command == "optimize":
         return optimize_main(args)
+    elif args.command == "walk-forward":
+        return walk_forward_main(args)
     elif args.command == "simulate-alert":
         return simulate_alert_main(args)
     elif args.command == "paper-report":
