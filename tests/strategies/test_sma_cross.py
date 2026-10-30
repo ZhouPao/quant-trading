@@ -16,7 +16,7 @@ from quant.backtest.engine import Backtest
 from quant.backtest.matcher import Matcher
 from quant.backtest.position import Position
 from quant.models.bar import Bar
-from quant.strategies.python.sma_cross import SmaCrossStrategy, _ema_last
+from quant.strategies.python.sma_cross import SmaCrossStrategy, _atr_last, _ema_last
 
 _TS0 = 1_700_000_000_000
 _HOUR = 3_600_000
@@ -218,6 +218,126 @@ class TestEmaTrendFilter:
         signals = _feed(strategy, ctx, _bars(["10", "10", "10", "9", "12"]))
 
         assert signals == []
+
+
+def _ohlc_bars(rows: list[tuple[str, str, str, str]]) -> list[Bar]:
+    """按 (open, high, low, close) 构造 bar，用于 ATR 的波幅场景。"""
+    bars = []
+    for i, (o, h, low, c) in enumerate(rows):
+        bars.append(
+            Bar(
+                ts=_TS0 + i * _HOUR,
+                open=Decimal(o),
+                high=Decimal(h),
+                low=Decimal(low),
+                close=Decimal(c),
+                vol=Decimal("1"),
+                vol_quote=Decimal("1"),
+                confirm=1,
+                inst_id="BTC-USDT",
+                bar_size="1H",
+            )
+        )
+    return bars
+
+
+class TestAtr:
+    def test_equals_last_period_true_ranges(self) -> None:
+        """period=2 只看末 3 根：TR=[2.5, 1.5] → 均值 2.0。"""
+        bars = _ohlc_bars(
+            [
+                ("10", "10", "10", "10"),
+                ("10", "11", "10", "10.5"),
+                ("12.5", "13", "12", "12.5"),
+                ("13", "14", "13", "13.5"),
+            ]
+        )
+
+        assert _atr_last(bars, 2) == Decimal("2.0")
+
+    def test_gap_uses_previous_close(self) -> None:
+        """跳空时 TR 取 |high-prev_close| 而非 high-low。"""
+        bars = _ohlc_bars(
+            [
+                ("10", "10", "10", "10"),
+                ("20", "20", "20", "20"),
+            ]
+        )
+
+        # TR = max(0, |20-10|, |20-10|) = 10
+        assert _atr_last(bars, 1) == Decimal("10")
+
+    def test_returns_none_when_not_enough_bars(self) -> None:
+        bars = _ohlc_bars([("10", "10", "10", "10"), ("10", "11", "10", "10.5")])
+
+        assert _atr_last(bars, 5) is None
+
+    def test_only_last_window_is_used(self) -> None:
+        """更早的极端波幅不应影响结果（窗口外数据不参与）。"""
+        noisy = _ohlc_bars([("1", "1000", "1", "500")])
+        target = _ohlc_bars([("10", "10", "10", "10"), ("10", "11", "10", "10.5")])
+
+        assert _atr_last(noisy + target, 1) == _atr_last(target, 1)
+
+
+class TestAtrBand:
+    def _ctx(self, **params) -> Context:
+        base = {"fast_len": 2, "slow_len": 3}
+        base.update(params)
+        return _ctx(base)
+
+    def test_band_blocks_close_just_above_ema(self) -> None:
+        """收盘刚站上 EMA，但远未越过 EMA + k×ATR → 不放行。"""
+        bars = _ohlc_bars(
+            [
+                ("100", "100", "100", "100"),
+                ("100", "100", "100", "100"),
+                ("100", "200", "1", "101"),
+            ]
+        )
+        plain = SmaCrossStrategy()
+        ctx = self._ctx(ema_len=2, ema_filter=True, atr_len=2)
+        plain.on_init(ctx)
+        banded = SmaCrossStrategy()
+        bctx = self._ctx(
+            ema_len=2, ema_filter=True, atr_len=2, ema_band_atr="1"
+        )
+        banded.on_init(bctx)
+
+        assert plain._trend_ok(bars) is True
+        assert banded._trend_ok(bars) is False
+
+    def test_zero_band_matches_plain_filter(self) -> None:
+        """ema_band_atr=0 时门槛就是 EMA，与旧行为完全一致。"""
+        bars = _bars(["10", "10", "10", "10", "11"])
+        plain = SmaCrossStrategy()
+        plain.on_init(self._ctx(ema_len=4, ema_filter=True))
+        zero = SmaCrossStrategy()
+        zero.on_init(self._ctx(ema_len=4, ema_filter=True, ema_band_atr="0"))
+
+        assert plain._trend_ok(bars) == zero._trend_ok(bars) is True
+
+    def test_band_waits_for_atr_window(self) -> None:
+        """带宽非 0 时需 atr_len+1 根，窗口不足不出信号。"""
+        strategy = SmaCrossStrategy()
+        ctx = self._ctx(
+            ema_len=2, ema_filter=True, atr_len=10, ema_band_atr="1"
+        )
+        strategy.on_init(ctx)
+
+        signals = _feed(strategy, ctx, _bars(["10", "10", "10", "9", "12"]))
+
+        assert signals == []
+
+    def test_negative_band_raises(self) -> None:
+        strategy = SmaCrossStrategy()
+        with pytest.raises(ValueError, match="ema_band_atr"):
+            strategy.on_init(self._ctx(ema_band_atr="-1"))
+
+    def test_non_positive_atr_len_raises(self) -> None:
+        strategy = SmaCrossStrategy()
+        with pytest.raises(ValueError, match="atr_len"):
+            strategy.on_init(self._ctx(atr_len=0))
 
 
 class TestSmaCrossBacktest:
