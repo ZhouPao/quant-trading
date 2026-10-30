@@ -1386,6 +1386,58 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - 复核结论：全文 1007 行、150 条需求且无重复编号；MS 覆盖差集只剩 M5/M6（由 MS7+
   「全部」承接）与两条 🚫；状态分布 ✅47 / 🟡23 / ⬜78 / 🚫2。
 
+### 8.47 重点模块（M3/M4/M5/M7）逐条对代码复核（2026-10-30）
+
+对策略、回测、因子、风控四个模块逐条比对实现，发现 9 处状态高估、2 处逻辑缺口、
+2 处字段名与实际不符。
+
+**状态高估（已按实际下调）**
+
+| 条目 | 原 | 现 | 依据 |
+|---|---|---|---|
+| M3-3 参数表单 | 🟡 | ⬜ | 看板只有 `GET /api/strategies` 返回 `{id, params}`，无表单无写入 |
+| M3-4 策略启停矩阵 | 🟡 | ⬜ | [config.py](src/quant/foundation/config.py#L148-L151) 的 `[engine]` 只有单个 `strategy`/`inst`；engine 是单进程单组合 |
+| M3-5 信号预览 | ✅ | 🟡 | 只有 `waiting_data`/`no_signal`/`skipped`/`duplicate`/`error` 粗粒度状态，策略内部的趋势过滤/撑压拦截拿不到 |
+| M3-7 研究工作流 | 🟡 | ⬜ | `notebooks/` 只有 `.gitkeep` |
+| M4-7 批量回测 | 🟡 | ⬜ | 只有单策略单品种回测与单策略网格寻优，无跨品种/跨周期批量 |
+| M4-8 与实盘偏离 | ✅ | 🟡 | 判定结论只进日报 CSV 与邮件，未写 `alerts`，未进告警体系 |
+| M7-4 kill switch | ✅ | 🟡 | 撤单只在 CLI `quant kill-switch --on` 里做，看板按钮仅写标志 |
+| M8-14 服务端仓位 | 🟡 | ⬜ | [signal.py](src/quant/backtest/signal.py#L62-L63) 与 [parser.py](src/quant/webhook/parser.py#L19) 均要求 `qty` 必填，无 `PositionSizer` |
+| M9-5 告警列表 | ✅ | 🟡 | 只有级别 + 规则筛选与分组折叠，无时间区间、无状态筛选 |
+
+**反向修正（原标 ⬜ 但实际已有部分）**
+
+- **M4-10 历史列表 → 🟡**：前端已有 localStorage 摘要历史（上限 20 条，同配置覆盖），
+  但非服务端登记、无筛选、无重跑。
+- **M4-11 多组对比 → 🟡**：前端已有指标横向对比表并高亮最优值，但数据取自
+  localStorage，且未校验同品种同周期。
+
+**逻辑缺口（已补进 PRD）**
+
+- **M5 窗口约束**：`Context.bars_window` 被裁剪到 `max(warmup_bars, window_size)`，
+  因子 `lookback` 超出时只会拿到截断历史并**静默算错**。已要求 engine/回测装配
+  `FactorProvider` 时硬校验 `窗口 ≥ max(lookback)+1`，不足直接报错，不降级。
+- **M7 日切口径冲突**：风控「日亏损」按 UTC+8 切日（`day_start_ms_utc8`，
+  [worker.py](src/quant/execution/worker.py#L154) 实际调用），而 §5.6 写「跨日聚合按
+  UTC 日」。不是 bug 而是两套口径并存，已在 M7 加口径说明并在 §5.6 标注例外，
+  同时要求 UI 显示时区，否则「今日亏损」会出现两个数。
+
+**字段名与实际不符（已改）**
+
+- `Bar` 漏了 `vol_quote`/`confirm`；`Instrument` 的 PRD 字段是 OKX 驼峰
+  （`tickSz`/`lotSz`/`minSz`），实现里早已是 snake_case 且多了 `ct_val`。
+- M2-5「保留 OKX 原始字段名」为假：parquet 列是 `vol_quote`/`confirm`，
+  产品 JSON 也是 `tick_sz`。改为「统一 snake_case，保持与 OKX 原名一一对应」。
+
+**里程碑调整**
+
+- M7-4（kill switch 撤单）列入 MS4，属现有按钮的补齐而非新功能。
+- M3-5 / M4-8 / M9-5 三条 🟡 的残余能力归 MS5 收口：
+  分别依赖 M3-15 详情页、M9-11 告警入口、M9-7 已读状态。
+
+**复核结果**：150 条 / 1014 行；状态分布 ✅43 / 🟡24 / ⬜81 / 🚫2；
+MS 覆盖差集只剩 12 条 ✅（随 MS1–MS3 交付，已在口径说明列出）与 2 条 🚫；无悬挂引用。
+
 ---
 
 ## 9. 相关文档
