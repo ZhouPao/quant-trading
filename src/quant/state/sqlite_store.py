@@ -127,6 +127,46 @@ _MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_ts);
     CREATE INDEX IF NOT EXISTS idx_fills_ts ON fills(ts);
     """,
+    # v3 -> v4：风控事件与在线覆盖（MS4-B §11.1/§11.2）
+    """
+    CREATE TABLE IF NOT EXISTS risk_events (
+        event_id     TEXT PRIMARY KEY,
+        ts           INTEGER NOT NULL,
+        strategy_id  TEXT,
+        inst_id      TEXT NOT NULL,
+        signal_id    TEXT NOT NULL,
+        decision     TEXT NOT NULL,
+        rule         TEXT,
+        limit_name   TEXT,
+        limit_value  TEXT,
+        actual_value TEXT,
+        qty_before   TEXT,
+        qty_after    TEXT,
+        equity       TEXT,
+        reason       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_risk_events_ts ON risk_events(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_risk_events_rule
+        ON risk_events(rule, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_risk_events_signal
+        ON risk_events(signal_id);
+
+    CREATE TABLE IF NOT EXISTS risk_overrides (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id TEXT NOT NULL,
+        param       TEXT NOT NULL,
+        old_value   TEXT,
+        new_value   TEXT NOT NULL,
+        reason      TEXT,
+        source      TEXT NOT NULL,
+        changed_by  TEXT NOT NULL,
+        changed_at  INTEGER NOT NULL,
+        revoked_at  INTEGER,
+        revoked_by  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_overrides_effective
+        ON risk_overrides(strategy_id, param, revoked_at);
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -387,6 +427,137 @@ class SQLiteStore:
         return self._fills_since(0)
 
     # ------------------------------------------------------------------
+    # risk events / overrides (MS4-B)
+    # ------------------------------------------------------------------
+
+    def insert_risk_event(
+        self,
+        *,
+        event_id: str,
+        ts: int,
+        inst_id: str,
+        signal_id: str,
+        decision: str,
+        strategy_id: str | None = None,
+        rule: str | None = None,
+        limit_name: str | None = None,
+        limit_value: str | None = None,
+        actual_value: str | None = None,
+        qty_before: str | None = None,
+        qty_after: str | None = None,
+        equity: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """写入一条风控事件（`event_id` 相同则忽略，天然幂等）。"""
+        self._execute(
+            """
+            INSERT OR IGNORE INTO risk_events
+                (event_id, ts, strategy_id, inst_id, signal_id, decision,
+                 rule, limit_name, limit_value, actual_value,
+                 qty_before, qty_after, equity, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                ts,
+                strategy_id,
+                inst_id,
+                signal_id,
+                decision,
+                rule,
+                limit_name,
+                limit_value,
+                actual_value,
+                qty_before,
+                qty_after,
+                equity,
+                reason,
+            ),
+        )
+
+    def list_risk_events(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        rule: str | None = None,
+        decision: str | None = None,
+        strategy_id: str | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> list[dict]:
+        """按时间倒序列出风控事件。"""
+        where, params = _risk_event_filters(
+            rule=rule,
+            decision=decision,
+            strategy_id=strategy_id,
+            since=since,
+            until=until,
+        )
+        rows = self._query_all(
+            f"SELECT * FROM risk_events{where} "
+            "ORDER BY ts DESC, event_id LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows]
+
+    def count_risk_events(
+        self,
+        *,
+        rule: str | None = None,
+        decision: str | None = None,
+        strategy_id: str | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> int:
+        where, params = _risk_event_filters(
+            rule=rule,
+            decision=decision,
+            strategy_id=strategy_id,
+            since=since,
+            until=until,
+        )
+        row = self._query_one(
+            f"SELECT COUNT(*) AS n FROM risk_events{where}", params
+        )
+        return int(row["n"]) if row else 0
+
+    def get_effective_overrides(
+        self, strategy_id: str | None = None
+    ) -> dict[str, str]:
+        """返回未撤销的在线覆盖：``{"{strategy}:{param}": value}``。
+
+        键格式与 Redis hash ``quant:risk:overrides`` 一致，调用方可以直接
+        喂给 `quant.risk.limits.parse_override_hash`。
+
+        同一个 `(strategy_id, param)` 可能有多条历史行，取最新一条；
+        没有任何未撤销行的字段视为「无覆盖」，回落 ②③ 取严结果。
+        """
+        where = "WHERE o.revoked_at IS NULL"
+        params: list[object] = []
+        if strategy_id is not None:
+            where += " AND o.strategy_id = ?"
+            params.append(strategy_id)
+        rows = self._query_all(
+            f"""
+            SELECT o.strategy_id, o.param, o.new_value
+              FROM risk_overrides o
+              JOIN (
+                    SELECT strategy_id, param, MAX(id) AS max_id
+                      FROM risk_overrides
+                     WHERE revoked_at IS NULL
+                     GROUP BY strategy_id, param
+              ) t ON o.id = t.max_id
+            {where}
+            """,
+            tuple(params),
+        )
+        return {
+            f"{r['strategy_id']}:{r['param']}": str(r["new_value"])
+            for r in rows
+        }
+
+    # ------------------------------------------------------------------
     # equity snapshots
     # ------------------------------------------------------------------
 
@@ -534,6 +705,35 @@ class SQLiteStore:
                 return self._conn.execute(sql, params).fetchall()
             except sqlite3.Error as e:
                 raise StateError(f"sqlite query failed: {e}") from e
+
+
+def _risk_event_filters(
+    *,
+    rule: str | None,
+    decision: str | None,
+    strategy_id: str | None,
+    since: int | None,
+    until: int | None,
+) -> tuple[str, tuple]:
+    """拼 risk_events 的 WHERE 子句（全为等值/区间条件，无需转义）。"""
+    clauses: list[str] = []
+    params: list[object] = []
+    for column, value in (
+        ("rule", rule),
+        ("decision", decision),
+        ("strategy_id", strategy_id),
+    ):
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    if since is not None:
+        clauses.append("ts >= ?")
+        params.append(since)
+    if until is not None:
+        clauses.append("ts <= ?")
+        params.append(until)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, tuple(params)
 
 
 def _realized_pnl(fills: list[Fill]) -> Decimal:

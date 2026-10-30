@@ -47,6 +47,19 @@ window_size = 200                         # 策略可见历史 bar 数
 [state]
 db_path = "./data/state/quant.db"         # SQLite 状态库
 
+# 全局风控默认值：与策略 toml 的 [risk] 取严（取更小的一方）。
+# 留空（默认）表示不参与取严，由代码默认兜底；填入即对所有策略生效。
+# 在线覆盖（页面调整）直接覆盖这里，不参与取严。
+[risk]
+# max_position_pct = 0.3
+# max_total_pct = 0.8
+# max_order_qty = 10000
+# daily_loss_limit = 0.05
+# consecutive_loss_limit = 3
+allow_initial_equity_fallback = false     # 权益快照缺失时是否退回 initial_cash 下单（false=拒单）
+snapshot_max_age_ms = 180000              # 快照最大可接受年龄，超龄视为不可用
+event_log = true                          # 拒绝/减量/硬停止是否写入 risk_events
+
 [execution]
 reconcile_interval_seconds = 60           # worker 运行期对账间隔（0=仅启动时对账）
 order_timeout_seconds = 300               # 挂单超时自动撤单（秒，0=关闭）

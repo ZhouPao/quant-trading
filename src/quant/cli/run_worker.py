@@ -32,7 +32,8 @@ from quant.okx.client import OKXClient
 from quant.okx.ws_client import WSClient
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
-from quant.risk.config import load_risk_config
+from quant.risk.config import load_risk_config, load_strategy_risk
+from quant.risk.limits import LIMIT_FIELDS, RiskLimits, resolve_limits
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 
@@ -88,21 +89,49 @@ async def _run(args, settings: Settings) -> int:
         dead_key=settings.redis.dead_key,
     )
     store = SQLiteStore(settings.state.db_path)
-    risk_config = load_risk_config(args.strategy, config_dir=args.config_dir)
+    # 生效参数 = ① 代码默认 / ② 全局 [risk] / ③ 策略 [risk] 取严后的结果
+    risk_config = load_risk_config(
+        args.strategy,
+        config_dir=args.config_dir,
+        defaults=settings.risk,
+    )
     if args.paper_mode:
         risk_config = _apply_paper_mode(risk_config)
-    risk = RiskChecker(risk_config, store, settings.backtest.initial_cash)
+    risk = RiskChecker(
+        risk_config,
+        store,
+        settings.backtest.initial_cash,
+        allow_initial_equity_fallback=(
+            settings.risk.allow_initial_equity_fallback
+        ),
+        event_log=settings.risk.event_log,
+    )
     # 发布的是「生效值」而非配置文件原值：paper-mode 覆盖只存在于本进程
+    limits = resolve_limits(
+        args.strategy,
+        defaults=settings.risk,
+        strategy_risk=load_strategy_risk(
+            args.strategy, config_dir=args.config_dir
+        ),
+    )
+    if args.paper_mode:
+        # paper-mode 绕过取严直接改生效值，来源记为 override（人工决定）
+        merged = {name: limits.value(name) for name in LIMIT_FIELDS}
+        merged["max_position_pct"] = risk_config.max_position_pct
+        merged["max_total_pct"] = risk_config.max_total_pct
+        sources = {name: limits.source(name) for name in LIMIT_FIELDS}
+        sources["max_position_pct"] = "override"
+        sources["max_total_pct"] = "override"
+        limits = RiskLimits(
+            strategy_id=limits.strategy_id,
+            applied=sources,
+            **merged,  # type: ignore[arg-type]
+        )
     risk_limits = {
         "strategy": risk_config.strategy_id,
         "paper_mode": bool(args.paper_mode),
-        "rules": {
-            "max_position_pct": str(risk_config.max_position_pct),
-            "max_total_pct": str(risk_config.max_total_pct),
-            "max_order_qty": str(risk_config.max_order_qty),
-            "daily_loss_limit": str(risk_config.daily_loss_limit),
-            "consecutive_loss_limit": risk_config.consecutive_loss_limit,
-        },
+        "rules": {name: str(limits.value(name)) for name in LIMIT_FIELDS},
+        "sources": {name: limits.source(name) for name in LIMIT_FIELDS},
     }
 
     client: OKXClient | None = None
@@ -151,18 +180,21 @@ async def _run(args, settings: Settings) -> int:
         async def equity_provider() -> Decimal | None:
             """风控基数取账户总权益，与 engine 读同一份 monitor 快照。
 
-            读不到快照时返回 None，checker 退回 initial_cash 兜底；此时仓位
-            上限会按配置初始资金计算，可能截断真实账户下的下单量。
+            返回 None 表示「不可用」：键缺失、值非法，或快照超龄
+            （monitor 卡死后键仍在 TTL 内，但数值已过时）。随后由
+            checker 按 allow_initial_equity_fallback 决定兜底还是拒单。
             """
             value = await read_account_field(
                 redis,
                 settings.monitor.dashboard_snapshot_key,
                 "total_equity",
+                now_ms=int(time.time() * 1000),
+                max_age_ms=settings.risk.snapshot_max_age_ms,
             )
             if value is None:
                 log.warning(
-                    "account snapshot unavailable, risk equity falls back to "
-                    f"{settings.backtest.initial_cash}"
+                    "account snapshot unavailable; risk equity strict mode="
+                    f"{not settings.risk.allow_initial_equity_fallback}"
                 )
             return value
 

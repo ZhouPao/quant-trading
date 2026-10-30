@@ -133,6 +133,37 @@ class TestWorkerProcess:
         assert store.get_recent_trades(10)  # 只有预置的两笔，无新成交
         assert len(store.get_recent_trades(10)) == 2
 
+    async def test_rejected_signal_writes_risk_event(self, env) -> None:
+        """拒绝必须留痕，否则事后无法回答「为什么拒了这单」。"""
+        worker, queue, store, _ = env
+        worker.risk = RiskChecker(
+            _risk_config(max_position_pct=Decimal("0")), store
+        )
+        await queue.push(_signal())
+
+        await worker.run_once(timeout=1)
+
+        assert store.get_signal_status("sig-1") == "rejected"
+        events = store.list_risk_events()
+        assert len(events) == 1
+        assert events[0]["decision"] == "rejected"
+        assert events[0]["rule"] == "max_position_pct"
+        assert events[0]["signal_id"] == "sig-1"
+
+    async def test_adjusted_signal_writes_risk_event(self, env) -> None:
+        worker, queue, store, _ = env
+        worker.risk = RiskChecker(
+            _risk_config(max_order_qty=Decimal("50")), store
+        )
+        await queue.push(_signal(qty="10"))  # 10 * 100 = 1000 > 50
+
+        await worker.run_once(timeout=1)
+
+        events = store.list_risk_events()
+        assert len(events) == 1
+        assert events[0]["decision"] == "adjusted"
+        assert events[0]["qty_after"] == "0.5"
+
     async def test_daily_loss_resets_at_utc8_midnight(self, env) -> None:
         """昨日亏损不计入今日额度：worker 传的是 UTC+8 当日零点。"""
         worker, queue, store, _ = env
@@ -368,4 +399,75 @@ class TestReadAccountField:
         await redis.set("snap", payload)
 
         assert await read_account_field(redis, "snap", "avail_usdt") is None
+        await redis.aclose()
+
+    async def test_fresh_snapshot_passes_age_check(self) -> None:
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set(
+            "snap",
+            json.dumps(
+                {"ts": 10_000, "account": {"total_equity": "97945.5"}}
+            ),
+        )
+
+        assert await read_account_field(
+            redis,
+            "snap",
+            "total_equity",
+            now_ms=10_000 + 1_000,
+            max_age_ms=180_000,
+        ) == Decimal("97945.5")
+        await redis.aclose()
+
+    async def test_stale_snapshot_returns_none(self) -> None:
+        """monitor 卡死后键仍在 TTL 内，但数值已过时（MS4-B §5.3）。"""
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set(
+            "snap",
+            json.dumps(
+                {"ts": 10_000, "account": {"total_equity": "97945.5"}}
+            ),
+        )
+
+        assert (
+            await read_account_field(
+                redis,
+                "snap",
+                "total_equity",
+                now_ms=10_000 + 180_001,
+                max_age_ms=180_000,
+            )
+            is None
+        )
+        await redis.aclose()
+
+    async def test_missing_ts_returns_none_when_age_check_enabled(self) -> None:
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set(
+            "snap", json.dumps({"account": {"total_equity": "100"}})
+        )
+
+        assert (
+            await read_account_field(
+                redis,
+                "snap",
+                "total_equity",
+                now_ms=10_000,
+                max_age_ms=180_000,
+            )
+            is None
+        )
+        await redis.aclose()
+
+    async def test_age_check_off_keeps_legacy_behavior(self) -> None:
+        """engine 侧的 avail_usdt 不走新鲜度校验，行为保持不变。"""
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set(
+            "snap",
+            json.dumps({"ts": 1, "account": {"avail_usdt": "100"}}),
+        )
+
+        assert await read_account_field(
+            redis, "snap", "avail_usdt"
+        ) == Decimal("100")
         await redis.aclose()

@@ -1052,6 +1052,7 @@ class TestRiskLimits:
         rules: dict | None = None,
         paper_mode: bool = False,
         ts: int = NOW,
+        sources: dict | None = None,
     ) -> None:
         payload = {
             "ts": ts,
@@ -1065,6 +1066,7 @@ class TestRiskLimits:
                 "consecutive_loss_limit": 3,
                 **(rules or {}),
             },
+            "sources": sources or {},
         }
         await redis.set(self.KEY, json.dumps(payload))
 
@@ -1142,6 +1144,26 @@ class TestRiskLimits:
         assert Decimal(rules["inst_position"]["used"]) == Decimal("650.00")
         assert Decimal(rules["inst_position"]["limit"]) == Decimal("3000")
         assert Decimal(rules["total_position"]["limit"]) == Decimal("8000")
+        assert result["degraded"] == []
+
+    async def test_surfaces_limit_source(self, env) -> None:
+        """限值来源要透出，用于区分「策略写死的」和「临时放宽的」。"""
+        service, _store, redis, _settings = env
+        await self._publish(
+            redis,
+            sources={
+                "max_position_pct": "override",
+                "max_total_pct": "strategy",
+            },
+        )
+
+        result = await service.risk_limits()
+
+        rules = {rule["key"]: rule for rule in result["rules"]}
+        assert rules["inst_position"]["source"] == "override"
+        assert rules["total_position"]["source"] == "strategy"
+        # 未发布来源的规则保持 None，而不是编一个值
+        assert rules["daily_loss"]["source"] is None
         assert result["degraded"] == []
 
     async def test_daily_loss_halt_at_limit(self, env) -> None:

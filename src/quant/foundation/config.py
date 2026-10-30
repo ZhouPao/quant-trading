@@ -246,6 +246,28 @@ class MonitorSettings(BaseModel):
     risk_limits_ttl_seconds: int = 300
 
 
+class RiskDefaults(BaseModel):
+    """全局风控默认值（config.toml `[risk]`，MS4-B §13）。
+
+    限额字段默认 ``None`` 表示「全局层未配置」，**不参与取严**，由代码
+    默认值兜底。若把代码默认值写进全局层，就等于把所有策略隐式钳制在
+    默认值以内——那是一次没人要求的收紧。
+    """
+
+    max_position_pct: Decimal | None = None
+    max_total_pct: Decimal | None = None
+    max_order_qty: Decimal | None = None
+    daily_loss_limit: Decimal | None = None
+    consecutive_loss_limit: int | None = None
+    # 权益快照缺失时是否允许退回 backtest.initial_cash 做风控基数。
+    # 默认 False：monitor 挂掉时按初始资金算比例会把真实敞口放大数倍。
+    allow_initial_equity_fallback: bool = False
+    # 快照最大可接受年龄；超龄视为不可用（不硬编码，monitor 周期可调）
+    snapshot_max_age_ms: int = 180_000
+    # 风控事件是否落库（灰度期回滚开关）
+    event_log: bool = True
+
+
 class Settings(BaseModel):
     """项目全局配置。
 
@@ -268,6 +290,7 @@ class Settings(BaseModel):
     monitor: MonitorSettings = Field(default_factory=MonitorSettings)
     dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
     report: ReportSettings = Field(default_factory=ReportSettings)
+    risk: RiskDefaults = Field(default_factory=RiskDefaults)
 
     @classmethod
     def load(cls, config_path: Path = Path("config/config.toml")) -> Settings:

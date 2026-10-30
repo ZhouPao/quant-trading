@@ -266,7 +266,16 @@ class TestMigrations:
             "idx_signals_ts",
             "idx_orders_created",
             "idx_fills_ts",
+            "idx_risk_events_ts",
+            "idx_risk_events_rule",
+            "idx_risk_events_signal",
+            "idx_overrides_effective",
         } <= indexes
+
+    def test_fresh_db_has_risk_tables(self, tmp_path) -> None:
+        path = tmp_path / "quant.db"
+        SQLiteStore(path).close()
+        assert {"risk_events", "risk_overrides"} <= self._tables(path)
 
     def test_legacy_db_upgrades_and_keeps_data(self, tmp_path) -> None:
         """老库：user_version=0、6 张表且 heartbeat 有数据。"""
@@ -334,3 +343,114 @@ class TestMigrations:
             )
         finally:
             conn.close()
+
+
+class TestRiskEvents:
+    """risk_events 落库与查询（MS4-B §11.1）。"""
+
+    def _event(self, **overrides) -> dict:
+        row = {
+            "event_id": "e1",
+            "ts": 1000,
+            "inst_id": "BTC-USDT",
+            "signal_id": "sig-1",
+            "decision": "rejected",
+            "strategy_id": "sma_cross",
+            "rule": "max_order_qty",
+            "limit_name": "max_order_qty",
+            "limit_value": "1000",
+            "actual_value": "2000",
+            "qty_before": "20",
+            "qty_after": "0",
+            "equity": "10000",
+            "reason": "order notional 2000 exceeds max",
+        }
+        row.update(overrides)
+        return row
+
+    def test_insert_and_list(self, store) -> None:
+        store.insert_risk_event(**self._event())
+
+        rows = store.list_risk_events()
+        assert len(rows) == 1
+        assert rows[0]["rule"] == "max_order_qty"
+        assert rows[0]["actual_value"] == "2000"
+
+    def test_duplicate_event_id_is_ignored(self, store) -> None:
+        store.insert_risk_event(**self._event())
+        store.insert_risk_event(**self._event(reason="changed"))
+
+        rows = store.list_risk_events()
+        assert len(rows) == 1
+        assert rows[0]["reason"] == "order notional 2000 exceeds max"
+
+    def test_filters(self, store) -> None:
+        store.insert_risk_event(**self._event(event_id="e1", ts=1000))
+        store.insert_risk_event(
+            **self._event(
+                event_id="e2",
+                ts=2000,
+                decision="adjusted",
+                rule="max_position_pct",
+            )
+        )
+
+        assert len(store.list_risk_events(decision="adjusted")) == 1
+        assert len(store.list_risk_events(rule="max_order_qty")) == 1
+        assert len(store.list_risk_events(since=1500)) == 1
+        assert store.count_risk_events() == 2
+        assert store.count_risk_events(strategy_id="other") == 0
+
+    def test_newest_first_and_paging(self, store) -> None:
+        for i in range(3):
+            store.insert_risk_event(
+                **self._event(event_id=f"e{i}", ts=1000 + i)
+            )
+
+        rows = store.list_risk_events(limit=2)
+        assert [r["event_id"] for r in rows] == ["e2", "e1"]
+        assert [r["event_id"] for r in store.list_risk_events(limit=2, offset=2)] == [
+            "e0"
+        ]
+
+
+class TestEffectiveOverrides:
+    """risk_overrides 的「最新未撤销行即生效」（MS4-B §11.2）。"""
+
+    def _write(self, store, *, param: str = "max_position_pct", value: str,
+               at: int = 1000, revoked: int | None = None,
+               strategy_id: str = "sma_cross") -> None:
+        store._execute(  # noqa: SLF001 - 写入 API 属于后续切片
+            """
+            INSERT INTO risk_overrides
+                (strategy_id, param, old_value, new_value, reason, source,
+                 changed_by, changed_at, revoked_at)
+            VALUES (?, ?, NULL, ?, 'test', 'cli', 'tester', ?, ?)
+            """,
+            (strategy_id, param, value, at, revoked),
+        )
+
+    def test_latest_row_wins(self, store) -> None:
+        self._write(store, value="0.2", at=1000, revoked=1500)
+        self._write(store, value="0.4", at=2000)
+        self._write(store, value="0.5", at=3000)
+
+        assert store.get_effective_overrides("sma_cross") == {
+            "sma_cross:max_position_pct": "0.5"
+        }
+
+    def test_all_revoked_means_no_override(self, store) -> None:
+        """全部撤销 = 无覆盖，回落 ②③ 取严（不能冻结配置值）。"""
+        self._write(store, value="0.4", at=1000, revoked=2000)
+        assert store.get_effective_overrides("sma_cross") == {}
+
+    def test_strategy_isolation(self, store) -> None:
+        self._write(store, value="0.2", strategy_id="a")
+        self._write(store, value="0.4", strategy_id="b")
+
+        assert store.get_effective_overrides("a") == {"a:max_position_pct": "0.2"}
+        assert store.get_effective_overrides("b") == {"b:max_position_pct": "0.4"}
+        assert store.get_effective_overrides() == {
+            "a:max_position_pct": "0.2",
+            "b:max_position_pct": "0.4",
+        }

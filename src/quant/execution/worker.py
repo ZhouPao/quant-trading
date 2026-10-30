@@ -154,6 +154,14 @@ class Worker:
             day_start_ms_utc8(),
             equity=equity,
         )
+        # 审计留痕：只记拒绝/减量/硬停止，写失败不阻断交易
+        await asyncio.to_thread(
+            self.risk.record_event,
+            decision,
+            signal,
+            now_ms=int(time.time() * 1000),
+            equity=equity,
+        )
         if not decision.approved:
             await asyncio.to_thread(
                 self.store.save_signal, signal, "rejected"

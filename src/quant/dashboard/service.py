@@ -108,6 +108,7 @@ def _limit_rule(
     used: Decimal | None,
     limit: Decimal | None,
     detail: str,
+    source: str | None = None,
 ) -> dict[str, object]:
     ratio = (
         _limit_ratio(used, limit)
@@ -122,6 +123,9 @@ def _limit_rule(
         "ratio": _ratio_text(ratio),
         "level": _limit_level(ratio),
         "detail": detail,
+        # 该限值来自哪一层（default/global/strategy/override），
+        # 用于区分「策略里写死的」和「今天临时放宽的」
+        "source": source,
     }
 
 
@@ -471,6 +475,13 @@ class DashboardService:
             or _RISK_DEFAULTS.consecutive_loss_limit
         )
 
+        raw_sources = payload.get("sources")
+        sources_src = raw_sources if isinstance(raw_sources, dict) else {}
+
+        def _source(name: str) -> str | None:
+            value = sources_src.get(name)
+            return value if isinstance(value, str) else None
+
         snapshot: dict | None = None
         try:
             snapshot = _loads(
@@ -564,6 +575,7 @@ class DashboardService:
                 daily_used,
                 equity * daily_loss_limit,
                 f"UTC+8 当日已实现盈亏 {today_pnl}",
+                source=_source("daily_loss_limit"),
             ),
             _limit_rule(
                 "consecutive_loss",
@@ -571,6 +583,7 @@ class DashboardService:
                 Decimal(streak),
                 Decimal(consecutive_loss_limit),
                 f"最近连续亏损 {streak} 笔",
+                source=_source("consecutive_loss_limit"),
             ),
             _limit_rule(
                 "order_notional",
@@ -578,6 +591,7 @@ class DashboardService:
                 None,
                 max_order_qty,
                 f"单笔最大名义 {max_order_qty} USDT",
+                source=_source("max_order_qty"),
             ),
             _limit_rule(
                 "inst_position",
@@ -585,6 +599,7 @@ class DashboardService:
                 inst_used,
                 equity * max_position_pct,
                 f"{inst_name or '暂无持仓'} 名义 {inst_used}",
+                source=_source("max_position_pct"),
             ),
             _limit_rule(
                 "total_position",
@@ -592,6 +607,7 @@ class DashboardService:
                 total_used,
                 equity * max_total_pct,
                 f"全部持仓名义 {total_used}",
+                source=_source("max_total_pct"),
             ),
         ]
 

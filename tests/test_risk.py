@@ -9,6 +9,7 @@ import pytest
 from quant.backtest.order import Fill
 from quant.backtest.position import Position
 from quant.backtest.signal import Signal
+from quant.foundation.config import RiskDefaults
 from quant.risk.checker import RiskChecker, RiskDecision
 from quant.risk.config import RiskConfig, load_risk_config
 from quant.risk.pnl import round_trip_pnls
@@ -81,10 +82,27 @@ class TestRiskConfig:
         with pytest.raises(FileNotFoundError):
             load_risk_config("nope", tmp_path)
 
-    def test_missing_risk_section_raises(self, tmp_path: Path) -> None:
+    def test_missing_risk_section_falls_back(self, tmp_path: Path) -> None:
+        """缺 [risk] 段不再抛错：回落代码默认，并保留 WARNING。"""
         (tmp_path / "x.toml").write_text('[strategy]\nstrategy_id = "x"\n')
-        with pytest.raises(ValueError, match="missing \\[risk\\]"):
-            load_risk_config("x", tmp_path)
+        config = load_risk_config("x", tmp_path)
+        assert config.strategy_id == "x"
+        assert config.max_position_pct == Decimal("0.3")
+        assert config.consecutive_loss_limit == 3
+
+    def test_global_defaults_merge_with_strategy(self, tmp_path: Path) -> None:
+        """②③ 取严：全局 0.2 与策略 0.5 取小。"""
+        (tmp_path / "x.toml").write_text(
+            '[strategy]\nstrategy_id = "x"\n[risk]\nmax_position_pct = 0.5\n'
+            "max_order_qty = 500\n"
+        )
+        config = load_risk_config(
+            "x", tmp_path, defaults=RiskDefaults(max_position_pct=Decimal("0.2"))
+        )
+        assert config.max_position_pct == Decimal("0.2")
+        assert config.max_order_qty == Decimal("500")
+        # 未配置的字段回落代码默认
+        assert config.max_total_pct == Decimal("0.8")
 
     def test_strategy_id_mismatch_raises(self, tmp_path: Path) -> None:
         (tmp_path / "x.toml").write_text(
@@ -284,6 +302,137 @@ class TestDecisionType:
         )
         with pytest.raises(AttributeError):
             decision.approved = False  # type: ignore[misc]
+
+
+class TestRuleAttribution:
+    """拒绝/减量必须带上是哪条规则、限值多少、实际多少（MS4-B §4.3）。"""
+
+    def test_reject_reports_rule_and_values(self, store) -> None:
+        checker = RiskChecker(
+            _config(max_position_pct=Decimal("0")), store
+        )
+        decision = checker.check(_signal(qty="20"), market_price=Decimal("100"))
+
+        assert decision.approved is False
+        assert decision.rule == "max_position_pct"
+        assert decision.limit_name == "max_position_pct"
+        assert decision.limit_value == Decimal("0")
+        assert decision.actual_value == Decimal("2000")
+
+    def test_adjust_reports_binding_rule(self, store) -> None:
+        checker = RiskChecker(_config(), store)
+        decision = checker.check(_signal(qty="50"), market_price=Decimal("100"))
+
+        assert decision.approved is True
+        assert decision.adjusted_qty == Decimal("30")
+        assert decision.rule == "max_position_pct"
+        assert decision.limit_value == Decimal("3000")
+        assert decision.actual_value == Decimal("5000")
+
+    def test_untouched_decision_has_no_rule(self, store) -> None:
+        checker = RiskChecker(_config(), store)
+        decision = checker.check(_signal(qty="1"), market_price=Decimal("100"))
+
+        assert decision.approved is True
+        assert decision.rule is None
+
+
+class TestEquityUnavailable:
+    """权益缺失的严格口径（MS4-B §5.2）。"""
+
+    def test_strict_mode_rejects_when_equity_missing(self, store) -> None:
+        checker = RiskChecker(
+            _config(), store, allow_initial_equity_fallback=False
+        )
+        decision = checker.check(_signal(), market_price=Decimal("100"))
+
+        assert decision.approved is False
+        assert decision.halt is False  # 数据缺失不是账户异常
+        assert decision.rule == "equity_unavailable"
+
+    def test_strict_mode_rejects_zero_equity(self, store) -> None:
+        checker = RiskChecker(
+            _config(), store, allow_initial_equity_fallback=False
+        )
+        decision = checker.check(
+            _signal(), market_price=Decimal("100"), equity=Decimal("0")
+        )
+
+        assert decision.approved is False
+        assert decision.rule == "equity_unavailable"
+
+    def test_legacy_mode_still_falls_back(self, store) -> None:
+        checker = RiskChecker(
+            _config(), store, allow_initial_equity_fallback=True
+        )
+        decision = checker.check(_signal(qty="50"), market_price=Decimal("100"))
+
+        assert decision.adjusted_qty == Decimal("30")
+
+
+class TestRiskEventRecording:
+    """只记录拒绝/减量/硬停止（MS4-B §4.1）。"""
+
+    def _record(self, checker, decision, signal, equity=None):
+        return checker.record_event(
+            decision, signal, now_ms=_TS, equity=equity
+        )
+
+    def test_rejection_is_recorded(self, store) -> None:
+        checker = RiskChecker(
+            _config(max_position_pct=Decimal("0")), store
+        )
+        signal = _signal(qty="20")
+        decision = checker.check(signal, market_price=Decimal("100"))
+
+        assert self._record(checker, decision, signal) is True
+        rows = store.list_risk_events()
+        assert len(rows) == 1
+        assert rows[0]["decision"] == "rejected"
+        assert rows[0]["rule"] == "max_position_pct"
+        assert rows[0]["qty_before"] == "20"
+        assert rows[0]["limit_value"] == "0"
+
+    def test_adjustment_is_recorded(self, store) -> None:
+        checker = RiskChecker(_config(), store)
+        signal = _signal(qty="50")
+        decision = checker.check(signal, market_price=Decimal("100"))
+
+        assert self._record(checker, decision, signal) is True
+        rows = store.list_risk_events(decision="adjusted")
+        assert len(rows) == 1
+        assert Decimal(rows[0]["qty_after"]) == Decimal("30")
+
+    def test_halt_is_recorded(self, store) -> None:
+        checker = RiskChecker(_config(daily_loss_limit=Decimal("0.01")), store)
+        store.save_fill(_fill("buy", "600", ts=_TS))
+        store.save_fill(_fill("sell", "100", ts=_TS + 1))
+        signal = _signal()
+        decision = checker.check(signal, market_price=Decimal("100"))
+
+        assert decision.halt is True
+        assert self._record(checker, decision, signal) is True
+        rows = store.list_risk_events()
+        assert rows[0]["decision"] == "halted"
+
+    def test_approved_untouched_is_not_recorded(self, store) -> None:
+        checker = RiskChecker(_config(), store)
+        signal = _signal(qty="1")
+        decision = checker.check(signal, market_price=Decimal("100"))
+
+        assert decision.approved is True
+        assert self._record(checker, decision, signal) is False
+        assert store.list_risk_events() == []
+
+    def test_event_log_switch_off(self, store) -> None:
+        checker = RiskChecker(
+            _config(max_order_qty=Decimal("1000")), store, event_log=False
+        )
+        signal = _signal(qty="20")
+        decision = checker.check(signal, market_price=Decimal("100"))
+
+        assert self._record(checker, decision, signal) is False
+        assert store.list_risk_events() == []
 
 
 class TestRoundTripPnls:
