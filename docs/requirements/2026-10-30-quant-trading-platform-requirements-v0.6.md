@@ -224,7 +224,7 @@
 | M2-1 | 历史 K 线下载 | 指定品种（现货/永续）、周期、时间范围；`history-candles` 自动翻页拉旧数据；按 `.checkpoints` 断点续传 | F1.1 | ✅ |
 | M2-2 | 实时行情订阅 | **仅订阅 `tickers` 频道**，产出 `Tick`；每品种只保留最新一条（不缓存历史）；自动重连带 ±20% 抖动，退避 5s→60s；连接状态与连续失败次数上报 Redis | F1.2 | 🟡 |
 | M2-3 | 产品配置拉取 | 拉取全部交易对 `instruments`（`tickSz`/`lotSz`/`minSz` 等）；模拟盘与实盘 `instIdCode` 独立拉取；USD 现货已迁 USDC | F1.3 | ✅ |
-| M2-4 | 资金费率 | 拉取并累积资金费率历史，按 `ts` 去重追加；供策略与手续费估算使用 | F1.4 | ✅ |
+| M2-4 | 资金费率 | 定时拉取当前资金费率并按 `ts` 去重追加到 `data/funding_rates/{inst_id}.json`，供手续费估算与持仓成本参考。**现状只取最新一条（`/public/funding-rate`），未接 `/public/funding-rate-history`，因此无法回补历史区间**，M4-15 的资金费率成本回测需先补该能力，故为 🟡 | F1.4 | 🟡 |
 | M2-5 | 数据存储 | K 线按「品种/周期/年份」分 parquet 落盘；产品配置存 JSON；保留 OKX 原始字段名 | F1.5 | ✅ |
 | M2-6 | 限频管理 | 按端点组令牌桶：公开行情 20req/2s、账户 10req/2s、单下 60/批下 300/撤单 60req/2s；命中 `50011` 睡 2 秒重试 | F1.6 | ✅ |
 | M2-7 | 数据完整性校验 | 按周期校验时间戳连续性；缺失段自动补拉（最多 3 次）；重复时间戳保留最新；校验 OHLC 合法性；结果输出为 `DataQualityReport` | F1.7 | ✅ |
@@ -335,6 +335,8 @@
 
 **SQLite 新增 4 张表**：`backtest_runs`、`backtest_metrics`、`backtest_artifacts`、`optimize_jobs`。金额沿用 TEXT 存 Decimal 字符串，指标用 REAL。
 
+`PineBaseline` **不单独建表**：导入的 Pine 指标落在 `backtest_metrics` 的 `pine_<metric>` 列与 `deviation` 列（同名指标一一对应），保持「5 个模型 ↔ 4 张表」口径一致。
+
 **文件布局**：
 
 ```
@@ -380,7 +382,7 @@ data/backtests/{run_id}/
 
 **不做**：分布式回测、tick 级回测、可视化策略编辑器、自动对接 TradingView（无公开 API，只支持导入）。
 
-**前置条件**：M4-15 依赖 M2-4 的资金费率历史；M4-12/M4-13 依赖看板后端具备长任务与进度上报能力（当前仅有同步 handler）；M4-16 的 CSV 列名固定为 `metric,value`，指标名与内部字段同名。
+**前置条件**：M4-15 依赖 M2-4 补齐资金费率历史回补（当前只取最新一条，不足以覆盖回测区间）；M4-12/M4-13 依赖看板后端具备长任务与进度上报能力（当前仅有同步 handler）；M4-16 的 CSV 列名固定为 `metric,value`，指标名与内部字段同名。
 
 **验收**：提交一次长的批量回测，HTTP 在 1 秒内返回 `run_id` 且页面可轮询进度；进程重启后历史回测仍可列出并查看曲线；同一参数集的全量重跑与缓存结果逐项相等；导入 Pine 指标后偏离度 > 5% 的项明确标红；walk-forward 的 OOS 数据不得回流影响选参（有单测固定）。
 
@@ -517,7 +519,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 | 模型 | 关键字段 | 说明 |
 |---|---|---|
-| `RiskLimits` | `strategy_id` + `max_order_qty` / `max_position_pct` / `max_total_pct` / `daily_loss_limit` / `consecutive_loss_limit` + `applied` | 合并后的生效参数；`applied` 记录每个字段来自 `global` 还是 `strategy` |
+| `RiskLimits` | `strategy_id` + `max_order_qty` / `max_position_pct` / `max_total_pct` / `daily_loss_limit` / `consecutive_loss_limit` + `applied` | 合并后的生效参数；`applied` 记录每个字段来自 `global` 还是 `strategy`。**`max_order_qty` 沿用历史字段名，实际含义是单笔最大名义价值（USDT），不是数量** |
 | `RuleHit` | `rule_id` / `limit` / `actual` / `qty_before` / `qty_after` | 单条规则的命中详情；未触发则不产生 |
 | `RiskDecision` | `approved` / `adjusted_qty` / `reason` / `halt` / `hits: list[RuleHit]` | 在现有结构上增加 `hits`，便于解释「为什么被拒/被减量」 |
 | `RiskEvent` | `ts` / `signal_id` / `strategy_id` / `inst_id` / `approved` / `halt` / `reason` / `hits`(JSON) / `equity` | 每次判定落一条，供风控页与告警查询 |
@@ -674,7 +676,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | 编号 | 功能项 | 详细要求 | 来源 | 状态 |
 |---|---|---|---|---|
 | M9-1 | 统一日志规范 | 单文件 `logs/quant-trading.log`，行内固定前缀标模块；10MB 轮转、保留 30 天；时间统一 UTC 并在行内明示时区 | 4.3（v0.5） | ✅ |
-| M9-2 | 告警规则 | 已实现 11 条：worker/engine 心跳、队列堆积、死信新增、保证金率、余额突变、持仓漂移、撤单率、连续亏损、API 错误率、kill switch；每条阈值可配、可单独启停 | F5.4 | ✅ |
+| M9-2 | 告警规则 | 已实现 11 条：worker/engine 心跳、队列堆积、死信新增、保证金率、余额突变、持仓漂移、撤单率、连续亏损、API 错误率、kill switch；阈值均在 `[monitor]` 可配。**规则级启停尚未实现**，需靠 M9-7/M9-10 的静音能力，故状态为 🟡 | F5.4 | 🟡 |
 | M9-3 | 邮件告警 | SMTP 发往所有者邮箱；未配置（缺 host/username/to_addrs）时降级为 no-op，仅记日志，不阻断监控进程 | F5.5 | 🟡 |
 | M9-4 | 监控自身心跳 | monitor 每轮写带 TTL 的心跳键；续期失败即视为自身异常；重启后检查上次心跳间隔，超时则产生「上次心跳中断」告警 | F5.6 | ✅ |
 | M9-5 | 告警列表页 | 按时间倒序；展示级别、规则、对象（品种/策略）、状态；支持按级别/规则/时间/状态筛选 | 新增 | ✅ |
@@ -776,7 +778,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | 单次历史 K 线下拉 | 1 年 1H（约 8760 根）< 60 秒 | M2 |
 | 回测速度 | 1 年 1H + 单策略 < 5 秒 | M4 |
 | 信号到下单 | < 2 秒 | M8 |
-| WebSocket 重连 | < 5 秒 | M2 |
+| WebSocket 重连 | 首次重连 < 5 秒；连续失败时指数退避至上限 60 秒（带 ±20% 抖动） | M2 |
 | 看板首屏 | < 3 秒（本机） | M1 |
 
 ### 5.2 可靠性
@@ -790,7 +792,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 - 模块边界清晰：行情/回测/交易/监控/因子/组合各自独立，通过明确接口通信
 - 配置与代码分离：凭证、品种列表、风控参数一律走配置文件
-- 日志统一格式，按模块+日期分文件，保留 30 天
+- 日志统一格式，单文件 `logs/quant-trading.log` + 行内模块前缀，10MB 轮转、保留 30 天
 
 ### 5.4 安全性
 
@@ -799,7 +801,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 - 模拟盘与实盘 Key 分离，配置切换
 - 实盘使用子账户，仅转入本期所需资金（< 1000 USDT），主账户资产隔离
 - 凭证每 90 天轮换
-- 看板只监听本机回环地址；写接口需 token
+- 看板只监听本机回环地址；写接口需本机 Host + `X-Dashboard-Request` 头，token 可选
 
 ### 5.5 部署
 
@@ -905,7 +907,7 @@ quant-trading/
 ├── web/                       # 看板前端
 ├── tests/
 ├── notebooks/
-├── data/                      # parquet（不入 git）：candles/ factors/ backtests/ quality/ backups/
+├── data/                      # parquet/JSON（不入 git）：candles/ instruments/ funding_rates/ factors/ backtests/ quality/ backups/ .checkpoints/
 ├── logs/                      # 日志（不入 git）
 └── pyproject.toml
 ```
@@ -921,14 +923,14 @@ quant-trading/
 | MS1（已完成） | M2-1 ~ M2-8 | OKX 客户端、本地 parquet、校验与对齐 |
 | MS2（已完成） | M4-1 ~ M4-5、M8-2 ~ M8-6、M7-1 ~ M7-3、M3-1 | 回测引擎 + 样例策略双副本；webhook + Redis + worker；风控规则与持久化 |
 | MS3（已完成） | M8-1、M8-4 ~ M8-6、M8-12、M8-13 | 模拟盘跑通完整链路；执行页与减仓平仓可用 |
-| MS4（进行中） | M9-1 ~ M9-5、M9-8、M9-9、M9-11、M9-13、M1-1 ~ M1-7、M1-10、M7-5、M7-10、M7-11、M7-15、M7-16、M4-9 ~ M4-14、M8-14 ~ M8-16、M8-19、M3-9、M3-10、M3-11、M3-12、M2-15 | 监控告警与告警持久化、首页总览（含 7 进程健康与事件流）、风险指标、风控参数合并与事件落库、回测结果落库与对比、执行可靠性、策略参数与启停、数据质量报告 |
+| MS4（进行中） | M9-1 ~ M9-5、M9-8、M9-9、M9-11、M9-13、M1-1 ~ M1-7、M1-10、M7-5、M7-10、M7-11、M7-15、M7-16、M4-6、M4-9 ~ M4-14、M8-14 ~ M8-16、M8-19、M3-9、M3-10、M3-11、M3-12、M2-15 | 监控告警与告警持久化、首页总览（含 7 进程健康与事件流）、风险指标、风控参数合并与事件落库、walk-forward 与回测结果落库对比、执行可靠性、策略参数与启停、数据质量报告 |
 | MS5（未开始） | M8-7、M8-8、M8-11、M8-17、M8-18、M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17、M9-7、M9-10、M9-12、M9-14、M1-8、M1-9、M3-3、M3-4、M3-7、M3-8、M3-13 ~ M3-15、M4-7、M4-15、M4-16、M2-14、M10-1 ~ M10-4、M10-9 ~ M10-15 | 实盘接入、真 webhook、进程编排、手工下单与三项对账、熔断与在线阈值调整、告警静音与趋势统计、今日盈亏与告警摘要、研究工作流与策略详情页、批量回测、资金费率成本、Pine 对比、持仓量采集、配置视图与白名单热改、凭证健康、备份与自检 |
 | MS6（未开始） | M10-6、M10-7 | 上云、systemd 托管与开机自启（进程自愈由 M8-11 承担） |
 | MS7+（候选） | M5 全部（15 条）、M6 全部（14 条） | 因子库、组合管理 |
 
 **矩阵口径说明**：
 
-- 已标记 ✅ 但未在上表列出的条目（M2-9 ~ M2-12、M3-2、M3-5、M3-6、M4-6、M4-8、M7-4、M8-9、M8-10、M10-5、M10-8）随 MS1–MS3 一并交付，不单列。
+- 已标记 ✅ 但未在上表列出的条目（M2-9 ~ M2-12、M3-2、M3-5、M3-6、M4-8、M7-4、M8-9、M8-10、M10-5、M10-8）随 MS1–MS3 一并交付，不单列。
 - 标记 🚫 的条目（M2-13、M9-6）本就不进入任何里程碑，若后续重启需先改状态。
 
 ### 8.2 模块 × 里程碑矩阵
@@ -964,7 +966,7 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 实盘亏损超预期 | 高 | M7/M8 | 严格风控 + kill switch + 小资金起步 |
 | 时间戳偏差导致签名失败 | 中 | M8 | 定期校时（±30 秒内） |
 | 策略过拟合 | 高 | M4 | walk-forward + 样本切分 + 与简单策略对比 |
-| 本地断电/断网 | 中 | M8/M10 | M6 上云；M5 前小资金试错 |
+| 本地断电/断网 | 中 | M8/M10 | MS6 上云；MS5 前小资金试错 |
 | Redis 故障导致队列不可用 | 中 | M8 | BRPOP 退避重试 + 告警；LPUSH 失败返回 503 |
 | TV alert 重发或丢失 | 中 | M8 | 去重（hash+TTL）+ 死信 + 持久化 |
 | Pine 与 Python 策略不一致 | 高 | M3/M4 | 代码评审；偏离 > 5% 禁止上实盘 |
@@ -1001,3 +1003,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-30 | v0.6（补充 7） | 4.1 首页总览由 7 条扩写为 10 条 + 4 个只读聚合视图（不新增 SQLite 表）+ 3 个接口变更；新增今日盈亏汇总、告警摘要卡、降级与时效标注；**修正 M1-4 口径（「7/30/90 天」→ 实际 24h/7d/30d）**；M1-5 明确为 7 个进程各自心跳并新增 `quant:heartbeat:{name}`/`quant:process:{name}` 两个 Redis 键约定；MS6 移除重复的 M1-5 |
 | 2026-10-30 | v0.6（补充 8） | 4.2 市场监控由 13 条扩写为 15 条 + 5 个数据模型 + 1 个新接口（`GET /api/quality`）；**修正三处与实现不符**：M2-2 由「tickers/books/trades + 缓存最近 N 条」改为「仅 tickers、每品种只留最新一条」、M2-4 由「资金费率与持仓量」拆为 M2-4 资金费率 + M2-14 持仓量（后者 ⬜ 完全未实现）、M2-10 由「SMA/EMA 均线」改为实际 7 类指标（MA/BOLL/SuperTrend/撑压/VOL/MACD/KDJ）；新增 `DataQualityReport` 与 `data/quality/` 落盘；M2-13 自选对比改标 🚫 |
 | 2026-10-30 | v0.6（补充 9，**十大模块细化完毕**） | 4.10 系统设置由 8 条扩写为 15 条 + 4 个数据模型 + 5 组接口 + 3 个新 CLI（`backup`/`restore`/`doctor`）；新增配置来源标注、热改白名单、凭证到期提醒、备份完整性校验、保留策略分档、进程命令审计、部署自检；**修正四处与实现不符**：M10-1 由 🟡 改 ⬜（看板无任何配置接口）、M10-3 由 ✅ 改 🟡（仅单一全局天数，缺 alerts/dead_letters/funding_rates 与按周期分档）、M10-4 由 🟡 改 ⬜、M10-2 重写为「健康看板 + 模拟盘验证」；明确进程控制走 Redis 命令通道，M10 **不新增 SQLite 表**（热改与审计复用 M3/M7） |
+| 2026-10-30 | v0.6（补充 10，全篇一致性复核） | 修掉 3 处 v0.5 遗留口径：§5.3 日志「按模块+日期分文件」→ 单文件 + 行内前缀（与 M9-1 一致）、§9.1 风险表「M6 上云/M5 小资金」→ MS6/MS5、§7 `data/` 目录补 `instruments/ funding_rates/ .checkpoints/`；§5.1 WebSocket 重连改为「首次 < 5 秒、最大退避 60 秒」、§5.4 写接口改为「本机 Host + 自定义头，token 可选」；**修正两处与实现不符**：M9-2 由 ✅ 改 🟡（11 条规则均有阈值但无规则级启停）、M2-4 由 ✅ 改 🟡（只取最新资金费率，未接 `funding-rate-history`，无法回补历史，M4-15 需先补）；补充 `PineBaseline` 复用 `backtest_metrics` 列的口径、`max_order_qty` 实为名义价值的字段说明；M4-6（walk-forward）由「随 MS1–MS3 交付」改列 MS4 |

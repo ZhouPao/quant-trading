@@ -1360,6 +1360,32 @@ M3 端到端测试最大偏离 3.56%，低于 5% 阈值，判定 PASS。
 - 里程碑：MS5 纳入 M10-1 ~ M10-4、M10-9 ~ M10-15；
   MS6 保留 M10-6、M10-7（上云、systemd 托管与开机自启）。
 
+### 8.46 PRD v0.6 全篇一致性复核（2026-10-30）
+
+十大模块细化完成后做了一次通读复核，修掉 5 处内部矛盾与 2 处状态错标：
+
+- **v0.5 遗留口径（与模块章节自相矛盾）**：
+  - §5.3「日志按模块+日期分文件」→ 改为单文件 + 行内前缀，与 M9-1 一致。
+  - §9.1 风险表「M6 上云；M5 前小资金试错」→ 旧里程碑编号，改为 MS6/MS5。
+  - §7 `data/` 目录漏了 `instruments/`（[instrument_storage.py](src/quant/storage/instrument_storage.py)）、
+    `funding_rates/`（[funding_rate_fetcher.py](src/quant/fetcher/funding_rate_fetcher.py)）
+    与 `.checkpoints/`，已补。
+  - §5.1「WebSocket 重连 < 5 秒」与 M2-2 的 5s→60s 退避冲突，改为
+    「首次重连 < 5 秒、最大退避 60 秒」。
+  - §5.4「写接口需 token」与 M10-8 的「token 可选」冲突，已对齐。
+- **状态错标**：
+  - **M9-2 ✅→🟡**：11 条规则齐备、阈值在 `[monitor]` 可配，但**没有规则级启停**。
+  - **M2-4 ✅→🟡**：[client.py](src/quant/okx/client.py) 的 `get_funding_rate` 只取
+    `/public/funding-rate` 最新一条，未接 `/public/funding-rate-history`，
+    **无法回补历史区间**；M4-15 的资金费率成本回测需先补此能力，前置条件已写明。
+- **口径补充**：`PineBaseline` 复用 `backtest_metrics` 的 `pine_*` 列（5 模型 ↔ 4 表，
+  避免读者以为漏了一张表）；`max_order_qty` 沿用旧名但实际是**名义价值（USDT）**
+  （见 [risk/config.py](src/quant/risk/config.py)）。
+- **里程碑**：M4-6（walk-forward）已在本轮实现，从「随 MS1–MS3 交付」的口径说明里
+  移出，正式列入 MS4。
+- 复核结论：全文 1007 行、150 条需求且无重复编号；MS 覆盖差集只剩 M5/M6（由 MS7+
+  「全部」承接）与两条 🚫；状态分布 ✅47 / 🟡23 / ⬜78 / 🚫2。
+
 ---
 
 ## 9. 相关文档
