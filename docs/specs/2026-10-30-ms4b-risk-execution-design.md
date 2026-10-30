@@ -1,6 +1,6 @@
 # MS4-B 风控参数体系与执行可靠性 详细设计文档
 
-> 文档版本：v1.0
+> 文档版本：v1.1
 > 创建日期：2026-10-30
 > 状态：待实施
 > 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) §4.7（M7 风险控制）、§4.8（M8 交易执行）、§8.1（MS4 范围）
@@ -39,13 +39,13 @@
 
 ### 1.1 目的
 
-MS4-B 把风控从「一张 toml 里的 5 个数字」升级为**可解释、可审计、可在线调整的三层参数体系**，并补齐执行侧的四个硬缺口：kill switch 不撤单、订单状态可回退、无服务端仓位计算、死信只能靠 `redis-cli` 看。
+MS4-B 把风控从「一张 toml 里的 5 个数字」升级为**可解释、可审计、可在线调整的四层参数体系**，并补齐执行侧的四个硬缺口：kill switch 不撤单、订单状态可回退、无服务端仓位计算、死信只能靠 `redis-cli` 看。
 
 一句话概括本切片的价值：**当订单被拒绝时，能回答「是哪条规则、限值多少、当时权益多少、这个限值是谁改的」。**
 
 ### 1.2 范围
 
-- **包含**：`RiskLimits` 三层合并与来源标注、`risk_events` 落库、`risk_overrides` 在线调整与审计、权益口径统一、kill switch 撤单、订单状态机、`PositionSizer`、下单幂等与重试、`dead_letters` 表与重放
+- **包含**：`RiskLimits` 两层取严与来源标注、`risk_events` 落库、`risk_overrides` 在线调整与审计、权益口径统一、kill switch 撤单、订单状态机、`PositionSizer`、下单幂等与重试、`dead_letters` 表与重放
 - **不包含**：极端行情熔断（M7-6，MS5）、熔断恢复策略（M7-12）与职责分离（M7-13）、手工下单（M8-17）、三项对账（M8-18）、实盘接入（M8-7/8-8）
 
 > 熔断（M7-6）与 kill switch 是两件事：前者按品种+自动冷却，后者全局+人工解除。本切片只做 kill switch，熔断留给 MS5，两者状态键必须分开（M7-13）。
@@ -71,7 +71,7 @@ MS4-B 把风控从「一张 toml 里的 5 个数字」升级为**可解释、可
 
 ## 3. 风控参数体系
 
-### 3.1 三层结构
+### 3.1 四层结构与取严范围
 
 ```
 优先级（后者覆盖前者）：
@@ -80,6 +80,8 @@ MS4-B 把风控从「一张 toml 里的 5 个数字」升级为**可解释、可
   ③ 策略覆盖               config/strategies/{id}.toml  [risk]
   ④ 在线覆盖               risk_overrides 表（人工在页面改的）
 ```
+
+> 术语对齐：PRD M7-10 说的「两层参数合并」专指 **②③ 取严**；① 只是兜底基线，不算独立配置层；④ 由 M7-14 的阈值审计承担，语义是覆盖而非取严。本文档统一称「四层」，涉及取严时只指 ②③。
 
 取严规则（合并 ②③ 时）：
 
@@ -139,7 +141,15 @@ quant:risk:overrides  →  { "sma_cross:max_position_pct": "0.2", ... }
 | `daily_loss_limit` | `0 < v <= 1` |
 | `consecutive_loss_limit` | 整数 `>= 1` |
 
-非法值返回 400 并指出字段与允许区间（与 PRD M3-3 的表单校验口径一致）。
+除上表的绝对区间外，再加一条**相对上限**：
+
+```
+v <= 2 × resolve_without_override(strategy_id, param)
+```
+
+即覆盖最多把 ②③ 取严的结果放宽一倍。原因：`max_order_qty` 这类字段没有天然上界，绝对区间拦不住 `999999999`，而这类数字很可能是一次误操作；一次误操作就能把风控完全解除，是不可接受的。2× 给「临时放宽」留了空间，又不至于等于关掉风控。
+
+非法值返回 400 并指出字段、允许区间与相对上限（与 PRD M3-3 的表单校验口径一致）。**校验只在写入时做，读取时对存量脏值只做绝对值校验**，避免历史数据因相对上限调整而突然失效。
 
 ---
 
@@ -229,14 +239,19 @@ if equity is None:
 不只判断「有没有」，还要判断「新不新」：
 
 ```python
-SNAPSHOT_MAX_AGE_MS = 3 * 60 * 1000      # 3 个采集周期
-
+max_age_ms = self._settings.risk.snapshot_max_age_ms    # 默认 180000（3 个采集周期）
 snapshot_ts = int(payload.get("ts") or 0)
-if now - snapshot_ts > SNAPSHOT_MAX_AGE_MS:
+if now - snapshot_ts > max_age_ms:
     return None          # 视为不可用，走 §5.2 的拒绝路径
 ```
 
-否则 monitor 卡死后，键还在 TTL 内但数值已经过时，仍会被当作有效权益。
+> 阈值必须来自配置而不是模块常量：monitor 的采集周期可调（`[monitor] interval_seconds`），硬编码 3 分钟会在把周期改成 300s 后误伤。否则 monitor 卡死后，键还在 TTL 内但数值已经过时，仍会被当作有效权益。
+
+### 5.4 与「价格缺失放行」的不对称
+
+现有实现里，价格拿不到时直接 `approved=True` 放行（[checker.py](../../src/quant/risk/checker.py) `if price is None or price <= 0: return approved`），理由是无法算名义价值。本切片把权益改成「缺失即拒绝」，价格却维持放行，两者不一致。
+
+**决策：本切片不改价格分支**。理由：权益缺失时**所有**比例类规则都失去基准，属于全局不可判定；价格缺失只影响该品种，且改它会改变现有策略的成交行为（原来能过的单突然被拒），风险大于收益。此处显式记录，避免被当成遗漏。
 
 ---
 
@@ -290,7 +305,14 @@ async def _handle_kill_cancel(self, req: dict) -> None:
                          json.dumps(result), ex=300)
 ```
 
-`cancel_all_open_orders()` 现不存在，需在 `OkxBroker` 新增：查 `/trade/orders-pending` 后逐单撤，或调用批量撤单接口。
+`cancel_all_open_orders()` 现不存在，需在 `OkxBroker` 新增，实现分两半：
+
+1. **`list_pending_orders(inst_type=None) -> list[dict]`**：`GET /api/v5/trade/orders-pending`，带 `instType` 过滤与 `after` 游标翻页（该接口单页最多 100 条）。这是唯一新增的查询能力。
+2. **撤单直接复用已有的 `cancel_orders()`**（[okx_broker.py](../../src/quant/execution/okx_broker.py) 已实现 `POST /api/v5/trade/cancel-batch-orders`，每批最多 20 条），按 20 条切块调用，**不再逐单撤**。若批内有单已成交/已撤，OKX 会返回该单的 `sCode != "0"`，视为已处理，不计入失败。
+
+返回「成功撤掉的条数」，而不是「请求的条数」——两者不等时前端要能看出差异。
+
+> 不做「先逐单撤、失败再批量」的兜底：批量接口已覆盖单笔语义，多一条路径只会多一种不一致。
 
 ---
 
@@ -298,39 +320,28 @@ async def _handle_kill_cancel(self, req: dict) -> None:
 
 ### 7.1 状态与迁移
 
-```
-                    submit
-   (无) ──────────────────► pending
-                              │
-              ┌───────────────┼───────────────┬──────────────┐
-              │               │               │              │
-         remote live      rejected        expired        canceled
-              ▼               ▼               ▼              ▼
-            live         rejected        expired        canceled
-              │
-      ┌───────┴────────┐
-      │                │
-partially_filled    canceled
-      │
-      ├──────────► filled
-      └──────────► canceled
-```
-
 允许的迁移（**单向，禁止回退**）：
 
-| 从 | 到 |
-|---|---|
-| `pending` | `live` / `rejected` / `expired` / `canceled` / `filled` |
-| `live` | `partially_filled` / `filled` / `canceled` / `expired` |
-| `partially_filled` | `filled` / `canceled` |
-| `filled` / `canceled` / `rejected` / `expired` | 终态，不可迁移 |
+| 从 | 到 | 说明 |
+|---|---|---|
+| `pending` | `live` | 交易所已受理，进入挂单簿 |
+| `pending` | `partially_filled` | 立刻部分成交 |
+| `pending` | `filled` | 市价单一次回包即完全成交，**无 `live` 阶段** |
+| `pending` | `canceled` | 提交前/提交中被撤 |
+| `pending` | `rejected` | 交易所拒单 |
+| `pending` | `expired` | 过期未成交 |
+| `live` | `partially_filled` / `filled` / `canceled` / `expired` | |
+| `partially_filled` | `filled` / `canceled` | |
+| `filled` / `canceled` / `rejected` / `expired` | — | 终态，不可迁移 |
+
+> `pending → filled` 这条直连不是冗余：市价单在 OKX 侧可能一次回包就是完全成交。若按「必须经过 live」编写状态机，市价单会被判为非法迁移而丢失状态。
 
 ### 7.2 实现
 
 ```python
 _TERMINAL = frozenset({"filled", "canceled", "rejected", "expired"})
 _ALLOWED = {
-    "pending": {"live", "rejected", "expired", "canceled", "filled"},
+    "pending": {"live", "partially_filled", "filled", "canceled", "rejected", "expired"},
     "live": {"partially_filled", "filled", "canceled", "expired"},
     "partially_filled": {"filled", "canceled"},
 }
@@ -414,7 +425,11 @@ if by_lot < min_sz or notional < min_notional: 拒绝
 ### 8.2 与信号的关系
 
 - 新增可选字段 `Signal.size_pct: Decimal | None`。
-- `qty` 与 `size_pct` **二选一**：都给时以 `qty` 为准（显式优先），并记日志；都不给则拒绝入死信（`reason="no_qty_no_size_pct"`）。
+- `qty` 与 `size_pct` 的取值顺序是**三级回落**，任一命中即止：
+  1. `qty` 给了（且 > 0）→ 直接用 `qty`，`capped_by=None`，`size_pct` 忽略并记日志；
+  2. 否则 `size_pct` 给了 → `raw_qty = equity * size_pct / price`；
+  3. 否则用 `[execution] default_size_pct`（默认 0.1）→ 同上。
+- 因此**不存在「都不给就拒绝」的情况**——PRD M8-14 的语义就是「缺省由服务端算仓位」，`default_size_pct` 正是那个缺省。若 `default_size_pct` 也被显式配置为 0 或负数，加载配置时直接报错，而不是运行时逐单失败。
 - `qty` 仍保持「给了就必须 > 0」的现有校验，不放松。
 
 ### 8.3 审计
@@ -455,6 +470,8 @@ async def submit_with_idempotency(signal, order) -> Order:
 2. **重试上限 3 次**，超过则入死信并告警（`rule="submit_failed"`）。
 3. **`clOrdId` 生成必须稳定**：同一 `signal_id` 无论重试几次都是同一字符串。现有实现满足，但需要单测锁定——若将来改成「每次随机」，幂等立即失效且无报错。
 
+`get_order_by_cl_ord_id()` 也是**新增**的（`OkxBroker` 目前只有按 `ordId` 查的 `get_order()`）。实现用 `GET /api/v5/trade/orders?clOrdId=...&instId=...`；注意该接口默认只返回未完结订单，必须显式带 `state=all`，否则「已成交」会被查成 `None`，重试就会真的重复下单。
+
 ### 9.3 交易所侧幂等的行为
 
 OKX 对重复 `clOrdId` 返回错误码 `51016`（`Duplicated clOrdId`）。收到该错误码应视为「已成交」，转而查询订单，而不是当作失败重试。
@@ -472,9 +489,9 @@ await self._redis.lpush(self.dead_key, payload)      # 兼容 monitor
 await asyncio.to_thread(self.store.insert_dead_letter, dl)   # 权威
 ```
 
-`stage` 取值：`parse`（webhook 解析失败）/ `risk`（风控拒绝且不可重试）/ `submit`（下单失败超限）/ `reconcile`（对账发现异常）。
+`stage` 只有三个取值：`parse`（webhook 解析失败：字段缺失/类型错误/校验不通过）/ `submit`（下单失败超限）/ `reconcile`（对账发现异常）。
 
-> 注意：**风控拒绝不该进死信**。风控拒绝是正常业务结果（该拒就拒），重放它还会再被拒一次。只有「本来该成功但因技术原因失败」的才进死信。
+> **风控拒绝不进死信**。风控拒绝是正常业务结果（该拒就拒），重放它只会再被拒一次，还会污染死信列表的语义。只有「本来该成功但因技术原因失败」的才进死信。风控拒绝的去处是 `risk_events` 表（§4）。
 
 ### 10.2 重放
 
@@ -486,18 +503,23 @@ async def replay(self, dead_id: str) -> str:
 
     payload = json.loads(dl["payload"])
     signal_id = payload.get("signal_id")
-    # 幂等：已成功处理的信号不再重放
-    if signal_id and self.store.signal_exists(signal_id):
-        state = self.store.get_signal_status(signal_id)
-        if state in ("done", "filled"):
+    # 幂等：已处理过的信号不再重放
+    if signal_id:
+        status = self.store.get_signal_status(signal_id)   # 已有方法
+        if status in _SETTLED_SIGNAL_STATUS:
             return "already_processed"
 
     await self.queue.push(payload)          # 回 pending
     self.store.mark_replayed(dead_id, "requeued")
     return "requeued"
+
+
+_SETTLED_SIGNAL_STATUS = frozenset({"executed", "rejected"})
 ```
 
-重放前幂等检查是必须的：否则「下单成功但写状态时崩溃」的死信被重放，会变成真的下两次单（`clOrdId` 相同，交易所会拒，但仍是一次多余请求）。
+**这里的取值必须对齐 `signals.status` 的真实写入值**：worker 只有两处写信号（[worker.py](../../src/quant/execution/worker.py) `save_signal(signal, "rejected")` 与 `save_signal(signal, "executed")`）。若按直觉写成 `("done", "filled")`，判定永远为假，重放会真的重复下单——这是最容易犯且最难在测试里发现的一类错误，必须用「`rejected` 与 `executed` 各一条死信」的单测锁住。
+
+> 注意 `save_signal` 的 `ON CONFLICT(signal_id) DO UPDATE SET status=...` 保证读到的是最新状态。另有一种覆盖不到的情况：下单已发往交易所、但在 `save_signal` 之前进程崩溃——此时查不到状态，重放会发生。这一层靠 §9 的 `clOrdId` 幂等兜底（交易所会以「重复 `clOrdId`」拒单），死信重放不重复解决同一问题。
 
 ---
 
@@ -544,13 +566,14 @@ CREATE TABLE IF NOT EXISTS risk_overrides (
     source      TEXT NOT NULL,      -- dashboard / cli
     changed_by  TEXT NOT NULL,
     changed_at  INTEGER NOT NULL,
-    revoked_at  INTEGER             -- 清除覆盖的时间；NULL=生效中
+    revoked_at  INTEGER,            -- 清除覆盖的时间；NULL=生效中
+    revoked_by  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_overrides_effective
     ON risk_overrides(strategy_id, param, revoked_at);
 ```
 
-当前生效值 = 每个 `(strategy_id, param)` 下 `revoked_at IS NULL` 的**最新一行**的 `new_value`。
+当前生效值 = 每个 `(strategy_id, param)` 下 `revoked_at IS NULL` 的**最新一行**的 `new_value`；**若该字段没有任何未撤销行，则视为无覆盖，回落 ②③ 取严结果**。
 
 ```sql
 SELECT o.* FROM risk_overrides o
@@ -562,7 +585,15 @@ JOIN (
 ) t ON o.id = t.max_id;
 ```
 
-「一键清除覆盖」= `UPDATE ... SET revoked_at=? WHERE strategy_id=? AND param=? AND revoked_at IS NULL`，同时写一条 `new_value` 回落到配置值的审计行（`source='dashboard'`, `reason='clear override'`）。
+「一键清除覆盖」= **只标记撤销，不写新行**：
+
+```sql
+UPDATE risk_overrides
+   SET revoked_at = :now, revoked_by = :by
+ WHERE strategy_id = :sid AND param = :p AND revoked_at IS NULL;
+```
+
+> 这里有个容易写错的地方：如果在清除时「补一条 `new_value` 等于当前配置值的审计行」，那条新行本身就是一条生效覆盖，会把配置值**冻结**在清除时刻的数值——之后改 toml 也不会生效。正确语义是「撤销后该字段回到无覆盖状态」，所以只 UPDATE 撤销时间，靠 `revoked_by` + `revoked_at` 留痕。「改前/改后/时间/原因/来源」（PRD M7-14）由原有的变更行本身承载，撤销是它的终止事件。
 
 > 为什么不拆成 `risk_overrides` + `risk_override_audit` 两张表：PRD M7-14 要求的字段（改前/改后/时间/原因/来源）与 M7-8 的「当前覆盖」完全重合，拆表会让「当前值」和「历史」出现两个真相源，反而更容易不一致。
 
@@ -623,6 +654,17 @@ CREATE INDEX IF NOT EXISTS idx_dead_stage ON dead_letters(stage, created_at DESC
 }
 ```
 
+三个字段的语义必须分清，否则页面会画错：
+
+| 字段 | 含义 | 来源 |
+|---|---|---|
+| `limits.*.value` | 当前生效**限值**（四层合并后的结果） | `resolve_limits` |
+| `limits.*.source` | 该限值来自哪一层 | `RiskLimits.applied` |
+| `overrides[]` | 当前生效的在线覆盖及其变更说明 | `risk_overrides` 未撤销行 |
+| `used` | 该字段上**已占用**的量（如当前持仓市值 / 权益），用于画「已用 / 上限」进度条 | worker 每轮发布到 `quant:risk:limits` 的实测值 |
+
+`used` 取不到时返回空对象并加 `degraded=["used"]`，**不要用 0 代替**（0 会被读成「没有敞口」，是最危险的误读）。
+
 ---
 
 ## 13. 配置扩展
@@ -639,6 +681,14 @@ consecutive_loss_limit = 3
 allow_initial_equity_fallback = false
 # 新：快照最大可接受年龄（毫秒），超龄视为不可用
 snapshot_max_age_ms = 180000
+# 新：风控事件落库开关（灰度期回滚用，默认开）
+event_log = true
+# 新：kill switch 时是否向交易所撤单（灰度期回滚用，默认开）
+kill_switch_cancel_orders = true
+
+[storage]
+# 新：死信是否落 SQLite（灰度期回滚用，默认开）
+dead_letter_persist = true
 
 [execution]
 # 新：是否由服务端计算数量（Signal.qty 可省略）
@@ -647,9 +697,15 @@ server_side_sizing = true
 default_size_pct = 0.1
 # 新：下单重试上限
 submit_max_attempts = 3
-# 复用现有
-order_timeout_seconds = 0
+# 复用现有（默认 300，不是 0）
+order_timeout_seconds = 300
 ```
+
+> **兼容性**：`config/config.toml` 目前没有 `[risk]` 段，`Settings` 里也没有 `risk` 字段（pydantic 默认忽略多余键，所以现状加不加都不报错）。落地时新增 `Settings.risk: RiskDefaults`：
+>
+> - `RiskDefaults` 的**每个字段都是 `Optional`，默认 `None`**。`None` 表示「全局层未配置」，**不参与取严**，由 ① 代码默认兜底。若把代码默认值直接写进全局层，就等于悄悄把所有策略钳制在默认值以内——那是一次没人要求的隐式收紧。
+> - 策略 toml 缺 `[risk]` 段时，从「抛 `ValueError`」改为「全部字段回落全局层/代码默认」。这是放宽，不是收紧；但要保留一条 WARNING 日志，否则参数来源会变得不可见。
+> - `RiskConfig`（单策略）保持原样不动，新增的 `RiskLimits` 是在它之上做合并的只读视图，不替换现有类型。
 
 ---
 
@@ -658,13 +714,13 @@ order_timeout_seconds = 0
 | 阶段 | 动作 | 回滚 |
 |---|---|---|
 | 1 | v4 建 `risk_events` / `risk_overrides` | 删两表 |
-| 2 | `RiskLimits` 三层合并 + `source` 标注（只读，不改判定结果） | 回退 resolver，行为不变 |
-| 3 | `RiskDecision` 补 4 字段 + `risk_events` 落库（只写不读） | 关开关 `risk.event_log = false` |
+| 2 | `RiskLimits` 两层取严 + `source` 标注（只读，不改判定结果） | 回退 resolver，行为不变 |
+| 3 | `RiskDecision` 补 4 字段 + `risk_events` 落库（只写不读） | 关开关 `[risk] event_log = false` |
 | 4 | 权益口径改严（`allow_initial_equity_fallback=false`） | 置 true 退回旧行为 |
-| 5 | v5 建 `dead_letters` + 双写 | 关 `dead_letter_persist` |
+| 5 | v5 建 `dead_letters` + 双写 | 关 `[storage] dead_letter_persist` |
 | 6 | 订单状态机 + 成交累加 | **不可回滚**（数据修正），必须先在备份库验证 |
 | 7 | `PositionSizer` + `Signal.size_pct` | 关 `server_side_sizing`，回到 qty 必填 |
-| 8 | kill switch 撤单 + 幂等重试 | 关 `kill_switch.cancel_orders` |
+| 8 | kill switch 撤单 + 幂等重试 | 关 `[risk] kill_switch_cancel_orders` |
 
 **第 6 步是唯一不可回滚项**，实施前必须先跑一次「历史订单重放」验证：把现有 `orders` 表按新状态机重算，确认无非法迁移（预计不会有，因为现状只有 `pending/filled/canceled` 三态）。
 
@@ -688,7 +744,7 @@ order_timeout_seconds = 0
 
 ### 16.1 必须用单测固定的边界（M7-16）
 
-每条规则都要覆盖这 5 类：
+每条规则都要覆盖这 6 类：
 
 | 场景 | 说明 |
 |---|---|
@@ -703,12 +759,12 @@ order_timeout_seconds = 0
 
 | 层 | 用例 |
 |---|---|
-| 三层合并 | 全局 0.3 + 策略 0.2 → 生效 0.2 且 `source=strategy`；覆盖 0.5 → 生效 0.5 且 `source=override`（**放宽不被取严否决**） |
-| 覆盖清理 | 清除后回落策略值；审计行 `new_value` 等于回落值 |
-| 覆盖校验 | 6 个非法值各被拒；读库脏值被忽略并告警 |
+| 两层取严与在线覆盖 | 全局 0.3 + 策略 0.2 → 生效 0.2 且 `source=strategy`；覆盖 0.5 → 生效 0.5 且 `source=override`（**放宽不被取严否决**） |
+| 覆盖清理 | 清除后回落策略值；原行写入 `revoked_at`/`revoked_by`；清除后再改 toml 能立即生效（验证值未被冻结） |
+| 覆盖校验 | §3.4 的 5 个字段各给一个非法值，均被拒；读库脏值被忽略并告警 |
 | `risk_events` | 拒绝/减量/halt 各落一条；纯放行不落；`equity` 字段正确 |
 | 权益口径 | 快照缺失 → 拒绝；快照超龄 → 拒绝；开关为 true → 退回并 WARNING |
-| 状态机 | 11 条合法迁移通过；4 类非法迁移被拒且状态不变；重复同状态幂等 |
+| 状态机 | 12 条合法迁移全部通过；非法迁移（如 `filled → pending`）被拒且状态不变；同状态重复写入幂等 |
 | 成交累加 | 两次部分成交 → `filled_qty` 为和、均价为加权平均 |
 | `PositionSizer` | `lot_sz` 向下取整不多不少；低于 `min_sz` 拒绝；`capped_by` 正确 |
 | 幂等重试 | 超时后先查后重发；查到已存在则不重发；3 次后入死信；`51016` 视为已成交 |
@@ -721,7 +777,7 @@ order_timeout_seconds = 0
 ## 17. 实现顺序
 
 1. **v4 迁移 + `risk_events` / `risk_overrides` 表 + store 方法**
-2. **`RiskLimits` 三层合并 + `applied` 来源**（只读，不改判定）
+2. **`RiskLimits` 两层取严 + `applied` 来源**（只读，不改判定）
 3. **`RiskDecision` 补字段 + 各规则填值 + `risk_events` 落库**
 4. **权益口径改严**（默认拒绝，配置可退回）
 5. **覆盖写入 API + 校验 + Redis 同步 + 审计**
@@ -769,9 +825,7 @@ order_timeout_seconds = 0
 
 | 问题 | 决策时机 |
 |---|---|
-| 覆盖值是否设「相对配置值的上限」（如不超过 2×） | 实施时定；倾向**设上限**，否则一次误操作即可穿透 |
 | 是否记录「放行」的抽样（如 1%）用于统计 | 暂不；需要时再加 |
-| `cancel_all_open_orders` 用 REST 批量撤还是逐单撤 | 实施时看 OKX 批量撤单接口限制 |
 | 死信 payload 可能含密钥类字段，是否需要脱敏 | 实施时确认 parser 不落原始 header |
 | `server_side_sizing` 与策略侧算量并存期如何提示 | 前端在信号详情标注 `qty_source` |
 
@@ -781,4 +835,5 @@ order_timeout_seconds = 0
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| v1.0 | 2026-10-30 | 初版。风控三层参数（全局/策略/覆盖）与来源标注；`risk_events` 审计；`risk_overrides` 单表承担当前值与变更历史；权益口径改为缺失即拒绝；kill switch 经命令通道撤单；订单状态机与成交累加（修复真实缺陷）；`PositionSizer`；下单幂等与重试边界；`dead_letters` 落库与重放 |
+| v1.0 | 2026-10-30 | 初版。风控四层参数（代码默认/全局/策略/在线覆盖）与来源标注；`risk_events` 审计；`risk_overrides` 单表承担当前值与变更历史；权益口径改为缺失即拒绝；kill switch 经命令通道撤单；订单状态机与成交累加（修复真实缺陷）；`PositionSizer`；下单幂等与重试边界；`dead_letters` 落库与重放 |
+| v1.1 | 2026-10-30 | 复核修订。统一「四层」表述并说明 PRD M7-10 的「两层」专指 ②③ 取严；死信 `stage` 收敛为 `parse`/`submit`/`reconcile`（删除与 §10.1「风控拒绝不进死信」自相矛盾的 `risk`）；`qty`→`size_pct`→`default_size_pct` 三级回落，取消「都不给即拒绝」；`snapshot_max_age_ms` 改为读配置；**修正清除覆盖语义**（补写回落值会把配置值冻结，改为只撤销并加 `revoked_by`）；状态表补 `pending → partially_filled` 并同步 `_ALLOWED`；补 `used` 字段语义；修正「5 类/6 类」「6 个非法值」计数错误；补覆盖值**相对上限 2×**（原为开放问题，`max_order_qty` 无天然上界）；**修正死信重放的状态取值**（代码写 `rejected`/`executed`，原稿写 `done`/`filled` 会让幂等判定永远为假）；补 `list_pending_orders`/`get_order_by_cl_ord_id` 两个新增 broker 方法与 `state=all` 陷阱，撤单改为复用批量接口；补 `[risk]` 全局段的兼容性说明（字段默认 `None` 表示未配置，策略 toml 缺段不再抛错）；记录「权益严格 / 价格放行」的不对称决策；`order_timeout_seconds` 默认值改为 300；迁移清单里的回滚开关统一为真实键名并补进配置示例 |

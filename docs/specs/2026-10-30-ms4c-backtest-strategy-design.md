@@ -1,6 +1,6 @@
 # MS4-C 回测落库与策略参数启停 详细设计文档
 
-> 文档版本：v1.0
+> 文档版本：v1.1
 > 创建日期：2026-10-30
 > 状态：待实施
 > 上游需求：[PRD v0.6](../requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md) §4.2（M2 市场监控 M2-15）、§4.3（M3 策略研究）、§4.4（M4 回测分析）、§8.1（MS4 范围）
@@ -94,14 +94,17 @@ class Strategy(ABC):
 
 ```python
 PARAM_SPEC = {
-    "fast": ParamSpec("int", 10, min=2, max=200, description="快线周期", unit="根"),
-    "slow": ParamSpec("int", 100, min=3, max=500, description="慢线周期", unit="根"),
+    # 键名必须与 toml [params] 及 on_init 里 ctx.params.get(...) 的名字逐字一致
+    "fast_len": ParamSpec("int", 10, min=2, max=200, description="快线周期", unit="根"),
+    "slow_len": ParamSpec("int", 100, min=3, max=500, description="慢线周期", unit="根"),
     "ema_filter": ParamSpec("bool", True, description="启用 EMA 趋势过滤"),
     "ema_len": ParamSpec("int", 200, min=20, max=500, unit="根"),
     "ema_band_atr": ParamSpec("float", 0.0, min=0.0, max=5.0, description="ATR 带宽倍数"),
     "atr_len": ParamSpec("int", 14, min=2, max=100, unit="根"),
 }
 ```
+
+> 未列入 `PARAM_SPEC` 的参数（如 `commission_rate`、`SrExitMixin` 的 `sr_*`）自动 `editable=false`，仍从 toml 读取——不必为了「参数可编辑」把每个参数都列上。
 
 **约束**：
 
@@ -311,7 +314,14 @@ class GridOptimizer:
 
 ### 6.2 进度
 
-`optimize_jobs` 表记录 `total`/`completed`，`progress` 回调每完成一个组合就更新一次（`asyncio.to_thread` 写库有开销，改为**每 10 个或每 2 秒**写一次）。
+进度有两处记录，职责不同，不要混用：
+
+| 位置 | 内容 | 用途 |
+|---|---|---|
+| Redis `quant:backtest:progress:{run_id}`（TTL 300s） | `{completed, total, updated_at}` | 前端 1s 轮询显示进度条 |
+| SQLite `optimize_jobs.completed` | 同上，但**每 10 个组合或每 2 秒**才写一次 | dashboard 重启后仍能查到「跑到哪了」 |
+
+写库有开销（`asyncio.to_thread` + 事务），逐组合写会拖慢寻优本身；Redis 写入便宜，可以逐组合更新。两者数值允许短暂不一致（最多差 9 个组合或 2 秒），UI 以 Redis 为准。
 
 ---
 
@@ -319,7 +329,7 @@ class GridOptimizer:
 
 | 指标 | 定义 | 边界 |
 |---|---|---|
-| `calmar` | `annual_return / |max_drawdown|` | `max_drawdown == 0` → `None` |
+| `calmar` | `annual_return / abs(max_drawdown)` | `max_drawdown == 0` → `None` |
 | `sortino` | `mean(超额收益) / downside_deviation`，下行标准差只算负收益 | 无负收益 → `None`（不返回 inf） |
 | `monthly_returns` | 按自然月聚合的收益率序列 | 存 JSON 列，月份数 = 回测跨度 |
 | `max_consecutive_losses` | 连续亏损交易的最大笔数 | 0 笔交易 → 0 |
@@ -336,9 +346,10 @@ class GridOptimizer:
 `WalkForwardResult` 已实现（[walkforward.py](../../src/quant/backtest/walkforward.py)），本切片只补落库：
 
 - `backtest_runs.kind = "walkforward"`，`params` 存网格配置。
-- `backtest_metrics` 存汇总：`compounded_return`、`profitable_segments`、`avg_oos_sharpe`、`total_oos_trades`。
+- `backtest_metrics` 存汇总：`compounded_return`、`profitable_segments`、`avg_oos_sharpe`、`total_oos_trades`、`modal_params`（JSON）。
 - `segments.parquet` 存逐段：`index`、`is_range`、`oos_range`、`params`（JSON）、`is_metrics`（JSON）、`oos_metrics`（JSON）。
-- `modal_params` 单独存到 `backtest_metrics.monthly_returns`? **不行**，语义不符。新增一列 `modal_params TEXT`（JSON）。这是对 §10.2 表结构的一个补充。
+
+> `modal_params` 需要独立的 `backtest_metrics.modal_params` 列（JSON），不能塞进 `monthly_returns`——后者是「按自然月收益率序列」，语义完全不同，复用会让前端无法区分。
 
 ---
 
@@ -391,7 +402,7 @@ def merge_report(prev: dict | None, report: ValidationReport, now: int) -> dict:
 
 1. **candles 每轮拉取后**：对本次涉及的区间跑 `validate` + `merge_report` + 落盘。
 2. **`quant check-data --inst --bar --start --end`**：手动全量校验。
-3. **未修复项告警**：`gaps_open > 0` 时调 `AlertService.publish(rule="data_quality", level="WARNING")`，按 `(inst, bar)` 冷却 1 小时（数据缺口不会分钟级自愈）。
+3. **未修复项告警**：`gaps_open > 0` 时调用 MS4-A 的 `AlertService.publish(AlertEvent(rule="data_quality", level="WARNING", message=..., ts=..., inst_id=...))`，按 `(inst, bar)` 冷却 1 小时（数据缺口不会分钟级自愈）。若 MS4-A 未落地，先直接用 `EmailAlerter`，规则名保持一致，避免后续换实现时历史数据对不上。
 
 ### 9.4 API
 
@@ -546,6 +557,9 @@ CREATE TABLE IF NOT EXISTS optimize_jobs (
 ## 12. 配置扩展
 
 ```toml
+[params]
+resolve_from_db = true        # 新：回滚开关，false 时完全按 toml（忽略 strategy_params）
+
 [backtest]
 max_combos = 500              # 新：看板与 CLI 共用上限
 n_jobs = 1                    # 新：寻优进程数默认值
@@ -557,7 +571,8 @@ strategy = "sma_cross"
 inst = "BTC-USDT-SWAP"
 bar = "1H"
 bindings_fail_mode = "db"     # 新：Redis 不可用时 db / halt
-poll_interval_seconds = 60    # 新：多绑定轮询周期
+multi_binding = true          # 新：回滚开关，false 时退回单组合
+# 轮询周期复用现有 interval_seconds（默认 60），不另设键
 
 [quality]
 enabled = true                # 新：candles 每轮是否生成质量报告
@@ -565,6 +580,8 @@ alert_cooldown_seconds = 3600 # 新：未修复项告警冷却
 ```
 
 > `[engine] strategy/inst/bar` 保留是为了平滑迁移：首次启动时若 `strategy_bindings` 为空，用这三项创建一条初始绑定，之后以表为准。
+>
+> `bindings_fail_mode="halt"` 的含义是：读不到绑定时**触发 kill switch 标志并告警**，即停止新开仓，而不是猜一个默认值继续交易。`"db"` 则回落读 SQLite；只有 SQLite 也读不到时才 `halt`。两种模式的共同底线是「绝不擅自恢复交易」。
 
 ---
 
@@ -606,7 +623,7 @@ alert_cooldown_seconds = 3600 # 新：未修复项告警冷却
 
 | 层 | 用例 |
 |---|---|
-| `PARAM_SPEC` | 三类型校验；越界拒绝并给区间；未声明 spec → `editable=false`；spec 与 toml 参数名不一致报错 |
+| `PARAM_SPEC` | 三类型校验；越界拒绝并给区间；未声明 spec → `editable=false`；spec 的键在 toml 中不存在时启动报错（防手滑写错名字后静默无效） |
 | 参数合并 | toml → db 覆盖；来源标注正确；非法 DB 值被忽略并回落；回测显式传参优先且 `source=request` |
 | 参数变更 | 每次保存写两条记录；`git_commit` 取到/取不到两路径 |
 | 绑定 | 同 `(strategy,inst)` 重复插入不同 `bar` 被拒；启停写库 + Redis 一致；Redis 丢失回落 DB |
@@ -689,3 +706,4 @@ alert_cooldown_seconds = 3600 # 新：未修复项告警冷却
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1.0 | 2026-10-30 | 初版。`PARAM_SPEC` 与参数两层合并（回测/实盘同一真相源）；`strategy_bindings` 与引擎多绑定改造；回测任务队列与 4 张表落库；寻优进程池并发与进度；7 个扩展指标（无法计算返回 `None`）；walk-forward 落库；`data/quality` 数据质量报告与告警 |
+| v1.1 | 2026-10-30 | 复核修订。`calmar` 定义改写为 `abs(max_drawdown)`（原 `\|max_drawdown\|` 会截断表格列）；`modal_params` 明确为 `backtest_metrics` 独立列并去掉正文里的自问自答；寻优进度改为 Redis/SQLite 双源并给出职责与一致性边界；**修正 `PARAM_SPEC` 示例键名**（`fast`/`slow` → `fast_len`/`slow_len`，否则触发自身的「键在 toml 中不存在」校验）；明确未列入 `PARAM_SPEC` 的参数（`commission_rate`/`sr_*`）只读但可用；删除与现有 `engine.interval_seconds` 重复的 `poll_interval_seconds`，补 `params.resolve_from_db` 与 `engine.multi_binding` 两个回滚开关；补 `bindings_fail_mode=halt` 的具体语义；`data_quality` 告警改为 `AlertEvent` 调用并说明冷却归属 |
