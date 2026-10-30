@@ -1,6 +1,7 @@
 """SQLiteStore 单元测试（spec §11）。"""
 from __future__ import annotations
 
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from quant.backtest.order import Fill, Order
 from quant.backtest.position import Position
 from quant.backtest.signal import Signal
-from quant.state.sqlite_store import SQLiteStore
+from quant.state.sqlite_store import SCHEMA_VERSION, SQLiteStore
 
 
 def _signal(signal_id: str = "sig-1") -> Signal:
@@ -191,25 +192,6 @@ class TestPnlStatistics:
         assert store.get_today_realized_pnl(0) == Decimal("0")
 
 
-class TestHeartbeat:
-    def test_save_and_get(self, store) -> None:
-        assert store.get_heartbeat("worker") is None
-
-        store.save_heartbeat("worker", 1_700_000_000_000)
-        assert store.get_heartbeat("worker") == 1_700_000_000_000
-
-    def test_overwrite(self, store) -> None:
-        store.save_heartbeat("worker", 1)
-        store.save_heartbeat("worker", 2)
-        assert store.get_heartbeat("worker") == 2
-
-    def test_separate_processes(self, store) -> None:
-        store.save_heartbeat("worker", 1)
-        store.save_heartbeat("monitor", 2)
-        assert store.get_heartbeat("worker") == 1
-        assert store.get_heartbeat("monitor") == 2
-
-
 class TestSchemaCreation:
     def test_creates_parent_dir(self, tmp_path) -> None:
         path = tmp_path / "a" / "b" / "quant.db"
@@ -220,9 +202,135 @@ class TestSchemaCreation:
     def test_reopen_existing_db(self, tmp_path) -> None:
         path = tmp_path / "quant.db"
         store = SQLiteStore(path)
-        store.save_heartbeat("worker", 42)
+        store.save_signal(_signal(), "executed")
         store.close()
 
         reopened = SQLiteStore(path)
-        assert reopened.get_heartbeat("worker") == 42
+        assert reopened.get_signal_status("sig-1") == "executed"
         reopened.close()
+
+
+class TestMigrations:
+    """结构迁移（MS4-A §4.1）：_SCHEMA 是 v1，_MIGRATIONS 从 v2 起。"""
+
+    def _tables(self, path) -> set[str]:
+        conn = sqlite3.connect(str(path))
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            return {r[0] for r in rows}
+        finally:
+            conn.close()
+
+    def _indexes(self, path) -> set[str]:
+        conn = sqlite3.connect(str(path))
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+            return {r[0] for r in rows}
+        finally:
+            conn.close()
+
+    def test_fresh_db_reaches_latest_version(self, tmp_path) -> None:
+        path = tmp_path / "quant.db"
+        SQLiteStore(path).close()
+
+        conn = sqlite3.connect(str(path))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+                SCHEMA_VERSION
+            )
+        finally:
+            conn.close()
+
+    def test_fresh_db_tables(self, tmp_path) -> None:
+        path = tmp_path / "quant.db"
+        SQLiteStore(path).close()
+
+        tables = self._tables(path)
+        assert {"alerts", "alert_silences"} <= tables
+        assert "heartbeat" not in tables
+
+    def test_fresh_db_indexes(self, tmp_path) -> None:
+        path = tmp_path / "quant.db"
+        SQLiteStore(path).close()
+
+        indexes = self._indexes(path)
+        assert {
+            "idx_alerts_created",
+            "idx_alerts_state",
+            "idx_alerts_rule",
+            "idx_silences_active",
+            "idx_signals_ts",
+            "idx_orders_created",
+            "idx_fills_ts",
+        } <= indexes
+
+    def test_legacy_db_upgrades_and_keeps_data(self, tmp_path) -> None:
+        """老库：user_version=0、6 张表且 heartbeat 有数据。"""
+        path = tmp_path / "quant.db"
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE signals (
+                signal_id TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                inst_id TEXT NOT NULL,
+                qty TEXT NOT NULL,
+                price TEXT,
+                ts INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE heartbeat (
+                process TEXT PRIMARY KEY,
+                ts INTEGER NOT NULL
+            );
+            INSERT INTO signals VALUES
+                ('sig-old', 'sma_cross', 'buy', 'market',
+                 'BTC-USDT', '1', NULL, 1000, 'executed', 1000);
+            INSERT INTO heartbeat VALUES ('worker', 123);
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+        conn.close()
+
+        store = SQLiteStore(path)
+        try:
+            assert store.get_signal_status("sig-old") == "executed"
+        finally:
+            store.close()
+
+        assert "heartbeat" not in self._tables(path)
+        conn = sqlite3.connect(str(path))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+                SCHEMA_VERSION
+            )
+        finally:
+            conn.close()
+
+    def test_reopen_is_idempotent(self, tmp_path) -> None:
+        path = tmp_path / "quant.db"
+        store = SQLiteStore(path)
+        store.save_signal(_signal(), "executed")
+        store.close()
+
+        for _ in range(3):
+            store = SQLiteStore(path)
+            assert store.get_signal_status("sig-1") == "executed"
+            store.close()
+
+        conn = sqlite3.connect(str(path))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+                SCHEMA_VERSION
+            )
+        finally:
+            conn.close()

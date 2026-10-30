@@ -5,10 +5,13 @@
 - orders：订单及成交信息
 - fills：成交明细（用于盈亏/风控统计与崩溃恢复）
 - positions：当前持仓
-- heartbeat：进程心跳
 - equity_snapshots：账户权益时序（回撤峰值与看板曲线）
+- alerts / alert_silences：告警与静音（v2 起，见 MS4-A 详设 §4）
 
 所有金额以 TEXT 存储 Decimal 字符串，避免浮点误差。
+
+结构变更走 `_MIGRATIONS` + `PRAGMA user_version`：`_SCHEMA` 视为 v1 基线，
+`_MIGRATIONS[i]` 负责把库升到 `i + 2`。
 """
 from __future__ import annotations
 
@@ -66,11 +69,6 @@ CREATE TABLE IF NOT EXISTS positions (
     updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS heartbeat (
-    process TEXT PRIMARY KEY,
-    ts INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     ts INTEGER PRIMARY KEY,
     total_equity TEXT NOT NULL,
@@ -80,6 +78,74 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     margin_ratio TEXT
 );
 """
+
+# 结构变更历史。_SCHEMA 即 v1，`_MIGRATIONS[i]` 对应「升到版本 i + 2」，
+# 故枚举从 2 开始（MS4-A 用 v2/v3，MS4-B 用 v4/v5，MS4-C 用 v6）。
+#
+# 每段脚本必须幂等（IF NOT EXISTS 等）：SQLite 的 DDL 与 user_version 写入
+# 不在同一事务里，中途崩溃会从同一版本重放。
+_MIGRATIONS: list[str] = [
+    # v1 -> v2：告警持久化（MS4-A §4.2/§4.3）+ 删除从未被调用的死表
+    """
+    CREATE TABLE IF NOT EXISTS alerts (
+        alert_id     TEXT PRIMARY KEY,
+        rule         TEXT NOT NULL,
+        level        TEXT NOT NULL,
+        message      TEXT NOT NULL,
+        fingerprint  TEXT NOT NULL,
+        inst_id      TEXT,
+        strategy_id  TEXT,
+        state        TEXT NOT NULL DEFAULT 'open',
+        suppressed   INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL,
+        acked_at     INTEGER,
+        acked_by     TEXT,
+        resolved_at  INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_alerts_state ON alerts(state, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS alert_silences (
+        silence_id  TEXT PRIMARY KEY,
+        rule        TEXT NOT NULL,
+        inst_id     TEXT,
+        until_ts    INTEGER NOT NULL,
+        reason      TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        revoked_at  INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_silences_active
+        ON alert_silences(revoked_at, until_ts);
+
+    DROP TABLE IF EXISTS heartbeat;
+    """,
+    # v2 -> v3：事件流 UNION 查询所需的索引（MS4-A §8.1）
+    """
+    CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts);
+    CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_ts);
+    CREATE INDEX IF NOT EXISTS idx_fills_ts ON fills(ts);
+    """,
+]
+
+#: 当前期望的 schema 版本，供启动自检与测试断言。
+SCHEMA_VERSION = 1 + len(_MIGRATIONS)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """建基线表并依次应用未执行的迁移。"""
+    conn.executescript(_SCHEMA)
+    row = conn.execute("PRAGMA user_version").fetchone()
+    version = int(row[0]) if row else 0
+    for target, script in enumerate(_MIGRATIONS, start=2):
+        if version >= target:
+            continue
+        conn.executescript(script)
+        # PRAGMA 不支持参数绑定；target 来自 enumerate，必为整数
+        conn.execute(f"PRAGMA user_version = {target}")
+        conn.commit()
+    conn.commit()
 
 
 class SQLiteStore:
@@ -98,8 +164,8 @@ class SQLiteStore:
             )
             self._conn.row_factory = sqlite3.Row
             with self._lock:
-                self._conn.executescript(_SCHEMA)
-                self._conn.commit()
+                _apply_migrations(self._conn)
+            self._conn.commit()
         except sqlite3.Error as e:
             raise StateError(f"failed to open sqlite db {self.db_path}: {e}") from e
 
@@ -319,25 +385,6 @@ class SQLiteStore:
     def get_all_fills(self) -> list[Fill]:
         """全部成交（按 ts 升序）。用于看板 FIFO 回合盈亏统计。"""
         return self._fills_since(0)
-
-    # ------------------------------------------------------------------
-    # heartbeat
-    # ------------------------------------------------------------------
-
-    def save_heartbeat(self, process: str, ts: int) -> None:
-        self._execute(
-            """
-            INSERT INTO heartbeat (process, ts) VALUES (?, ?)
-            ON CONFLICT(process) DO UPDATE SET ts=excluded.ts
-            """,
-            (process, ts),
-        )
-
-    def get_heartbeat(self, process: str) -> int | None:
-        row = self._query_one(
-            "SELECT ts FROM heartbeat WHERE process = ?", (process,)
-        )
-        return int(row["ts"]) if row else None
 
     # ------------------------------------------------------------------
     # equity snapshots
