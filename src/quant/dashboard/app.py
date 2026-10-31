@@ -14,6 +14,10 @@
 - POST /api/alerts/{id}/ack 确认告警（写操作）
 - POST /api/alerts/silence  创建静音（写操作）
 - DELETE /api/alerts/silence/{id} 解除静音（写操作）
+- GET /api/dead-letters 死信列表（stage/since/pending_only + 分页）
+- POST /api/dead-letters/{id}/replay 重放单条死信（写操作）
+- POST /api/dead-letters/replay 批量重放（写操作）
+- POST /api/dead-letters/{id}/discard 标记丢弃（写操作）
 - GET /api/processes 7 个常驻进程健康
 - GET /api/equity    权益时序（默认近 24 小时）
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
@@ -115,6 +119,12 @@ class SilenceRequest(BaseModel):
     hours: float = 4
     reason: str = ""
     by: str = "owner"
+
+
+class ReplayBatchRequest(BaseModel):
+    """批量重放死信。"""
+
+    ids: list[str]
 
 
 def _host_only(raw: str) -> str:
@@ -283,6 +293,45 @@ def create_app(
     ) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
         return JSONResponse(await service.revoke_silence(silence_id))
+
+    @app.get("/api/dead-letters")
+    async def dead_letters(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+        stage: str | None = Query(None),
+        since: int | None = Query(None),
+        pending_only: bool = Query(False),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await service.dead_letters(
+                limit,
+                offset,
+                stage=stage,
+                since=since,
+                only_pending=pending_only,
+            )
+        )
+
+    @app.post("/api/dead-letters/replay")
+    async def replay_dead_letters(
+        request: Request, req: ReplayBatchRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(await service.replay_dead_letters(req.ids))
+
+    @app.post("/api/dead-letters/{dead_id}/replay")
+    async def replay_dead_letter(
+        request: Request, dead_id: str
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(await service.replay_dead_letter(dead_id))
+
+    @app.post("/api/dead-letters/{dead_id}/discard")
+    async def discard_dead_letter(
+        request: Request, dead_id: str
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(await service.discard_dead_letter(dead_id))
 
     @app.get("/api/processes")
     async def processes() -> JSONResponse:

@@ -12,6 +12,7 @@ from quant.foundation.config import Settings
 from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger, setup_logger
 from quant.queue.signal_queue import Deduper, SignalQueue
+from quant.state.sqlite_store import SQLiteStore
 from quant.webhook.server import WebhookServer
 
 
@@ -22,11 +23,18 @@ def main(args) -> int:
     log = get_logger("cli.serve_webhook")
 
     redis = Redis.from_url(settings.redis.url, decode_responses=True)
+    # 解析失败的死信也要落 SQLite，否则看板只能看到计数、看不到原始 body
+    store = (
+        SQLiteStore(settings.state.db_path)
+        if settings.storage.dead_letter_persist
+        else None
+    )
     queue = SignalQueue(
         redis,
         pending_key=settings.redis.queue_key,
         inflight_key=settings.redis.inflight_key,
         dead_key=settings.redis.dead_key,
+        store=store,
     )
     deduper = Deduper(
         redis,
@@ -52,4 +60,6 @@ def main(args) -> int:
         port=settings.webhook.port,
         log_level=settings.logging.level.lower(),
     )
+    if store is not None:
+        store.close()
     return 0

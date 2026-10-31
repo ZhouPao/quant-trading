@@ -19,6 +19,7 @@ from pathlib import Path
 
 from redis.asyncio import Redis
 
+from quant.execution.dead_letter import DeadLetterService
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import Settings, SmtpSettings
 from quant.foundation.heartbeat import (
@@ -32,6 +33,7 @@ from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import EmailAlerter
+from quant.queue.signal_queue import SignalQueue
 from quant.risk.config import RiskConfig
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
@@ -351,6 +353,16 @@ class DashboardService:
         # 看板只做「查告警 / 确认 / 静音」，不发邮件，故用未配置的 alerter
         self._alerts = AlertService(
             store, redis, EmailAlerter(SmtpSettings()), settings.monitor
+        )
+        # 重放必须回到 worker 消费的同一个 pending key
+        self._dead = DeadLetterService(
+            store,
+            SignalQueue(
+                redis,
+                pending_key=settings.redis.queue_key,
+                inflight_key=settings.redis.inflight_key,
+                dead_key=settings.redis.dead_key,
+            ),
         )
 
     @property
@@ -997,6 +1009,52 @@ class DashboardService:
             return {"ts": now, "reports": [], "degraded": ["quality"]}
         return {"ts": now, "reports": reports, "degraded": []}
 
+    async def dead_letters(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        stage: str | None = None,
+        since: int | None = None,
+        only_pending: bool = False,
+    ) -> dict[str, object]:
+        """死信列表（MS4-B §12）。payload 只给预览，避免整页被原始 body 撑爆。"""
+        now = int(time.time() * 1000)
+        try:
+            items, total = await asyncio.to_thread(
+                self._store.list_dead_letters,
+                limit,
+                offset,
+                stage=stage,
+                since=since,
+                only_pending=only_pending,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"dead letters read failed: {e}")
+            return {
+                "ts": now,
+                "items": [],
+                "total": None,
+                "degraded": ["sqlite"],
+            }
+        return {
+            "ts": now,
+            "items": [_dead_letter_row(row) for row in items],
+            "total": total,
+            "degraded": [],
+        }
+
+    async def replay_dead_letter(self, dead_id: str) -> dict[str, object]:
+        """单条重放：requeued / already_processed / already_replayed / ..."""
+        return await self._dead.replay(dead_id)
+
+    async def replay_dead_letters(self, ids: list[str]) -> dict[str, object]:
+        """批量重放，逐条独立返回。"""
+        return {"results": await self._dead.replay_many(ids)}
+
+    async def discard_dead_letter(self, dead_id: str) -> dict[str, object]:
+        return await self._dead.discard(dead_id)
+
     async def reports(self, limit: int = 20) -> dict[str, object]:
         """日报列表：读取 monitor 落盘的偏离报告 CSV。
 
@@ -1347,6 +1405,27 @@ class DashboardService:
             "position": position,
             "degraded": degraded,
         }
+
+
+#: 死信列表里的 payload 预览上限。完整 body 可能很长，截断后加标记，
+#: 让人知道滚动条到头不是数据尽头而是展示上限。
+_DEAD_PAYLOAD_PREVIEW = 4000
+
+
+def _dead_letter_row(row: dict) -> dict[str, object]:
+    """把 SQLite 行转成前端用的死信结构（payload 截断）。"""
+    payload = str(row.get("payload") or "")
+    return {
+        "dead_id": row["dead_id"],
+        "signal_id": row.get("signal_id"),
+        "stage": row["stage"],
+        "reason": row["reason"],
+        "payload": payload[:_DEAD_PAYLOAD_PREVIEW],
+        "payload_truncated": len(payload) > _DEAD_PAYLOAD_PREVIEW,
+        "created_at": row["created_at"],
+        "replayed_at": row.get("replayed_at"),
+        "replay_result": row.get("replay_result"),
+    }
 
 
 def _bar_size_key(bar: str) -> int:

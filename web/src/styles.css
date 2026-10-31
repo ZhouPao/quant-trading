@@ -485,6 +485,180 @@ code {
   color: var(--bad);
 }
 
+/* ---------------- 死信 ---------------- */
+
+.dead {
+  grid-column: span 12;
+}
+
+.dl-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 8px;
+}
+
+.dl-tools select {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.dl-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.dl-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.dl-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dl-ghost {
+  color: var(--dim);
+}
+
+.dl-msg {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.dl-bad {
+  color: var(--bad);
+}
+
+.dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dl-item {
+  border-left: 2px solid var(--bad);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.dl-done {
+  border-left-color: var(--line);
+  opacity: 0.55;
+}
+
+.dl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.dl-stage {
+  min-width: 66px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.dl-parse {
+  color: var(--warn);
+}
+
+.dl-submit {
+  color: var(--bad);
+}
+
+.dl-reconcile {
+  color: var(--accent);
+}
+
+.dl-signal {
+  min-width: 150px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-reason {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-time {
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.dl-result {
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.dl-actions {
+  display: inline-flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.dl-caret {
+  border: none;
+  background: none;
+  color: var(--dimmer);
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.dl-caret:hover {
+  color: var(--accent);
+}
+
+.dl-payload {
+  margin: 0;
+  padding: 6px 10px 10px 20px;
+  max-height: 180px;
+  overflow: auto;
+  color: var(--dim);
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ---------------- 风控限额 ---------------- */
 
 .risk-limits {

@@ -58,6 +58,9 @@ class StorageSettings(BaseModel):
     retention_enabled: bool = True
     retention_at: str = "03:30"             # 本地时间 HH:MM
     retention_last_run_key: str = "quant:retention:last"
+    # 死信是否双写 SQLite（灰度期回滚开关）。关掉后退回「只在 Redis」的旧行为，
+    # 但看板死信列表与重放会没有数据可读。
+    dead_letter_persist: bool = True
 
 
 class RateLimitSettings(BaseModel):

@@ -262,6 +262,27 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (strategy_id, inst_id)
     );
     """,
+    # v6 -> v7：死信落库（MS4-B §10.1、§11.3）
+    #
+    # Redis LIST 继续保留给 monitor 计数告警，SQLite 作为可查询的权威记录。
+    # stage 收敛为 parse / submit / reconcile；风控拒绝不进死信（那属于
+    # risk_events 的正常业务结果）。
+    """
+    CREATE TABLE IF NOT EXISTS dead_letters (
+        dead_id       TEXT PRIMARY KEY,
+        signal_id     TEXT,
+        stage         TEXT NOT NULL,
+        reason        TEXT NOT NULL,
+        payload       TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        replayed_at   INTEGER,
+        replay_result TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_dead_created
+        ON dead_letters(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dead_stage
+        ON dead_letters(stage, created_at DESC);
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -1016,6 +1037,105 @@ class SQLiteStore:
         return [dict(r) for r in rows], int(total["n"]) if total else 0
 
     # ------------------------------------------------------------------
+    # dead letters（MS4-B §10）
+    # ------------------------------------------------------------------
+
+    def insert_dead_letter(
+        self,
+        dead_id: str,
+        stage: str,
+        reason: str,
+        payload: str,
+        *,
+        created_at: int,
+        signal_id: str | None = None,
+    ) -> bool:
+        """写入一条死信。`dead_id` 由调用方生成，重复写入幂等。"""
+        return (
+            self._execute(
+                """
+                INSERT OR IGNORE INTO dead_letters (
+                    dead_id, signal_id, stage, reason, payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (dead_id, signal_id, stage, reason, payload, created_at),
+            )
+            > 0
+        )
+
+    def get_dead_letter(self, dead_id: str) -> dict | None:
+        row = self._query_one(
+            "SELECT * FROM dead_letters WHERE dead_id = ?", (dead_id,)
+        )
+        return dict(row) if row else None
+
+    def list_dead_letters(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        stage: str | None = None,
+        since: int | None = None,
+        only_pending: bool = False,
+    ) -> tuple[list[dict], int]:
+        """按时间倒序分页；总数与分页共用同一组 WHERE。"""
+        where, params = _dead_letter_filters(
+            stage=stage, since=since, only_pending=only_pending
+        )
+        total_row = self._query_one(
+            f"SELECT COUNT(*) AS n FROM dead_letters {where}", tuple(params)
+        )
+        total = int(total_row["n"]) if total_row else 0
+        rows = self._query_all(
+            f"""
+            SELECT dead_id, signal_id, stage, reason, payload, created_at,
+                   replayed_at, replay_result
+              FROM dead_letters {where}
+             ORDER BY created_at DESC, dead_id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows], total
+
+    def claim_dead_letter(self, dead_id: str, now_ms: int) -> bool:
+        """原子占用一条死信用于重放（防双击重复入队）。
+
+        `replayed_at IS NULL` 是条件：并发调用只有一个能拿到 True。
+        重放入队失败时调用方需 `release_dead_letter` 归还，否则这条
+        死信会永远显示「已重放」而实际没回队列。
+        """
+        return (
+            self._execute(
+                """
+                UPDATE dead_letters
+                   SET replayed_at = ?, replay_result = 'replaying'
+                 WHERE dead_id = ? AND replayed_at IS NULL
+                """,
+                (now_ms, dead_id),
+            )
+            > 0
+        )
+
+    def finish_dead_letter(self, dead_id: str, result: str) -> None:
+        """写入重放结果（requeued / already_processed / discarded）。"""
+        self._execute(
+            "UPDATE dead_letters SET replay_result = ? WHERE dead_id = ?",
+            (result, dead_id),
+        )
+
+    def release_dead_letter(self, dead_id: str) -> None:
+        """撤销占用：重放入队失败时恢复为「未处理」，允许重试。"""
+        self._execute(
+            """
+            UPDATE dead_letters
+               SET replayed_at = NULL, replay_result = NULL
+             WHERE dead_id = ? AND replay_result = 'replaying'
+            """,
+            (dead_id,),
+        )
+
+    # ------------------------------------------------------------------
     # strategy bindings（MS4-C §4.1 / §10.3）
     # ------------------------------------------------------------------
 
@@ -1456,6 +1576,27 @@ def _alert_filters(
     if until_ms is not None:
         clauses.append("created_at <= ?")
         params.append(until_ms)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, tuple(params)
+
+
+def _dead_letter_filters(
+    *,
+    stage: str | None,
+    since: int | None,
+    only_pending: bool,
+) -> tuple[str, tuple]:
+    """拼 dead_letters 的 WHERE 子句。"""
+    clauses: list[str] = []
+    params: list[object] = []
+    if stage is not None:
+        clauses.append("stage = ?")
+        params.append(stage)
+    if since is not None:
+        clauses.append("created_at >= ?")
+        params.append(since)
+    if only_pending:
+        clauses.append("replayed_at IS NULL")
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, tuple(params)
 

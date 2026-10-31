@@ -9,16 +9,29 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+import time
+import uuid
+from typing import TYPE_CHECKING, Any
 
 from redis.asyncio import Redis
 
 from quant.backtest.signal import Signal
+from quant.foundation.logger import get_logger
+
+if TYPE_CHECKING:
+    from quant.state.sqlite_store import SQLiteStore
+
+log = get_logger("queue.signal")
 
 
 class SignalQueue:
-    """Redis LIST 信号队列封装（异步）。"""
+    """Redis LIST 信号队列封装（异步）。
+
+    传入 `store` 时死信会**双写**：Redis LIST 供 monitor 计数告警，
+    SQLite 作为可查询、可重放的权威记录（MS4-B §10.1）。
+    """
 
     def __init__(
         self,
@@ -26,8 +39,10 @@ class SignalQueue:
         pending_key: str = "quant:signals",
         inflight_key: str = "quant:signals:inflight",
         dead_key: str = "quant:signals:dead",
+        store: SQLiteStore | None = None,
     ) -> None:
         self._redis = redis
+        self._store = store
         self.pending_key = pending_key
         self.inflight_key = inflight_key
         self.dead_key = dead_key
@@ -49,15 +64,48 @@ class SignalQueue:
         """处理成功后从 inflight 精确移除该信号。"""
         await self._redis.lrem(self.inflight_key, 0, _dumps(signal.to_json()))
 
-    async def push_dead(self, signal: Signal, reason: str) -> None:
-        """处理失败信号 → 死信队列（带 reason）。"""
+    async def push_dead(
+        self, signal: Signal, reason: str, *, stage: str = "submit"
+    ) -> None:
+        """处理失败信号 → 死信队列（带 reason），并落 SQLite。"""
         payload = {"signal": signal.to_json(), "reason": reason}
         await self._redis.lpush(self.dead_key, _dumps(payload))
+        await self._persist_dead(
+            stage, reason, payload, signal_id=signal.signal_id
+        )
 
-    async def push_dead_raw(self, body: str, reason: str) -> None:
-        """解析失败的原始 body → 死信队列。"""
+    async def push_dead_raw(
+        self, body: str, reason: str, *, stage: str = "parse"
+    ) -> None:
+        """解析失败的原始 body → 死信队列，并落 SQLite。"""
         payload = {"raw": body, "reason": reason}
         await self._redis.lpush(self.dead_key, _dumps(payload))
+        await self._persist_dead(stage, reason, payload)
+
+    async def _persist_dead(
+        self,
+        stage: str,
+        reason: str,
+        payload: dict[str, Any],
+        *,
+        signal_id: str | None = None,
+    ) -> None:
+        """死信写 SQLite。落库失败只告警——Redis 队列已写入，
+        monitor 的计数告警仍然有效，不能因为权威表写失败把死信丢掉。"""
+        if self._store is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self._store.insert_dead_letter,
+                uuid.uuid4().hex,
+                stage,
+                reason,
+                _dumps(payload),
+                created_at=int(time.time() * 1000),
+                signal_id=signal_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"persist dead letter failed stage={stage}: {e}")
 
     async def recover_inflight(self) -> list[Signal]:
         """启动恢复：把 inflight 全部回 pending，并返回恢复的信号列表。
@@ -74,10 +122,10 @@ class SignalQueue:
             try:
                 recovered.append(_loads_signal(raw))
             except (ValueError, KeyError, json.JSONDecodeError):
-                # 损坏数据直接进死信，避免阻塞恢复
-                await self._redis.lpush(
-                    self.dead_key,
-                    _dumps({"raw": raw, "reason": "corrupt inflight payload"}),
+                # 损坏数据直接进死信，避免阻塞恢复；stage 记为 reconcile，
+                # 因为这不是 webhook 解析失败，而是状态恢复时发现异常
+                await self.push_dead_raw(
+                    raw, "corrupt inflight payload", stage="reconcile"
                 )
         return recovered
 

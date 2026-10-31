@@ -475,6 +475,35 @@ async function getJson<T>(path: string, signal: AbortSignal): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** 带写操作守卫头的 POST：本机 Host + X-Dashboard-Request。 */
+async function postGuarded<T>(
+  path: string,
+  body: unknown,
+  token = "",
+): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Dashboard-Request": "1",
+      ...(token ? { "X-Dashboard-Token": token } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: unknown };
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      // 非 JSON 响应，保留状态码
+    }
+    throw new Error(detail);
+  }
+  return (await response.json()) as T;
+}
+
 export type ReportRow = {
   metric: string;
   paper: string;
@@ -591,6 +620,71 @@ export async function fetchQualityReport(
 ) {
   const query = new URLSearchParams({ inst_id: instId, bar_size: barSize });
   return getJson<QualityDetailResponse>(`/api/quality?${query}`, signal);
+}
+
+export type DeadLetterItem = {
+  dead_id: string;
+  signal_id: string | null;
+  stage: string;
+  reason: string;
+  payload: string;
+  payload_truncated: boolean;
+  created_at: number;
+  replayed_at: number | null;
+  replay_result: string | null;
+};
+
+export type DeadLettersResponse = {
+  ts: number;
+  items: DeadLetterItem[];
+  /** null 表示 SQLite 读取失败，列表不可信 */
+  total: number | null;
+  degraded: string[];
+};
+
+export type DeadLetterResult = { dead_id: string; result: string };
+
+export type DeadLetterBatch = { results: DeadLetterResult[] };
+
+/** 死信列表；`stage` 可选 parse / submit / reconcile。 */
+export async function fetchDeadLetters(
+  signal: AbortSignal,
+  options: {
+    limit?: number;
+    offset?: number;
+    stage?: string;
+    pendingOnly?: boolean;
+  } = {},
+) {
+  const query = new URLSearchParams({
+    limit: String(options.limit ?? 50),
+    offset: String(options.offset ?? 0),
+  });
+  if (options.stage) query.set("stage", options.stage);
+  if (options.pendingOnly) query.set("pending_only", "true");
+  return getJson<DeadLettersResponse>(`/api/dead-letters?${query}`, signal);
+}
+
+/** 重放单条；返回 requeued / already_processed / already_replayed 等。 */
+export async function replayDeadLetter(deadId: string, token = "") {
+  return postGuarded<DeadLetterResult>(
+    `/api/dead-letters/${encodeURIComponent(deadId)}/replay`,
+    {},
+    token,
+  );
+}
+
+export async function replayDeadLetters(ids: string[], token = "") {
+  return postGuarded<DeadLetterBatch>("/api/dead-letters/replay", { ids }, token);
+}
+
+/** 标记丢弃：保留记录，不再重放。 */
+export async function discardDeadLetter(deadId: string, token = "") {
+  return postGuarded<DeadLetterResult>(
+    `/api/dead-letters/${encodeURIComponent(deadId)}/discard`,
+    {},
+    token,
+  );
 }
 
 export type KillSwitchCancel = {

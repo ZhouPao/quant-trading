@@ -632,7 +632,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M8-13 | 减仓与平仓 | 手动减仓（按比例或指定数量）、一键平仓；`reduce_only=true` 防止反向开仓；二次确认 | 新增 | ✅ |
 | M8-14 | 服务端仓位计算 | 信号可省略 `qty`；worker 按「权益 × 单笔比例」算量并按 `lotSz` 向下取整；实际量与上限均记入审计。**当前 `Signal.qty` 与 webhook 均为必填，无 `PositionSizer`** | 新增 | ⬜ |
 | M8-15 | 订单状态机 | `pending→live→partially_filled→filled/canceled` 单向推进；部分成交累加并重算均价；禁止状态回退 | 新增 | ⬜ |
-| M8-16 | 死信查看与重放 | 看板列出死信（原始信号 + 原因 + 时间）；支持单条/批量重放回 pending，或标记丢弃；重放前做幂等检查 | 新增 | ⬜ |
+| M8-16 | 死信查看与重放 | 看板列出死信（原始信号 + 原因 + 时间）；支持单条/批量重放回 pending，或标记丢弃；重放前做幂等检查 | 新增 | ✅ |
 | M8-17 | 手工下单与撤改 | 看板可下市价/限价单，可撤单、改价改量；与自动单共用风控、审计与状态机 | 新增 | 🟡 |
 | M8-18 | 三项对账 | 订单 + 持仓 + 余额三类对象对账；差异写 `reconciliations` 并区分「可自动修复」与「需人工确认」 | 新增 | 🟡 |
 | M8-19 | 下单幂等与重试边界 | `clOrdId` 由 `signal_id` 派生保证交易所侧幂等；超时状态不明时先查询再决定，禁止直接重发；重试上限 3 次 | 新增 | 🟡 |
@@ -1015,3 +1015,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 12，状态回填） | 按当前代码逐条复核并回填状态：M3-3/3-4/3-8/3-9/3-10/3-11/3-12 改 ✅（参数表单、变更记录、`PARAM_SPEC`、两层合并、启停矩阵与即时生效均已落地）；M4-9/4-12/4-13/4-14 由 ⬜ 改 🟡、M4-10/4-11 更新说明（后端持久化/任务队列/并发/扩展指标已完成，前端仍用 localStorage 与同步路径）；M7-10/7-11/7-15/7-16 改 ✅（来源标注、事件落库、严格权益口径默认关闭兜底、规则边界单测齐备）；M9-8 改 ✅、M9-7 与 M9-10 由 ⬜ 改 🟡（ack/silence 后端就绪、前端无入口，缺全局静音）、M9-5 补后端筛选能力；M10-2 由 🟡 改 ⬜（无 `CredentialStatus` 实现）；M4-5 修正上限说明（`backtest.max_combos` 由看板与 CLI 共用）；同步更新 §4.3/§4.4 前置条件 |
 | 2026-10-31 | v0.6（补充 13，急停撤单落地） | M7-4 由 🟡 改 ✅：看板急停激活时默认调用 `ManualTrader.cancel_open_orders` 撤销交易所全部挂单并同步本地订单状态（交易所为零基准），可勾选「仅停止不撤单」；撤单失败只回报错误、不回滚停止标志，避免「以为停了其实没停」 |
 | 2026-10-31 | v0.6（补充 14，数据质量报告落地） | M2-15 由 ⬜ 改 ✅：新增 `storage/quality.py`，candles 每轮校验后把结果并入 `data/quality/{inst}/{bar}/latest.json`，跨次累计缺口 `open`/`repaired`（窗口外旧缺口保持 open，不误判修复）；`quant check-data` 支持手动全量校验；`GET /api/quality` 返回摘要或单份完整报告，看板「数据质量」面板可按缺口展开；monitor 对有未修复缺口的品种产生 `data_quality` WARNING，按 `(inst, bar)` 分别冷却（默认 1 小时），新增 `[quality]` 三项配置 |
+| 2026-10-31 | v0.6（补充 15，死信查看与重放落地） | M8-16 由 ⬜ 改 ✅：迁移 v7 建 `dead_letters`，`SignalQueue` 双写（Redis 保留计数告警、SQLite 为权威记录），`stage` 收敛为 `parse`/`submit`/`reconcile`；新增 `DeadLetterService` 与 `GET /api/dead-letters`、`POST /api/dead-letters/{id}/replay`、`POST /api/dead-letters/replay`、`POST /api/dead-letters/{id}/discard`；重放前查 `signals.status`，已 `executed`/`rejected` 返回 `already_processed` 不重复下单，并用 `replayed_at IS NULL` 条件更新防并发双击；看板新增「死信」面板（阶段筛选、payload 展开、单条/批量重放、丢弃）；`[storage] dead_letter_persist` 作为灰度回滚开关 |

@@ -12,6 +12,7 @@ data_dir = "./data"
 retention_days = 365                # K线/SQLite 历史/日报 CSV 的保留天数
 retention_enabled = true            # monitor 每日自动清理；false 时只能 quant prune
 retention_at = "03:30"              # 本地时间 HH:MM
+dead_letter_persist = true            # 死信双写 SQLite，供看板查看与重放
 
 [rate_limit]
 timeout_seconds = 10.0

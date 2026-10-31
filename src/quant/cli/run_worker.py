@@ -82,13 +82,15 @@ async def _run(args, settings: Settings) -> int:
     log = get_logger("cli.run_worker")
 
     redis = Redis.from_url(settings.redis.url, decode_responses=True)
+    store = SQLiteStore(settings.state.db_path)
     queue = SignalQueue(
         redis,
         pending_key=settings.redis.queue_key,
         inflight_key=settings.redis.inflight_key,
         dead_key=settings.redis.dead_key,
+        # 死信双写 SQLite，供看板查看与重放（MS4-B §10）
+        store=store if settings.storage.dead_letter_persist else None,
     )
-    store = SQLiteStore(settings.state.db_path)
     # 生效参数 = ① 代码默认 / ② 全局 [risk] / ③ 策略 [risk] 取严后的结果
     risk_config = load_risk_config(
         args.strategy,

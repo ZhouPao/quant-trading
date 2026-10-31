@@ -6,6 +6,7 @@ import {
   compactQty,
   fetchAll,
   fetchCandles,
+  fetchDeadLetters,
   fetchEquity,
   fetchBindings,
   fetchParamChanges,
@@ -14,12 +15,15 @@ import {
   fetchReports,
   fetchRiskLimits,
   fetchStrategies,
+  discardDeadLetter,
   flattenPositions,
   METRIC_LABELS,
   metricText,
   num,
   pct,
   reducePosition,
+  replayDeadLetter,
+  replayDeadLetters,
   runBacktest,
   runOptimize,
   setKillSwitch,
@@ -29,6 +33,8 @@ import {
   type AlertRow,
   type BacktestResponse,
   type CandlesResponse,
+  type DeadLetterItem,
+  type DeadLettersResponse,
   type EngineResponse,
   type EquityPoint,
   type EquityResponse,
@@ -578,6 +584,10 @@ export default function App() {
             </span>
           </div>
           <AlertPanel alerts={alerts} />
+        </section>
+
+        <section className="card dead reveal" style={{ animationDelay: "215ms" }}>
+          <DeadLettersPanel />
         </section>
 
         <section className="card pnl reveal" style={{ animationDelay: "240ms" }}>
@@ -2810,6 +2820,232 @@ type AlertGroup = {
   latest: AlertRow;
   items: AlertRow[];
 };
+
+const DEAD_RESULT_TEXT: Record<string, string> = {
+  requeued: "已重新入队",
+  already_processed: "信号已处理，跳过",
+  already_replayed: "已重放过",
+  discarded: "已丢弃",
+  not_replayable: "解析死信无 Signal，只能核对后丢弃",
+  not_found: "记录不存在",
+  failed: "入队失败，可重试",
+};
+
+/** 死信面板：按阶段筛选、查看原始 payload、单条/批量重放或丢弃（MS4-B §10）。 */
+function DeadLettersPanel() {
+  const [stage, setStage] = useState("");
+  const [pendingOnly, setPendingOnly] = useState(true);
+  const [data, setData] = useState<DeadLettersResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const controller = useRef<AbortController | null>(null);
+
+  const pull = useCallback(async () => {
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
+    try {
+      const res = await fetchDeadLetters(next.signal, {
+        stage: stage || undefined,
+        pendingOnly,
+      });
+      setData(res);
+      setError(null);
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    }
+  }, [stage, pendingOnly]);
+
+  useEffect(() => {
+    void pull();
+    const id = window.setInterval(() => void pull(), 30_000);
+    return () => {
+      controller.current?.abort();
+      window.clearInterval(id);
+    };
+  }, [pull]);
+
+  const token = () => window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "";
+
+  const act = async (kind: "replay" | "discard", item: DeadLetterItem) => {
+    setBusy(item.dead_id);
+    setNotice(null);
+    try {
+      const res =
+        kind === "replay"
+          ? await replayDeadLetter(item.dead_id, token())
+          : await discardDeadLetter(item.dead_id, token());
+      const text = DEAD_RESULT_TEXT[res.result] ?? res.result;
+      setNotice(`${item.dead_id.slice(0, 8)} · ${text}`);
+      await pull();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const replayAll = async () => {
+    const ids = (data?.items ?? [])
+      .filter((item) => !item.replayed_at && item.stage !== "parse")
+      .map((item) => item.dead_id);
+    if (ids.length === 0) return;
+    setBusy("batch");
+    setNotice(null);
+    try {
+      const res = await replayDeadLetters(ids, token());
+      const done = res.results.filter((r) => r.result === "requeued").length;
+      setNotice(`批量重放 ${res.results.length} 条，成功入队 ${done} 条`);
+      await pull();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const items = data?.items ?? [];
+  const pending = items.filter((item) => !item.replayed_at).length;
+
+  return (
+    <>
+      <div className="card-head">
+        <h2>死信</h2>
+        <span className="card-note">
+          {data?.total === null
+            ? "SQLite 不可读"
+            : `${data?.total ?? "…"} 条 · 当前 ${pending} 条未处理`}
+        </span>
+      </div>
+
+      <div className="dl-tools">
+        <select
+          value={stage}
+          onChange={(e) => setStage(e.target.value)}
+          aria-label="按阶段筛选死信"
+        >
+          <option value="">全部阶段</option>
+          <option value="parse">parse · 解析失败</option>
+          <option value="submit">submit · 下单失败</option>
+          <option value="reconcile">reconcile · 对账异常</option>
+        </select>
+        <label className="dl-check">
+          <input
+            type="checkbox"
+            checked={pendingOnly}
+            onChange={(e) => setPendingOnly(e.target.checked)}
+          />
+          只看未处理
+        </label>
+        <button
+          type="button"
+          className="dl-btn"
+          onClick={replayAll}
+          disabled={busy === "batch" || pending === 0}
+        >
+          {busy === "batch" ? "重放中…" : "批量重放"}
+        </button>
+        {(notice || error) && (
+          <span className={error ? "dl-msg dl-bad" : "dl-msg"}>
+            {error ?? notice}
+          </span>
+        )}
+      </div>
+
+      {items.length === 0 ? (
+        <div className="empty">
+          {pendingOnly
+            ? "没有待处理的死信。信号失败时会自动记录在这里。"
+            : "没有死信记录。"}
+        </div>
+      ) : (
+        <ul className="dl-list">
+          {items.map((item) => {
+            const settled = Boolean(item.replayed_at);
+            const expanded = open === item.dead_id;
+            return (
+              <li
+                key={item.dead_id}
+                className={settled ? "dl-item dl-done" : "dl-item"}
+              >
+                <div className="dl-row">
+                  <span className={`dl-stage dl-${item.stage}`}>
+                    {item.stage}
+                  </span>
+                  <span className="dl-signal mono">
+                    {item.signal_id ?? "—"}
+                  </span>
+                  <span className="dl-reason" title={item.reason}>
+                    {item.reason}
+                  </span>
+                  <span className="dl-time mono">
+                    {stamp(item.created_at)}
+                  </span>
+                  {settled ? (
+                    <span className="dl-result mono">
+                      {DEAD_RESULT_TEXT[item.replay_result ?? ""] ??
+                        item.replay_result ??
+                        "已处理"}
+                    </span>
+                  ) : (
+                    <span className="dl-actions">
+                      <button
+                        type="button"
+                        className="dl-btn"
+                        onClick={() => void act("replay", item)}
+                        disabled={
+                          busy === item.dead_id || item.stage === "parse"
+                        }
+                        title={
+                          item.stage === "parse"
+                            ? "解析死信只有原始 body，无法还原成信号"
+                            : "放回 pending 队列重新执行"
+                        }
+                      >
+                        重放
+                      </button>
+                      <button
+                        type="button"
+                        className="dl-btn dl-ghost"
+                        onClick={() => void act("discard", item)}
+                        disabled={busy === item.dead_id}
+                      >
+                        丢弃
+                      </button>
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="dl-caret"
+                    onClick={() =>
+                      setOpen(expanded ? null : item.dead_id)
+                    }
+                  >
+                    {expanded ? "收起" : "详情"}
+                  </button>
+                </div>
+                {expanded && (
+                  <pre className="dl-payload mono">
+                    {item.payload}
+                    {item.payload_truncated ? "\n…（已截断）" : ""}
+                  </pre>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <div className="rpt-foot">
+        <span>重放会回到 pending，由 worker 重新走风控与下单</span>
+        <span>已 executed/rejected 的信号不会重复下单</span>
+        <span>记录来自 SQLite dead_letters</span>
+      </div>
+    </>
+  );
+}
 
 /** 按规则聚合的告警面板：级别筛选 + 规则筛选 + 展开查看明细。 */
 function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
