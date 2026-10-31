@@ -290,6 +290,10 @@ def create_app(
     async def pnl() -> JSONResponse:
         return JSONResponse(await service.pnl())
 
+    @app.get("/api/today-pnl")
+    async def today_pnl() -> JSONResponse:
+        return JSONResponse(await service.today_pnl())
+
     @app.get("/api/risk-limits")
     async def risk_limits() -> JSONResponse:
         return JSONResponse(await service.risk_limits())

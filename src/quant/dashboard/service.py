@@ -1210,6 +1210,129 @@ class DashboardService:
             "degraded": [],
         }
 
+    async def today_pnl(self) -> dict[str, object]:
+        """M1-8 今日盈亏汇总：按品种拆分已实现盈亏 + 未实现盈亏 + 手续费。
+
+        已实现盈亏：今日成交的 FIFO 回合盈亏（含手续费）
+        未实现盈亏：当前持仓按标记价估算的浮动盈亏
+        手续费：今日成交的总手续费
+        """
+        now = int(time.time() * 1000)
+        day_start = day_start_ms_utc8(now)
+
+        # 1. 按品种统计今日已实现盈亏
+        try:
+            by_inst = await asyncio.to_thread(
+                self._store.get_today_pnl_by_inst, day_start
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"today_pnl sqlite read failed: {e}")
+            return {
+                "ts": now,
+                "day_start": day_start,
+                "instruments": [],
+                "total_realized": "0",
+                "total_unrealized": "0",
+                "total_fee": "0",
+                "total_pnl": "0",
+                "degraded": ["sqlite"],
+            }
+
+        # 2. 读取当前持仓，计算未实现盈亏
+        try:
+            positions = await asyncio.to_thread(self._store.get_all_positions)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"today_pnl positions read failed: {e}")
+            positions = []
+
+        # 3. 从 Redis 快照读取标记价
+        snapshot = None
+        try:
+            raw = await self._redis.get(
+                self._settings.monitor.dashboard_snapshot_key
+            )
+            snapshot = _loads(raw)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"today_pnl snapshot read failed: {e}")
+
+        # 4. 构建标记价映射
+        mark_prices: dict[str, Decimal] = {}
+        if snapshot and "positions" in snapshot:
+            for pos in snapshot["positions"]:
+                inst_id = pos.get("inst_id")
+                mark_price = _as_decimal_or_none(pos.get("mark_price"))
+                if inst_id and mark_price is not None:
+                    mark_prices[inst_id] = mark_price
+
+        # 5. 合并已实现 + 未实现
+        inst_data: dict[str, dict] = {}
+        for inst_id, data in by_inst.items():
+            inst_data[inst_id] = {
+                "inst_id": inst_id,
+                "realized": data["realized"],
+                "unrealized": Decimal("0"),
+                "fee": data["fee"],
+                "turnover": data["turnover"],
+            }
+
+        # 6. 加入持仓的未实现盈亏
+        for pos in positions:
+            if pos.qty == 0:
+                continue
+            inst_id = pos.inst_id
+            mark_price = mark_prices.get(inst_id)
+            if mark_price is None:
+                # 没有标记价，用均价估算（不精确但至少有值）
+                mark_price = pos.avg_price
+            unrealized = pos.unrealized_pnl(mark_price)
+
+            if inst_id in inst_data:
+                inst_data[inst_id]["unrealized"] = unrealized
+            else:
+                inst_data[inst_id] = {
+                    "inst_id": inst_id,
+                    "realized": Decimal("0"),
+                    "unrealized": unrealized,
+                    "fee": Decimal("0"),
+                    "turnover": Decimal("0"),
+                }
+
+        # 7. 汇总
+        instruments = []
+        total_realized = Decimal("0")
+        total_unrealized = Decimal("0")
+        total_fee = Decimal("0")
+
+        for data in inst_data.values():
+            total_realized += data["realized"]
+            total_unrealized += data["unrealized"]
+            total_fee += data["fee"]
+            instruments.append({
+                "inst_id": data["inst_id"],
+                "realized": str(data["realized"]),
+                "unrealized": str(data["unrealized"]),
+                "fee": str(data["fee"]),
+                "turnover": str(data["turnover"]),
+                "pnl": str(data["realized"] + data["unrealized"]),
+            })
+
+        # 按总盈亏排序（降序）
+        instruments.sort(
+            key=lambda x: Decimal(x["pnl"]),
+            reverse=True,
+        )
+
+        return {
+            "ts": now,
+            "day_start": day_start,
+            "instruments": instruments,
+            "total_realized": str(total_realized),
+            "total_unrealized": str(total_unrealized),
+            "total_fee": str(total_fee),
+            "total_pnl": str(total_realized + total_unrealized),
+            "degraded": [],
+        }
+
     async def set_kill_switch(
         self, active: bool, reason: str = ""
     ) -> dict[str, object]:

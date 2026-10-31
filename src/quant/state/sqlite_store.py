@@ -705,6 +705,28 @@ class SQLiteStore:
         fills = self._fills_since(day_start_ms)
         return _realized_pnl(fills)
 
+    def get_today_pnl_by_inst(self, day_start_ms: int) -> dict[str, dict]:
+        """M1-8 今日盈亏按品种拆分。
+
+        返回 {inst_id: {realized, fee, turnover}}，口径与 get_today_realized_pnl 一致。
+        """
+        fills = self._fills_since(day_start_ms)
+        by_inst: dict[str, list[Fill]] = {}
+        for fill in fills:
+            by_inst.setdefault(fill.inst_id, []).append(fill)
+
+        result = {}
+        for inst_id, inst_fills in by_inst.items():
+            realized = _realized_pnl(inst_fills)
+            fee = sum((f.fee for f in inst_fills), Decimal("0"))
+            turnover = sum((f.qty * f.price for f in inst_fills), Decimal("0"))
+            result[inst_id] = {
+                "realized": realized,
+                "fee": fee,
+                "turnover": turnover,
+            }
+        return result
+
     def get_all_fills(self) -> list[Fill]:
         """全部成交（按 ts 升序）。用于看板 FIFO 回合盈亏统计。"""
         return self._fills_since(0)

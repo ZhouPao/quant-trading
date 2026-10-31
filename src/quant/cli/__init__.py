@@ -21,6 +21,7 @@ from quant.cli.dashboard import main as dashboard_main
 from quant.cli.fetch_candles import main as fetch_candles_main
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
 from quant.cli.fetch_instruments import main as fetch_instruments_main
+from quant.cli.fetch_open_interest import main as fetch_open_interest_main
 from quant.cli.kill_switch import main as kill_switch_main
 from quant.cli.monitor import main as monitor_main
 from quant.cli.optimize import main as optimize_main
@@ -129,6 +130,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="永续合约 ID, 如 BTC-USDT-SWAP",
     )
     p_funding.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
+    # fetch-open-interest (M2-14)
+    p_oi = sub.add_parser(
+        "fetch-open-interest",
+        help="拉取永续合约持仓量并落盘（M2-14）",
+    )
+    p_oi.add_argument(
+        "--inst",
+        required=True,
+        nargs="+",
+        help="永续合约 ID（可多个）, 如 BTC-USDT-SWAP ETH-USDT-SWAP",
+    )
+    p_oi.add_argument(
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
@@ -593,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
         return fetch_instruments_main(args)
     elif args.command == "fetch-funding-rates":
         return fetch_funding_rates_main(args)
+    elif args.command == "fetch-open-interest":
+        return fetch_open_interest_main(args)
     elif args.command == "validate-data":
         return validate_data_main(args)
     elif args.command == "check-data":

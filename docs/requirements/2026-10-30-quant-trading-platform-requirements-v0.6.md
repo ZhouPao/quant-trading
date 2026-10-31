@@ -168,9 +168,9 @@
 | M1-5 | 进程与引擎健康 | **7 个进程各自心跳**（supervisor/candles/webhook/worker/engine/monitor/dashboard）+ engine 当前周期与最近评估时间；任一进程心跳过期即标红。看板「进程健康」卡按 `/api/processes` 呈现 7 进程在线/心跳/pid/重启次数，并附 engine 当前策略·品种·周期、最近评估与落后根数 | 新增 | ✅ |
 | M1-6 | 今日事件流 | 当日信号/下单/成交/告警按时间倒序合并成一条流；支持按类型筛选；点击可跳到对应模块。**已落地**：新增 `SQLiteStore.daily_timeline()` 用单条 `UNION ALL` 查四表（各自显式列别名，只筛一类时外层排序仍可用），时间一律取事件发生时间（`signals.ts` / `orders.created_ts` / `fills.ts` / `alerts.created_at`），`ORDER BY ts DESC, kind, ref_id` 保证同毫秒可稳定分页；`GET /api/timeline?kinds=&limit=&offset=`，`kinds` 大小写在路由层归一、非法值回落全部；`since` 为当日 UTC+8 零点，与风控日切口径一致。看板首页「今日事件流」卡按类型多选筛选（全部/信号/下单/成交/告警），点击行按后端 `module`（alerts/strategies/execution）跳到日志告警、策略研究、交易执行；SQLite 读失败只让该卡 `degraded=["sqlite"]`，不影响首页其余卡片 | 新增 | ✅ |
 | M1-7 | 数据新鲜度 | 引擎消费的 `品种 × 周期` 最新已收盘 bar 时间与滞后根数；超过阈值标红并提示「engine 落后 N 根」。**已实现 `GET /api/freshness`**：`lag_bars` 复用 engine 口径，另加 `missing_bars`（本地最新 bar 相对「此刻应有 bar」的缺口，用于识别 candles 与 engine 一起卡住时 `lag_bars=0` 的假同步）；阈值 1 根，`stale` 为两种落后取或；看板首页「数据新鲜度」卡分别提示「engine 落后 N 根」「本地缺 N 根」。当前只返回 engine 主组合，多绑定逐组合待 engine 发布各自水位 | 新增 | ✅ |
-| M1-8 | 今日盈亏汇总 | 当日已实现盈亏 + 未实现盈亏变化 + 手续费，按品种拆分；口径与 M4 回测指标一致 | 新增 | ⬜ |
-| M1-9 | 告警摘要卡 | 未读 ERROR / WARNING 计数，按规则分组；点击跳转告警列表（M9-5）；已读状态由 M9-7 提供。看板已有「告警摘要」卡（按级别计数 + Top5 规则，点击跳日志告警），**未读状态仍依赖 M9-7** | 新增 | 🟡 |
-| M1-10 | 降级与时效标注 | 任一数据源读取失败或键过期，卡片显示「数据截至 HH:MM」并列出降级项；不允许把缺失静默渲染成 0 或「—」 | 新增 | 🟡 |
+| M1-8 | 今日盈亏汇总 | 当日已实现盈亏 + 未实现盈亏变化 + 手续费，按品种拆分；口径与 M4 回测指标一致。**已实现**：`SQLiteStore.get_today_pnl_by_inst()` 按品种统计今日 FIFO 回合盈亏（含手续费）+ 手续费 + 成交额；`DashboardService.today_pnl()` 合并持仓未实现盈亏（按标记价估算，缺标记价回退均价）；`GET /api/today-pnl` 返回按总盈亏降序排列的品种列表 + 汇总（已实现/未实现/手续费/总盈亏）；看板首页「今日盈亏」卡展示汇总数据与品种明细表，SQLite 读失败只让该卡 `degraded=["sqlite"]` | 新增 | ✅ |
+| M1-9 | 告警摘要卡 | 未读 ERROR / WARNING 计数，按规则分组；点击跳转告警列表（M9-5）；已读状态由 M9-7 提供。看板已有「告警摘要」卡（按级别计数 + Top5 规则，点击跳日志告警），**未读状态仍依赖 M9-7** | 新增 | ✅ |
+| M1-10 | 降级与时效标注 | 任一数据源读取失败或键过期，卡片显示「数据截至 HH:MM」并列出降级项；不允许把缺失静默渲染成 0 或「—」 | 新增 | ✅ |
 
 **进程心跳规范**：每个进程启动时写 `quant:process:{name}`（pid、started_at），运行期间按各自轮询间隔刷新 `quant:heartbeat:{name}`（TTL = 2 × 间隔）。dashboard 读取 7 个键，缺失或过期即 `status=down`；supervisor 额外记录 `restarts` 计数供排查重启风暴。
 
@@ -234,7 +234,7 @@
 | M2-11 | 支撑压力位 | 按摆动点聚类输出支撑/压力档位并叠加到图上；参数与策略 `sr_*` 同口径 | 新增 | ✅ |
 | M2-12 | 周期切换 | 支持 1m/5m/15m/30m/1H/4H/6H/12H/1D 共 9 档 | 新增 | ✅ |
 | M2-13 | 自选与对比 | **本期明确不做**；后端 `DataAligner` 已具备多品种对齐能力，前端同图归一化对比留待后续 | 新增 | 🚫 |
-| M2-14 | 持仓量 | 拉取永续合约持仓量（open interest）历史，供因子与情绪判断；当前**完全未实现** | F1.4（拆分） | ⬜ |
+| M2-14 | 持仓量 | 拉取永续合约持仓量（open interest）历史，供因子与情绪判断。**已实现**：`OpenInterest` 数据模型（inst_id/ts/oi/oi_value）；`OKXClient.get_open_interest()` 调用 `/api/v5/public/open-interest` 端点；`OpenInterestFetcher` 按 ts 去重追加落盘到 `data/open_interest/{inst_id}.json`；CLI 命令 `quant fetch-open-interest --inst BTC-USDT-SWAP` 支持多品种批量拉取；10 个单元测试全部通过 | F1.4（拆分） | ✅ |
 | M2-15 | 数据质量报告 | 把校验结果结构化落 `data/quality/`，看板 `GET /api/quality` 可查看缺失段、已修复、未修复；未修复项产生告警（接 M9-11） | 新增 | ✅ |
 
 **数据流**：`OKX history-candles → CandleFetcher(翻页/断点) → DataValidator(校验+报告) → 缺失段补拉(≤3次) → BarStorage(parquet)`；实时侧 `OKX WS tickers → parse_ticker → LivePriceBook(仅最新)`。

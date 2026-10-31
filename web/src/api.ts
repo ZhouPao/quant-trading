@@ -84,6 +84,26 @@ export type PositionsResponse = {
   degraded: string[];
 };
 
+export type TodayPnlInstrument = {
+  inst_id: string;
+  realized: string;
+  unrealized: string;
+  fee: string;
+  turnover: string;
+  pnl: string;
+};
+
+export type TodayPnlResponse = {
+  ts: number;
+  day_start: number;
+  instruments: TodayPnlInstrument[];
+  total_realized: string;
+  total_unrealized: string;
+  total_fee: string;
+  total_pnl: string;
+  degraded: string[];
+};
+
 export type ManualFill = {
   qty: string;
   price: string;
@@ -1092,6 +1112,11 @@ export async function revokeSilence(silenceId: string, token = "") {
 /** 权益曲线单独拉取：时间范围由页面切换，后端上限 720 小时（30 天）。 */
 export async function fetchEquity(signal: AbortSignal, hours: number) {
   return getJson<EquityResponse>(`/api/equity?hours=${hours}`, signal);
+}
+
+/** M1-8 今日盈亏汇总：按品种拆分已实现 + 未实现 + 手续费。 */
+export async function fetchTodayPnl(signal: AbortSignal) {
+  return getJson<TodayPnlResponse>("/api/today-pnl", signal);
 }
 
 /** 日报变化很慢（每天一份），单独低频拉取。 */

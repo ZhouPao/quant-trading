@@ -235,6 +235,17 @@ class OKXClient:
             return None
         return _funding_rate_from_raw(data[0])
 
+    def get_open_interest(self, inst_id: str) -> dict | None:
+        """拉取当前持仓量（M2-14）。
+
+        端点：GET /api/v5/public/open-interest?instId=...
+        返回 data[0]（含 instId/oi/oiValue/ts）。
+        """
+        data = self.get("/api/v5/public/open-interest", {"instId": inst_id})
+        if not isinstance(data, list) or not data:
+            return None
+        return data[0]
+
     def get_balance(self) -> dict:
         """查询账户余额（M4 监控）。
 

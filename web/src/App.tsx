@@ -11,6 +11,7 @@ import {
   fetchCandles,
   fetchDeadLetters,
   fetchEquity,
+  fetchTodayPnl,
   fetchBindings,
   fetchParamChanges,
   fetchQuality,
@@ -79,6 +80,7 @@ import {
   type ParamChange,
   type ParamSpec,
   type PnlResponse,
+  type TodayPnlResponse,
   type QualityItem,
   type QualityListResponse,
   type QualityReport,
@@ -315,6 +317,8 @@ export default function App() {
   // M9-14 告警趋势变化慢，单独低频拉取
   const [alertTrend, setAlertTrend] = useState<AlertStatsResponse | null>(null);
   const [alertTrendDays, setAlertTrendDays] = useState(7);
+  // M1-8 今日盈亏汇总：按品种拆分，变化频率与持仓相同
+  const [todayPnl, setTodayPnl] = useState<TodayPnlResponse | null>(null);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -500,6 +504,25 @@ export default function App() {
     };
   }, [alertTrendDays]);
 
+  // M1-8 今日盈亏汇总：按品种拆分，变化频率与持仓相同
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchTodayPnl(controller.signal)
+        .then(setTodayPnl)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setTodayPnl(null);
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, []);
+
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
   const orders = data?.orders.orders ?? [];
@@ -520,22 +543,29 @@ export default function App() {
         ...(equity?.degraded ?? []),
         ...(timeline?.degraded ?? []),
         ...(alertTrend?.degraded ?? []),
+        ...(todayPnl?.degraded ?? []),
       ]),
-    [overview, data, risk, equity, reports, quality, timeline, alertTrend],
+    [overview, data, risk, equity, reports, quality, timeline, alertTrend, todayPnl],
   );
   const alertStats = useMemo(() => {
     const byLevel: Record<string, number> = {};
     const byRule = new Map<string, number>();
+    let unreadCount = 0;
     for (const alert of alerts) {
-      const level = alert.level.toUpperCase();
-      byLevel[level] = (byLevel[level] ?? 0) + 1;
-      byRule.set(alert.rule, (byRule.get(alert.rule) ?? 0) + 1);
+      const state = alert.state ?? "open";
+      // M1-9：只统计未读告警（open 或 silenced）
+      if (state === "open" || state === "silenced") {
+        unreadCount++;
+        const level = alert.level.toUpperCase();
+        byLevel[level] = (byLevel[level] ?? 0) + 1;
+        byRule.set(alert.rule, (byRule.get(alert.rule) ?? 0) + 1);
+      }
     }
     const rules = [...byRule.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
     return {
-      total: alerts.length,
+      total: unreadCount,
       error: byLevel.ERROR ?? 0,
       byLevel,
       rules,
@@ -651,6 +681,11 @@ export default function App() {
           monitor 快照已过期或缺失。账户/指标数据停更，订单与成交仍来自本地 SQLite。
         </div>
       )}
+      {degraded.size > 0 && (
+        <div className="banner banner-warn">
+          数据降级：{Array.from(degraded).join("、")}。部分数据可能不完整或延迟。
+        </div>
+      )}
 
       <div className="layout">
         <aside className="sidebar">
@@ -681,6 +716,13 @@ export default function App() {
         <section className="card hero reveal" style={{ animationDelay: "40ms" }}>
           <div className="card-head">
             <h2>账户权益</h2>
+            <span className="card-note">
+              {overview?.snapshot_ts
+                ? `数据截至 ${clock(overview.snapshot_ts)}`
+                : overview?.account
+                  ? "快照时间未知"
+                  : "等待 monitor"}
+            </span>
             <div className="chart-tools">
               <div className="seg" role="group" aria-label="权益曲线时间范围">
                 {EQUITY_RANGES.map((item) => (
@@ -741,10 +783,11 @@ export default function App() {
           <div className="card-head">
             <h2>风险指标</h2>
             <span className="card-note">
-              {overview?.snapshot_age_seconds !== null &&
-              overview?.snapshot_age_seconds !== undefined
-                ? `${age(overview.snapshot_age_seconds)} 前刷新`
-                : "等待 monitor"}
+              {overview?.snapshot_ts
+                ? `数据截至 ${clock(overview.snapshot_ts)}`
+                : overview?.metrics
+                  ? "快照时间未知"
+                  : "等待 monitor"}
             </span>
           </div>
           <div className="metric-grid">
@@ -779,9 +822,69 @@ export default function App() {
           </div>
         </section>
 
+        <section className="card today-pnl reveal" style={{ animationDelay: "108ms" }}>
+          <div className="card-head">
+            <h2>今日盈亏</h2>
+            <span className="card-note">
+              {todayPnl
+                ? `${todayPnl.instruments.length} 个品种 · 数据截至 ${clock(todayPnl.ts)}`
+                : "等待数据"}
+            </span>
+          </div>
+          {todayPnl && todayPnl.instruments.length > 0 ? (
+            <>
+              <dl className="kv">
+                <div>
+                  <dt>已实现</dt>
+                  <dd className={sign(todayPnl.total_realized)}>
+                    {num(todayPnl.total_realized, 2)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>未实现</dt>
+                  <dd className={sign(todayPnl.total_unrealized)}>
+                    {num(todayPnl.total_unrealized, 2)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>手续费</dt>
+                  <dd>{num(todayPnl.total_fee, 2)}</dd>
+                </div>
+                <div>
+                  <dt>总盈亏</dt>
+                  <dd className={sign(todayPnl.total_pnl)}>
+                    {num(todayPnl.total_pnl, 2)}
+                  </dd>
+                </div>
+              </dl>
+              <Table
+                empty={false}
+                emptyHint=""
+                head={["品种", "已实现", "未实现", "手续费", "总盈亏"]}
+                rows={todayPnl.instruments.map((inst) => [
+                  inst.inst_id,
+                  <span key="r" className={sign(inst.realized)}>{num(inst.realized, 2)}</span>,
+                  <span key="u" className={sign(inst.unrealized)}>{num(inst.unrealized, 2)}</span>,
+                  num(inst.fee, 2),
+                  <span key="p" className={sign(inst.pnl)}>{num(inst.pnl, 2)}</span>,
+                ])}
+              />
+            </>
+          ) : (
+            <div className="empty">今日暂无交易</div>
+          )}
+        </section>
+
         <section className="card pos-summary reveal" style={{ animationDelay: "105ms" }}>
           <div className="card-head">
             <h2>持仓摘要</h2>
+            <span className="card-note">
+              {overview?.snapshot_ts
+                ? `数据截至 ${clock(overview.snapshot_ts)}`
+                : positions.length > 0
+                  ? "快照时间未知"
+                  : "等待数据"}
+            </span>
             <button
               type="button"
               className="link-btn"
@@ -802,7 +905,7 @@ export default function App() {
         <section className="card alert-summary reveal" style={{ animationDelay: "115ms" }}>
           <div className="card-head">
             <h2>告警摘要</h2>
-            <span className="card-note">最近 {alerts.length} 条 · 已读/静音在日志告警页</span>
+            <span className="card-note">未读 {alertStats.total} 条 · 共 {alerts.length} 条</span>
             <button
               type="button"
               className="link-btn"
