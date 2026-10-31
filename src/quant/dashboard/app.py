@@ -44,9 +44,12 @@
 - POST /api/risk/circuits/{inst_id}/resume 人工确认恢复熔断中的品种（写操作）
 - POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
 - POST /api/positions/flatten 一键全平（写操作，直连 OKX）
+- POST /api/manual/orders 手工下单：市价/限价开仓，走风控与审计（写操作）
+- POST /api/manual/orders/{order_id}/cancel 撤单（写操作）
+- POST /api/manual/orders/{order_id}/amend 改价/改量，仅限限价单（写操作）
 
 若前端构建产物存在（默认 web/dist），同一进程在 / 下托管静态页面。
-手动减仓/全平以外全部只读；写操作都要求本机 Host、自定义头与
+手动交易类接口以外全部只读；写操作都要求本机 Host、自定义头与
 （配置了 token 时的）token。
 """
 from __future__ import annotations
@@ -108,6 +111,29 @@ class FlattenRequest(BaseModel):
 
     reason: str
     confirm: str
+
+
+class ManualOrderRequest(BaseModel):
+    """手工下单：限价单必填 price，市价单忽略该字段。"""
+
+    inst_id: str
+    side: Literal["buy", "sell"]
+    order_type: Literal["market", "limit"]
+    qty: str
+    price: str | None = None
+    reason: str
+
+
+class AmendOrderRequest(BaseModel):
+    """改单：qty 与 price 至少提供一个。"""
+
+    qty: str | None = None
+    price: str | None = None
+    reason: str
+
+
+class CancelOrderRequest(BaseModel):
+    reason: str
 
 
 class AckRequest(BaseModel):
@@ -199,7 +225,7 @@ def create_app(
 
     app = FastAPI(
         title="quant-trading dashboard",
-        description="只读运维看板（含紧急停止与手动减仓）",
+        description="只读运维看板（含紧急停止与手动交易）",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -719,6 +745,81 @@ def create_app(
         except QuantError as e:
             raise HTTPException(
                 status_code=502, detail=f"交易所下单失败：{e}"
+            ) from e
+        return JSONResponse(result)
+
+    @app.post("/api/manual/orders")
+    async def manual_place_order(
+        request: Request, req: ManualOrderRequest
+    ) -> JSONResponse:
+        """手工下单：与自动单共用风控、审计与状态机（M8-17）。"""
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            qty = Decimal(req.qty)
+            price = Decimal(req.price) if req.price not in (None, "") else None
+        except (InvalidOperation, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail="qty/price 必须是数字字符串"
+            ) from e
+        try:
+            result = await _trader().place_order(
+                req.inst_id.strip().upper(),
+                side=req.side,
+                order_type=req.order_type,
+                qty=qty,
+                price=price,
+                reason=req.reason,
+            )
+        except ManualTradeError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+        except QuantError as e:
+            raise HTTPException(
+                status_code=502, detail=f"交易所下单失败：{e}"
+            ) from e
+        return JSONResponse(result)
+
+    @app.post("/api/manual/orders/{order_id}/cancel")
+    async def manual_cancel_order(
+        request: Request, order_id: str, req: CancelOrderRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            result = await _trader().cancel_order(
+                order_id, reason=req.reason
+            )
+        except ManualTradeError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+        except QuantError as e:
+            raise HTTPException(
+                status_code=502, detail=f"交易所撤单失败：{e}"
+            ) from e
+        return JSONResponse(result)
+
+    @app.post("/api/manual/orders/{order_id}/amend")
+    async def manual_amend_order(
+        request: Request, order_id: str, req: AmendOrderRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            qty = (
+                Decimal(req.qty) if req.qty not in (None, "") else None
+            )
+            price = (
+                Decimal(req.price) if req.price not in (None, "") else None
+            )
+        except (InvalidOperation, TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail="qty/price 必须是数字字符串"
+            ) from e
+        try:
+            result = await _trader().amend_order(
+                order_id, qty=qty, price=price, reason=req.reason
+            )
+        except ManualTradeError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+        except QuantError as e:
+            raise HTTPException(
+                status_code=502, detail=f"交易所改单失败：{e}"
             ) from e
         return JSONResponse(result)
 

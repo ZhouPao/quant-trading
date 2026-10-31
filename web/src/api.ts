@@ -166,6 +166,99 @@ export async function flattenPositions(
   );
 }
 
+export type ManualOrderResult = {
+  inst_id: string;
+  inst_type: "SPOT" | "SWAP" | "FUTURES";
+  side: "buy" | "sell";
+  order_type: "market" | "limit";
+  ok: boolean;
+  ts: number;
+  /** 用户请求的数量（基础币） */
+  requested_qty: string;
+  /** 实际下发数量；被风控减量时会小于 requested_qty */
+  submitted_qty: string;
+  contracts: string | null;
+  price: string | null;
+  adjusted: boolean;
+  order_id: string;
+  status: string;
+  fill: ManualFill | null;
+  error: string | null;
+};
+
+export type CancelOrderResult = {
+  ok: boolean;
+  order_id: string;
+  status: string;
+  /** true 表示订单早已终结，本次未再打交易所 */
+  already: boolean;
+  ts: number;
+};
+
+export type AmendOrderResult = {
+  ok: boolean;
+  order_id: string;
+  inst_id: string;
+  status: string;
+  submitted_qty: string;
+  contracts: string | null;
+  price: string;
+  adjusted: boolean;
+  ts: number;
+};
+
+/** 手工下单（市价/限价）：限价单必须带 price。 */
+export async function placeManualOrder(
+  input: {
+    instId: string;
+    side: "buy" | "sell";
+    orderType: "market" | "limit";
+    qty: string;
+    price?: string;
+    reason: string;
+  },
+  token = ""
+): Promise<ManualOrderResult> {
+  return postWrite<ManualOrderResult>(
+    "/api/manual/orders",
+    {
+      inst_id: input.instId,
+      side: input.side,
+      order_type: input.orderType,
+      qty: input.qty,
+      price: input.price,
+      reason: input.reason,
+    },
+    token
+  );
+}
+
+/** 撤单：订单已终结时返回 already=true。 */
+export async function cancelManualOrder(
+  orderId: string,
+  reason: string,
+  token = ""
+): Promise<CancelOrderResult> {
+  return postWrite<CancelOrderResult>(
+    `/api/manual/orders/${encodeURIComponent(orderId)}/cancel`,
+    { reason },
+    token
+  );
+}
+
+/** 改价/改量：qty 与 price 至少一个，仅限限价单。 */
+export async function amendManualOrder(
+  orderId: string,
+  input: { qty?: string; price?: string; reason: string },
+  token = ""
+): Promise<AmendOrderResult> {
+  return postWrite<AmendOrderResult>(
+    `/api/manual/orders/${encodeURIComponent(orderId)}/amend`,
+    input,
+    token
+  );
+}
+
 export type OrderRow = {
   order_id: string;
   status: string;

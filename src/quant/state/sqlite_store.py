@@ -552,6 +552,36 @@ class SQLiteStore:
         )
         return [dict(r) for r in rows]
 
+    def get_order(self, order_id: str) -> dict | None:
+        """单笔订单（含信号上下文）；手动撤单/改单与幂等判断用。"""
+        row = self._query_one(
+            """
+            SELECT o.order_id, o.status, o.created_ts, o.filled_ts,
+                   o.filled_price, o.filled_qty, o.fee,
+                   s.signal_id, s.strategy_id, s.inst_id, s.side,
+                   s.order_type, s.qty, s.price
+            FROM orders o
+            LEFT JOIN signals s ON o.signal_id = s.signal_id
+            WHERE o.order_id = ?
+            """,
+            (order_id,),
+        )
+        return dict(row) if row else None
+
+    def update_signal_order(
+        self, signal_id: str, qty: Decimal, price: Decimal | None
+    ) -> bool:
+        """改单后回写信号的量与价（M8-17）。
+
+        `orders` 只存成交信息，看板的品种/方向/数量/价格全部来自 JOIN
+        `signals`；不更新这里，改单成功后页面仍显示旧值。
+        """
+        changed = self._execute(
+            "UPDATE signals SET qty = ?, price = ? WHERE signal_id = ?",
+            (str(qty), str(price) if price is not None else None, signal_id),
+        )
+        return changed > 0
+
     def save_fill(self, fill: Fill) -> None:
         self._execute(
             """

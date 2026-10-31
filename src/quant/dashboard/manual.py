@@ -1,11 +1,16 @@
-"""看板手动减仓/平仓（只减仓，不开仓）。
+"""看板手动交易：减仓/平仓，以及市价/限价开仓、撤单、改单。
 
 与 `service.py` 的只读职责分开：本模块会真实下单并写 SQLite。
 
 执行路径是直连 OKX（不经信号队列），因此这里自己兜住三件事：
 1. 下单前向交易所查可用量，实际下单量 = min(请求量, 可用量)；
-2. 合约单必须带 `reduceOnly`，避免方向算错时开出反向新仓；
+2. 合约减仓单必须带 `reduceOnly`，避免方向算错时开出反向新仓；
 3. 同品种用 Redis 短锁串行化，防止连点重复下单。
+
+开仓单（M8-17）与自动单共用同一套约束：kill switch、品种熔断、
+`RiskChecker` 五条规则、`risk_events` 审计、`orders` 状态机。
+风控参数取 `[risk]` 全局层（手动单没有策略归属），权益必须来自
+monitor 快照且未过期——打不开新敞口时宁可拒单，不做兜底。
 
 数量口径：对外一律用「基础币数量」；合约在内部按 `ctVal` 换算成张数，
 回执里同时给出 `contracts`，便于对照交易所界面。
@@ -22,17 +27,27 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from redis.asyncio import Redis
 
 from quant.backtest.order import Fill
-from quant.backtest.signal import Signal
+from quant.backtest.signal import OrderType, Side, Signal
+from quant.execution.account import read_account_field
+from quant.execution.kill_switch import KillSwitch
 from quant.execution.okx_broker import OkxBroker
+from quant.execution.price import RestPriceProvider
 from quant.foundation.config import Settings
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
+from quant.foundation.schedule import day_start_ms_utc8
 from quant.models.instrument import Instrument
 from quant.okx.client import OKXClient
+from quant.risk.checker import RiskChecker
+from quant.risk.circuit_breaker import CircuitBreaker
+from quant.risk.config import RiskConfig
+from quant.risk.limits import LIMIT_FIELDS, resolve_limits
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("dashboard.manual")
 
+#: 手动单的策略标识：看板据此区分来源（执行页筛选与审计）
+MANUAL_STRATEGY_ID = "manual"
 # 秒级互斥，够覆盖一次市价单的往返
 LOCK_TTL_SECONDS = 5
 # 单次平仓最多处理的品种数，防御异常数据导致的超长循环
@@ -85,6 +100,7 @@ class ManualTrader:
         self._td_mode = settings.execution.td_mode
         self._client: OKXClient | None = None
         self._broker: OkxBroker | None = None
+        self._rest_price: RestPriceProvider | None = None
 
     # ------------------------------------------------------------------
     # 基础设施
@@ -102,6 +118,8 @@ class ManualTrader:
         if self._client is None:
             self._client = OKXClient(okx)
             self._broker = OkxBroker(self._client, td_mode=self._td_mode)
+            # 公开行情无需鉴权；市价开仓的风控名义价取这里
+            self._rest_price = RestPriceProvider(self._client)
         assert self._broker is not None
         return self._client, self._broker
 
@@ -301,6 +319,213 @@ class ManualTrader:
             "local_marked": local_marked,
         }
 
+    async def place_order(
+        self,
+        inst_id: str,
+        *,
+        side: Side,
+        order_type: OrderType,
+        qty: Decimal,
+        price: Decimal | None,
+        reason: str,
+    ) -> dict[str, object]:
+        """手工开仓（市价/限价），M8-17。
+
+        与自动单共用同一套风控：kill switch、品种熔断、`RiskChecker`
+        五条规则；审计写 `risk_events` 与 signals/orders；状态推进走
+        `save_order` / `update_order_fill` 的单向状态机。
+
+        Args:
+            qty: 基础币数量。合约在内部按 `ctVal` 折张并向下取整
+            price: 限价单必填；市价单忽略
+        """
+        if not inst_id:
+            raise ManualTradeError("inst_id 不能为空")
+        if side not in ("buy", "sell"):
+            raise ManualTradeError("side 必须是 buy 或 sell")
+        if order_type not in ("market", "limit"):
+            raise ManualTradeError("order_type 必须是 market 或 limit")
+        if qty <= 0:
+            raise ManualTradeError("qty 必须为正数")
+        if not reason.strip():
+            raise ManualTradeError("必须填写操作原因")
+        limit_price: Decimal | None = None
+        if order_type == "limit":
+            if price is None or price <= 0:
+                raise ManualTradeError("限价单必须提供正数价格")
+            limit_price = price
+
+        if not await self._lock(inst_id):
+            raise ManualTradeError(f"{inst_id} 有正在处理的手动操作，请稍后重试", 409)
+        try:
+            return await self._place_locked(
+                inst_id,
+                side=side,
+                order_type=order_type,
+                qty=qty,
+                price=limit_price,
+                reason=reason,
+            )
+        finally:
+            await self._unlock(inst_id)
+
+    async def cancel_order(self, order_id: str, *, reason: str) -> dict[str, object]:
+        """撤单（M8-17）。
+
+        已终结的订单直接返回、不再打交易所：连点与重复提交天然幂等。
+        撤单失败时先查一次远端状态——若已被别人撤掉/成交，按实际状态回报，
+        不把「本来就已经撤了」当成失败。
+        """
+        if not order_id:
+            raise ManualTradeError("order_id 不能为空")
+        if not reason.strip():
+            raise ManualTradeError("必须填写操作原因")
+
+        order = await asyncio.to_thread(self._store.get_order, order_id)
+        if order is None:
+            raise ManualTradeError(f"订单不存在：{order_id}", 404)
+        status = str(order.get("status") or "")
+        if status not in self._store.OPEN_ORDER_STATUSES:
+            return {
+                "ok": True,
+                "order_id": order_id,
+                "status": status,
+                "already": True,
+                "ts": int(time.time() * 1000),
+            }
+
+        inst_id = str(order.get("inst_id") or "")
+        if not inst_id:
+            raise ManualTradeError(f"订单缺少品种信息：{order_id}", 409)
+        if not await self._lock(inst_id):
+            raise ManualTradeError(f"{inst_id} 有正在处理的手动操作，请稍后重试", 409)
+        try:
+            _, broker = self._ensure_client()
+            try:
+                await broker.cancel_order(inst_id, order_id)
+            except Exception as e:  # noqa: BLE001
+                remote = await self._remote_state(broker, inst_id, order_id)
+                if remote != "canceled":
+                    raise ManualTradeError(f"撤单失败：{e}", 502) from e
+            await asyncio.to_thread(
+                self._store.update_order_status, order_id, "canceled"
+            )
+            log.warning(
+                f"manual cancel inst={inst_id} order={order_id} reason={reason!r}"
+            )
+            return {
+                "ok": True,
+                "order_id": order_id,
+                "status": "canceled",
+                "already": False,
+                "ts": int(time.time() * 1000),
+            }
+        finally:
+            await self._unlock(inst_id)
+
+    async def amend_order(
+        self,
+        order_id: str,
+        *,
+        qty: Decimal | None,
+        price: Decimal | None,
+        reason: str,
+    ) -> dict[str, object]:
+        """改价/改量（M8-17，仅限未终结的限价单）。
+
+        改单会改变敞口，因此与下单走同一道风控闸门；`qty` 缺省表示只改价。
+        成功后回写 signals 的 qty/price——orders 表不存这两列，看板靠 JOIN。
+        """
+        if not order_id:
+            raise ManualTradeError("order_id 不能为空")
+        if not reason.strip():
+            raise ManualTradeError("必须填写操作原因")
+        if qty is None and price is None:
+            raise ManualTradeError("qty 与 price 至少提供一个")
+        if qty is not None and qty <= 0:
+            raise ManualTradeError("qty 必须为正数")
+        if price is not None and price <= 0:
+            raise ManualTradeError("price 必须为正数")
+
+        order = await asyncio.to_thread(self._store.get_order, order_id)
+        if order is None:
+            raise ManualTradeError(f"订单不存在：{order_id}", 404)
+        status = str(order.get("status") or "")
+        if status not in self._store.OPEN_ORDER_STATUSES:
+            raise ManualTradeError(f"订单已终结（{status}），不能改单", 409)
+        if str(order.get("order_type") or "") != "limit":
+            raise ManualTradeError("只有限价单可以改价改量", 409)
+
+        inst_id = str(order.get("inst_id") or "")
+        if not inst_id:
+            raise ManualTradeError(f"订单缺少品种信息：{order_id}", 409)
+        current_qty = _dec(order.get("qty"))
+        current_price = _dec(order.get("price"))
+        new_qty = qty if qty is not None else current_qty
+        new_price = price if price is not None else current_price
+        if new_qty is None or new_qty <= 0 or new_price is None or new_price <= 0:
+            raise ManualTradeError("订单缺少数量或价格，无法改单", 409)
+
+        if not await self._lock(inst_id):
+            raise ManualTradeError(f"{inst_id} 有正在处理的手动操作，请稍后重试", 409)
+        try:
+            instrument = await self._instrument(inst_id)
+            await self._guard_new_exposure(inst_id)
+
+            signal = Signal(
+                strategy_id=str(
+                    order.get("strategy_id") or MANUAL_STRATEGY_ID
+                ),
+                side="buy" if str(order.get("side")) == "buy" else "sell",
+                order_type="limit",
+                inst_id=inst_id,
+                qty=new_qty,
+                price=new_price,
+                ts=int(order.get("created_ts") or time.time() * 1000),
+                signal_id=str(order.get("signal_id") or ""),
+            )
+            allowed = await self._risk_gate(signal, new_price)
+            if allowed < new_qty:
+                new_qty = allowed
+                signal = replace(signal, qty=allowed)
+
+            submitted, contracts = await self._normalize_qty(
+                inst_id, instrument, new_qty
+            )
+            _, broker = self._ensure_client()
+            await broker.amend_order(
+                inst_id,
+                order_id,
+                # qty 缺省时只改价，不能顺手把 size 也发过去
+                new_size=submitted if qty is not None else None,
+                new_price=price,
+            )
+            signal_id = str(order.get("signal_id") or "")
+            if signal_id:
+                await asyncio.to_thread(
+                    self._store.update_signal_order,
+                    signal_id,
+                    submitted,
+                    new_price,
+                )
+            log.warning(
+                f"manual amend inst={inst_id} order={order_id} "
+                f"qty={submitted} price={new_price} reason={reason!r}"
+            )
+            return {
+                "ok": True,
+                "order_id": order_id,
+                "inst_id": inst_id,
+                "status": status,
+                "submitted_qty": str(submitted),
+                "contracts": str(contracts) if contracts is not None else None,
+                "price": str(new_price),
+                "adjusted": new_qty != (qty if qty is not None else new_qty),
+                "ts": int(time.time() * 1000),
+            }
+        finally:
+            await self._unlock(inst_id)
+
     async def _flatten_targets(self) -> list[str]:
         """待平品种：本地持仓 ∪ 快照合约多头。
 
@@ -354,6 +579,244 @@ class ManualTrader:
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------
+
+    async def _place_locked(
+        self,
+        inst_id: str,
+        *,
+        side: Side,
+        order_type: OrderType,
+        qty: Decimal,
+        price: Decimal | None,
+        reason: str,
+    ) -> dict[str, object]:
+        instrument = await self._instrument(inst_id)
+        await self._guard_new_exposure(inst_id)
+
+        signal = Signal(
+            strategy_id=MANUAL_STRATEGY_ID,
+            side=side,
+            order_type=order_type,
+            inst_id=inst_id,
+            qty=qty,
+            price=price,
+            ts=int(time.time() * 1000),
+            signal_id=f"manual-{uuid.uuid4().hex[:20]}",
+        )
+        # 名义价值按「限价单用委托价、市价单用最新成交价」计算；
+        # 取不到价就不允许开仓，否则 RiskChecker 会跳过全部名义类规则
+        risk_price = (
+            price if price is not None else await self._market_price(inst_id)
+        )
+        allowed = await self._risk_gate(signal, risk_price)
+        if allowed != qty:
+            signal = replace(signal, qty=allowed)
+
+        submitted, contracts = await self._normalize_qty(
+            inst_id, instrument, allowed
+        )
+        _, broker = self._ensure_client()
+        result = await broker.execute(signal, submitted)
+        await self._persist(signal, result)
+
+        log.warning(
+            f"manual order inst={inst_id} side={side} type={order_type} "
+            f"qty={submitted} price={price} reason={reason!r} "
+            f"status={result.order.status} order={result.order.order_id}"
+        )
+        fill = result.fill
+        return {
+            "inst_id": inst_id,
+            "inst_type": instrument.inst_type,
+            "side": side,
+            "order_type": order_type,
+            "ok": True,
+            "ts": int(time.time() * 1000),
+            "requested_qty": str(qty),
+            "submitted_qty": str(submitted),
+            "contracts": str(contracts) if contracts is not None else None,
+            "price": str(price) if price is not None else None,
+            "adjusted": allowed != qty,
+            "order_id": result.order.order_id,
+            "status": result.order.status,
+            "fill": (
+                {
+                    "qty": str(fill.qty),
+                    "price": str(fill.price),
+                    "fee": str(fill.fee),
+                    "ts": fill.ts,
+                }
+                if fill is not None
+                else None
+            ),
+            "error": None,
+        }
+
+    async def _guard_new_exposure(self, inst_id: str) -> None:
+        """开新敞口前的全局闸门：kill switch + 品种熔断。
+
+        Redis 读不出去时**拒绝**：无法确认是否已紧急停止/open，就不该
+        打开新仓位。减仓/平仓不走这道闸门（它们只会降低敞口）。
+        """
+        if self._redis is None:
+            return
+        try:
+            halted = await KillSwitch(self._redis).is_active()
+        except Exception as e:  # noqa: BLE001
+            raise ManualTradeError(
+                f"无法确认紧急停止状态：{e}", status=503
+            ) from e
+        if halted:
+            raise ManualTradeError(
+                "紧急停止（kill switch）已激活，不能手工开仓", status=409
+            )
+        try:
+            state = await CircuitBreaker(self._redis).state(inst_id)
+        except Exception as e:  # noqa: BLE001
+            raise ManualTradeError(f"无法确认熔断状态：{e}", status=503) from e
+        if state is not None:
+            raise ManualTradeError(
+                f"{inst_id} 熔断中：{state.reason}", status=409
+            )
+
+    async def _risk_gate(
+        self, signal: Signal, market_price: Decimal | None
+    ) -> Decimal:
+        """跑一遍与自动单相同的风控规则，返回允许的下单量。
+
+        Raises:
+            ManualTradeError: 拒单（409）或取不到风控基数（503）。
+        """
+        if market_price is None or market_price <= 0:
+            raise ManualTradeError(
+                f"{signal.inst_id} 取不到行情价，无法做名义价值风控，已拒绝",
+                status=503,
+            )
+        equity = await self._equity()
+
+        # 手动单没有策略归属，只取 [risk] 全局层；策略级覆盖不参与
+        limits = resolve_limits(MANUAL_STRATEGY_ID, self._settings.risk)
+        checker = RiskChecker(
+            RiskConfig(
+                strategy_id=MANUAL_STRATEGY_ID,
+                **{name: limits.value(name) for name in LIMIT_FIELDS},
+            ),
+            self._store,
+            allow_initial_equity_fallback=False,
+            event_log=self._settings.risk.event_log,
+        )
+        now = int(time.time() * 1000)
+        decision = await asyncio.to_thread(
+            checker.check,
+            signal,
+            market_price,
+            day_start_ms_utc8(now),
+            equity=equity,
+        )
+        await asyncio.to_thread(
+            checker.record_event, decision, signal, now_ms=now, equity=equity
+        )
+        if not decision.approved:
+            log.warning(
+                f"manual order rejected inst={signal.inst_id} "
+                f"rule={decision.rule} reason={decision.reason}"
+            )
+            raise ManualTradeError(f"风控拒单：{decision.reason}", status=409)
+        if decision.halt:
+            # 硬性上限只拒这一笔；停自动交易是 worker 的职责，
+            # 手动操作不应顺带把全局开关打开
+            log.error(
+                f"manual order hit hard risk limit: {decision.reason}"
+            )
+        return decision.adjusted_qty
+
+    async def _equity(self) -> Decimal:
+        """风控基数：monitor 快照的总权益，缺失或超龄直接拒单。"""
+        if self._redis is None:
+            raise ManualTradeError(
+                "Redis 不可用，读不到账户快照，拒绝手工开仓", status=503
+            )
+        value = await read_account_field(
+            self._redis,
+            self._settings.monitor.dashboard_snapshot_key,
+            "total_equity",
+            now_ms=int(time.time() * 1000),
+            max_age_ms=self._settings.risk.snapshot_max_age_ms,
+        )
+        if value is None:
+            raise ManualTradeError(
+                "账户快照不可用或已过期，无法校验风控；请确认 monitor 在线",
+                status=503,
+            )
+        return value
+
+    async def _market_price(self, inst_id: str) -> Decimal | None:
+        client, _ = self._ensure_client()
+        provider = self._rest_price or RestPriceProvider(client)
+        return await asyncio.to_thread(provider, inst_id)
+
+    async def _normalize_qty(
+        self, inst_id: str, instrument: Instrument, qty: Decimal
+    ) -> tuple[Decimal, Decimal | None]:
+        """按 `lotSz` 向下取整并校验 `minSz`，返回 (基础币量, 张数)。"""
+        if instrument.inst_type == "SPOT":
+            submitted = floor_to(qty, instrument.lot_sz)
+            ok_size = submitted > 0 and submitted >= instrument.min_sz
+            return_contracts: Decimal | None = None
+        else:
+            raw_contracts = (
+                qty / instrument.ct_val if instrument.ct_val > 0 else qty
+            )
+            return_contracts = floor_to(raw_contracts, instrument.lot_sz)
+            submitted = return_contracts * instrument.ct_val
+            # minSz 的单位是张，不是基础币
+            ok_size = (
+                return_contracts > 0
+                and return_contracts >= instrument.min_sz
+            )
+        if not ok_size:
+            raise ManualTradeError(
+                f"{inst_id} 可下单量 "
+                f"{return_contracts if return_contracts is not None else submitted} "
+                f"低于最小下单量 {instrument.min_sz}（lotSz={instrument.lot_sz}）"
+            )
+        return submitted, return_contracts
+
+    async def _persist(self, signal: Signal, result) -> None:
+        """落库：signal → order → 成交累加 → 持仓。
+
+        顺序与 worker 一致（先 signal 再 order，orders 靠 JOIN 取上下文）；
+        成交量按增量累加、状态走单向状态机，重复落库不会把已成交打回 pending。
+        """
+        await asyncio.to_thread(self._store.save_signal, signal, "executed")
+        await asyncio.to_thread(self._store.save_order, result.order)
+        fill = result.fill
+        if fill is None:
+            return
+        await asyncio.to_thread(
+            self._store.update_order_fill,
+            result.order.order_id,
+            fill,
+            result.order.status,
+        )
+        await asyncio.to_thread(self._store.save_fill, fill)
+        position = await asyncio.to_thread(
+            self._store.get_position, fill.inst_id
+        )
+        position.apply_fill(fill)
+        await asyncio.to_thread(self._store.update_position, position)
+
+    async def _remote_state(
+        self, broker: OkxBroker, inst_id: str, order_id: str
+    ) -> str:
+        try:
+            detail = await broker.get_order(inst_id, order_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                f"query order state failed inst={inst_id} order={order_id}: {e}"
+            )
+            return ""
+        return str((detail or {}).get("state") or "")
 
     async def _reduce_locked(
         self,

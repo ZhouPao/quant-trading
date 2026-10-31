@@ -1577,6 +1577,18 @@ code {
   line-height: 1.7;
 }
 
+/* 手工下单的下拉与订单操作列（M8-17） */
+select.pos-input {
+  width: auto;
+  min-width: 84px;
+}
+
+.order-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
 tbody tr.row-clickable {
   cursor: pointer;
 }

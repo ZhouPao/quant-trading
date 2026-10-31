@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import {
   ackAlert,
   age,
+  amendManualOrder,
+  cancelManualOrder,
   clock,
   compactQty,
   fetchAll,
@@ -32,6 +34,7 @@ import {
   metricText,
   num,
   pct,
+  placeManualOrder,
   reducePosition,
   replayDeadLetter,
   replayDeadLetters,
@@ -946,9 +949,21 @@ export default function App() {
         {tab === "backtest" && <BacktestPanel />}
 
         {tab === "execution" && (
+          <>
+        <section className="card positions reveal" style={{ animationDelay: "130ms" }}>
+          <div className="card-head">
+            <h2>手工下单</h2>
+            <span className="card-note">
+              市价/限价 · 走风控与审计 · 需 monitor 在线
+            </span>
+          </div>
+          <ManualOrderPanel positions={positions} onChanged={refresh} />
+        </section>
+
         <section className="card positions reveal" style={{ animationDelay: "140ms" }}>
           <PositionsPanel rows={positions} />
         </section>
+          </>
         )}
 
         {tab === "logs" && (
@@ -1026,14 +1041,9 @@ export default function App() {
         <section className="card orders reveal" style={{ animationDelay: "280ms" }}>
           <div className="card-head">
             <h2>最近订单</h2>
-            <span className="card-note">SQLite · 倒序</span>
+            <span className="card-note">SQLite · 倒序 · 挂单可撤 · 限价可改</span>
           </div>
-          <Table
-            empty={orders.length === 0}
-            emptyHint="暂无订单记录"
-            head={["时间", "品种", "方向", "类型", "数量", "价格", "状态"]}
-            rows={orders.map((row) => orderCells(row))}
-          />
+          <OrdersPanel rows={orders} onChanged={refresh} />
         </section>
 
         <section className="card fills reveal" style={{ animationDelay: "290ms" }}>
@@ -1471,6 +1481,339 @@ const KILL_TOKEN_KEY = "quant.dashboard.token";
 
 // 手续费率按回测默认 0.1% 估算，仅用于下单前预览
 const FEE_RATE = 0.001;
+
+// 未终结订单：只有这些状态允许撤单/改单（后端会再校验一次）
+const OPEN_ORDER_STATUSES = ["pending", "live", "partially_filled"];
+
+function writeToken(): string {
+  return window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "";
+}
+
+/** 手工下单：市价/限价开仓，风控减量会在结果里明确提示。 */
+function ManualOrderPanel({
+  positions,
+  onChanged,
+}: {
+  positions: PositionRow[];
+  onChanged: () => Promise<void>;
+}) {
+  const [instId, setInstId] = useState("");
+  const [side, setSide] = useState<"buy" | "sell">("buy");
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [qty, setQty] = useState("");
+  const [price, setPrice] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const suggestions = Array.from(new Set(positions.map((row) => row.inst_id)));
+
+  const submit = async () => {
+    if (!instId.trim()) {
+      setError("请填写品种，如 BTC-USDT");
+      return;
+    }
+    if (!(Number(qty) > 0)) {
+      setError("数量必须为正数（基础币口径）");
+      return;
+    }
+    if (orderType === "limit" && !(Number(price) > 0)) {
+      setError("限价单必须填写价格");
+      return;
+    }
+    if (!reason.trim()) {
+      setError("请填写操作原因");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await placeManualOrder(
+        {
+          instId: instId.trim().toUpperCase(),
+          side,
+          orderType,
+          qty: qty.trim(),
+          price: orderType === "limit" ? price.trim() : undefined,
+          reason: reason.trim(),
+        },
+        writeToken()
+      );
+      const parts: string[] = [];
+      if (result.adjusted) {
+        parts.push(
+          `风控减量 ${compactQty(result.requested_qty)} → ${compactQty(result.submitted_qty)}`
+        );
+      }
+      parts.push(
+        `已下单 ${compactQty(result.submitted_qty)}${
+          result.contracts ? `（${result.contracts} 张）` : ""
+        }`
+      );
+      parts.push(
+        result.fill
+          ? `成交 @ ${num(result.fill.price, 2)}，手续费 ${num(result.fill.fee, 4)}`
+          : `状态 ${result.status}`
+      );
+      setNotice(parts.join(" · "));
+      setQty("");
+      setPrice("");
+      setReason("");
+      await onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="pos-bar">
+        <input
+          className="pos-input pos-input-qty"
+          value={instId}
+          list="manual-inst-options"
+          placeholder="品种（如 BTC-USDT）"
+          onChange={(e) => setInstId(e.target.value)}
+        />
+        <datalist id="manual-inst-options">
+          {suggestions.map((item) => (
+            <option key={item} value={item} />
+          ))}
+        </datalist>
+        <select
+          className="pos-input"
+          value={side}
+          onChange={(e) => setSide(e.target.value === "sell" ? "sell" : "buy")}
+        >
+          <option value="buy">买入</option>
+          <option value="sell">卖出</option>
+        </select>
+        <select
+          className="pos-input"
+          value={orderType}
+          onChange={(e) =>
+            setOrderType(e.target.value === "limit" ? "limit" : "market")
+          }
+        >
+          <option value="market">市价</option>
+          <option value="limit">限价</option>
+        </select>
+        <input
+          className="pos-input pos-input-qty"
+          value={qty}
+          placeholder="数量（基础币）"
+          onChange={(e) => setQty(e.target.value)}
+        />
+        {orderType === "limit" && (
+          <input
+            className="pos-input"
+            value={price}
+            placeholder="价格"
+            onChange={(e) => setPrice(e.target.value)}
+          />
+        )}
+        <input
+          className="pos-input pos-input-reason"
+          value={reason}
+          placeholder="原因（必填）"
+          onChange={(e) => setReason(e.target.value)}
+        />
+        <button className="pos-danger" onClick={submit} disabled={busy}>
+          {busy ? "提交中…" : side === "buy" ? "买入开仓" : "卖出开仓"}
+        </button>
+      </div>
+      {(error || notice) && (
+        <div className={error ? "pos-msg pos-msg-bad" : "pos-msg"}>
+          {error || notice}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 最近订单：挂单可撤，限价单可改价/改量；撤单需二次确认 + 原因。 */
+function OrdersPanel({
+  rows,
+  onChanged,
+}: {
+  rows: OrderRow[];
+  onChanged: () => Promise<void>;
+}) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [mode, setMode] = useState<"cancel" | "amend" | null>(null);
+  const [qty, setQty] = useState("");
+  const [price, setPrice] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const row = rows.find((item) => item.order_id === selected) ?? null;
+
+  const pick = (target: OrderRow, next: "cancel" | "amend") => {
+    if (selected === target.order_id && mode === next) {
+      setSelected(null);
+      setMode(null);
+    } else {
+      setSelected(target.order_id);
+      setMode(next);
+      setQty(target.qty ?? "");
+      setPrice(target.price ?? "");
+    }
+    setReason("");
+    setError("");
+    setNotice("");
+  };
+
+  const submit = async () => {
+    if (!row || !mode) return;
+    if (!reason.trim()) {
+      setError("请填写操作原因");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      if (mode === "cancel") {
+        const result = await cancelManualOrder(
+          row.order_id,
+          reason.trim(),
+          writeToken()
+        );
+        setNotice(
+          result.already
+            ? `订单已是 ${result.status}，无需再撤`
+            : `已撤单 ${row.order_id}`
+        );
+        setSelected(null);
+        setMode(null);
+      } else {
+        const result = await amendManualOrder(
+          row.order_id,
+          {
+            qty: qty.trim() || undefined,
+            price: price.trim() || undefined,
+            reason: reason.trim(),
+          },
+          writeToken()
+        );
+        setNotice(
+          `已改单：${compactQty(result.submitted_qty)} @ ${num(result.price, 2)}`
+        );
+      }
+      setReason("");
+      await onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Table
+        empty={rows.length === 0}
+        emptyHint="暂无订单记录"
+        head={["时间", "品种", "方向", "类型", "数量", "价格", "状态", "操作"]}
+        rows={rows.map((item) => {
+          const open = OPEN_ORDER_STATUSES.includes(item.status);
+          return [
+            ...orderCells(item),
+            <div key="act" className="order-actions">
+              {open ? (
+                <>
+                  <button
+                    className={
+                      selected === item.order_id && mode === "cancel"
+                        ? "pos-chip pos-chip-on"
+                        : "pos-chip"
+                    }
+                    onClick={() => pick(item, "cancel")}
+                    disabled={busy}
+                  >
+                    撤单
+                  </button>
+                  {item.order_type === "limit" && (
+                    <button
+                      className={
+                        selected === item.order_id && mode === "amend"
+                          ? "pos-chip pos-chip-on"
+                          : "pos-chip"
+                      }
+                      onClick={() => pick(item, "amend")}
+                      disabled={busy}
+                    >
+                      改单
+                    </button>
+                  )}
+                </>
+              ) : (
+                <span className="dim">—</span>
+              )}
+            </div>,
+          ];
+        })}
+      />
+
+      {row && mode && (
+        <div className={mode === "cancel" ? "pos-bar pos-flat-bar" : "pos-bar"}>
+          <span className="pos-who">
+            {row.inst_id ?? "—"} · {row.order_id} ·{" "}
+            {mode === "cancel" ? "撤单后不可恢复" : "仅限价单可改"}
+          </span>
+          {mode === "amend" && (
+            <>
+              <input
+                className="pos-input pos-input-qty"
+                value={qty}
+                placeholder="数量（基础币）"
+                onChange={(e) => setQty(e.target.value)}
+              />
+              <input
+                className="pos-input"
+                value={price}
+                placeholder="价格"
+                onChange={(e) => setPrice(e.target.value)}
+              />
+            </>
+          )}
+          <input
+            className="pos-input pos-input-reason"
+            value={reason}
+            placeholder="原因（必填）"
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <button className="pos-danger" onClick={submit} disabled={busy}>
+            {busy ? "提交中…" : mode === "cancel" ? "确认撤单" : "确认改单"}
+          </button>
+          <button
+            className="pos-chip"
+            onClick={() => {
+              setSelected(null);
+              setMode(null);
+              setError("");
+            }}
+            disabled={busy}
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {(error || notice) && (
+        <div className={error ? "pos-msg pos-msg-bad" : "pos-msg"}>
+          {error || notice}
+        </div>
+      )}
+    </>
+  );
+}
 
 function holdingOf(row: PositionRow): number {
   return Number(row.local_qty ?? row.qty ?? 0);
