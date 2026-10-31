@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import subprocess
 import time
@@ -32,6 +33,7 @@ from quant.backtest.runner import (
     parse_params,
     parse_range,
 )
+from quant.backtest.walkforward import SegmentResult, WalkForward, WalkForwardResult
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
 from quant.models.bar import Bar
@@ -53,7 +55,14 @@ MAX_TRADES = 300          # 单次回测返回的成交明细上限
 MAX_N_JOBS = 8            # 寻优并行度上限，避免小机器被进程池拖死
 
 # 越小越好的指标，排序时反向
-ASCENDING_METRICS = frozenset({"max_drawdown", "avg_holding_bars"})
+ASCENDING_METRICS = frozenset(
+    {
+        "max_drawdown",
+        "avg_holding_bars",
+        "max_consecutive_losses",
+        "max_consecutive_loss_amount",
+    }
+)
 
 METRIC_KEYS = (
     "total_return",
@@ -64,6 +73,13 @@ METRIC_KEYS = (
     "profit_factor",
     "trade_count",
     "avg_holding_bars",
+    # MS4-C §7 扩展指标（monthly_returns 是序列，不能作为排序指标）
+    "calmar",
+    "sortino",
+    "max_consecutive_losses",
+    "max_consecutive_loss_amount",
+    "exposure_ratio",
+    "turnover",
 )
 
 
@@ -102,6 +118,16 @@ class OptimizeRequest(BacktestRequest):
     metric: str = "sharpe"
     top: int = Field(10, ge=1, le=50)
     n_jobs: int = Field(1, ge=1, le=MAX_N_JOBS)
+
+
+class WalkforwardRequest(BacktestRequest):
+    """滚动 IS/OOS 验证入参（MS4-C §8）。"""
+
+    grid: str
+    metric: str = "sharpe"
+    is_bars: int = Field(1500, ge=10)
+    oos_bars: int = Field(500, ge=10)
+    step_bars: int | None = Field(None, ge=1)
 
 
 class BacktestService:
@@ -164,6 +190,29 @@ class BacktestService:
             payload = await asyncio.to_thread(self._optimize_sync, req)
         payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return payload
+
+    async def walkforward(self, req: WalkforwardRequest) -> dict[str, object]:
+        async with self._lock:
+            started = time.monotonic()
+            payload, _result = await asyncio.to_thread(self._walkforward_sync, req)
+        payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return payload
+
+    def check_walkforward(self, req: WalkforwardRequest) -> dict:
+        """提交前的廉价校验（策略、日期、网格、组合上限）。"""
+        self._walkforward_inputs(req)
+        _cls, params, _start_ts, _end_ts = self._resolve(req)
+        return params
+
+    async def build_walkforward_async(
+        self,
+        req: WalkforwardRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], WalkForwardResult]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._walkforward_sync, req, should_stop
+            )
 
     # ------------------------------------------------------------------
     # 同步实现（在线程里跑）
@@ -360,7 +409,7 @@ class BacktestService:
             raise BacktestRequestError(str(e)) from e
 
         results.sort(
-            key=lambda item: item[1][req.metric],
+            key=lambda item: _sort_rank(item[1][req.metric]),
             reverse=req.metric not in ASCENDING_METRICS,
         )
         top = results[: req.top]
@@ -389,6 +438,95 @@ class BacktestService:
                 for index, (params_, metrics) in enumerate(top)
             ],
         }
+
+    def _walkforward_sync(
+        self,
+        req: WalkforwardRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], WalkForwardResult]:
+        inst, grid = self._walkforward_inputs(req)
+        warmup, bars, strategy_cls, params = self._prepare(req, inst)
+
+        walker = WalkForward(
+            lambda _params: strategy_cls(),
+            grid,
+            initial_cash=self._settings.backtest.initial_cash,
+            matcher=build_matcher(self._settings),
+            window_size=self._settings.backtest.window_size,
+            # 段内预热与回测口径一致：只用段起点之前的历史
+            warmup_bars=req.warmup_bars,
+            base_params=params,
+            metric=req.metric,
+        )
+        try:
+            result = walker.run(
+                warmup + bars,
+                is_bars=req.is_bars,
+                oos_bars=req.oos_bars,
+                step_bars=req.step_bars or req.oos_bars,
+                start_index=len(warmup),
+                should_stop=should_stop,
+            )
+        except ValueError as e:
+            raise BacktestRequestError(str(e)) from e
+
+        metrics: dict[str, object] = {
+            "compounded_return": result.compounded_return,
+            "profitable_segments": result.profitable_segments,
+            "avg_oos_sharpe": result.avg_oos_sharpe,
+            "total_oos_trades": result.total_oos_trades,
+            "modal_params": (
+                json.dumps(_jsonable_params(result.modal_params), sort_keys=True)
+                if result.segments
+                else None
+            ),
+        }
+        return (
+            {
+                "kind": "walkforward",
+                "strategy": req.strategy,
+                "inst": inst,
+                "bar": req.bar,
+                "start": req.start,
+                "end": req.end,
+                "params": _jsonable_params(params),
+                "grid": grid,
+                "metric": req.metric,
+                "is_bars": req.is_bars,
+                "oos_bars": req.oos_bars,
+                "step_bars": req.step_bars or req.oos_bars,
+                "bar_count": len(bars),
+                "warmup_count": len(warmup),
+                "segment_count": len(result.segments),
+                "metrics": _clean_metrics(metrics),
+                "segments": [_segment_payload(item) for item in result.segments],
+            },
+            result,
+        )
+
+    def _walkforward_inputs(
+        self, req: WalkforwardRequest
+    ) -> tuple[str, dict[str, list]]:
+        """校验并与寻优共用同一套指标 / 组合上限约束。"""
+        if req.metric not in METRIC_KEYS:
+            raise BacktestRequestError(
+                f"unknown metric {req.metric!r}; available: {list(METRIC_KEYS)}"
+            )
+        inst = req.inst or self._settings.engine.inst
+        try:
+            grid = parse_grid(req.grid)
+        except BacktestSetupError as e:
+            raise BacktestRequestError(str(e)) from e
+        if not grid:
+            raise BacktestRequestError("grid is empty")
+
+        combos = math.prod(len(values) for values in grid.values())
+        limit = self._settings.backtest.max_combos
+        if combos > limit:
+            raise BacktestRequestError(
+                f"参数组合过多：{combos} 组 > 上限 {limit}，请缩小网格"
+            )
+        return inst, grid
 
     def _resolve(self, req: BacktestRequest) -> tuple[type, dict, int, int]:
         """解析策略类、合并参数与回测区间；不加载 K 线。"""
@@ -433,6 +571,25 @@ def _jsonable_params(params: dict) -> dict:
     }
 
 
+def _segment_payload(item: SegmentResult) -> dict[str, object]:
+    """逐段 IS/OOS 结果，列名与 segments.parquet 保持一致。"""
+    return {
+        "index": item.segment.index,
+        "is_start": item.is_range[0],
+        "is_end": item.is_range[1],
+        "oos_start": item.oos_range[0],
+        "oos_end": item.oos_range[1],
+        "params": _jsonable_params(item.params),
+        "is_metrics": _clean_metrics(item.is_metrics),
+        "oos_metrics": _clean_metrics(item.oos_metrics),
+    }
+
+
+def _sort_rank(value: float | int | None) -> float:
+    """None 视为最差，保证排序不因 None 抛 TypeError。"""
+    return float("-inf") if value is None else float(value)
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -454,12 +611,22 @@ def _git_commit() -> str | None:
     return commit or None
 
 
-def _clean_metrics(metrics: dict[str, float]) -> dict[str, float | None]:
-    """inf/nan 不是合法 JSON，统一转 null 让页面显示为「—」。"""
-    return {
-        key: (value if math.isfinite(value) else None)
-        for key, value in metrics.items()
-    }
+def _clean_metrics(
+    metrics: dict[str, float | int | str | None],
+) -> dict[str, float | int | str | None]:
+    """inf/nan 不是合法 JSON，统一转 null 让页面显示为「—」。
+
+    非数值（如 monthly_returns 的 JSON 文本）原样保留。
+    """
+    cleaned: dict[str, float | int | str | None] = {}
+    for key, value in metrics.items():
+        if value is None or isinstance(value, (str, int)):
+            cleaned[key] = value
+        elif math.isfinite(value):
+            cleaned[key] = float(value)
+        else:
+            cleaned[key] = None
+    return cleaned
 
 
 def _equity_points(
@@ -485,4 +652,7 @@ __all__ = [
     "BacktestService",
     "METRIC_KEYS",
     "OptimizeRequest",
+    "ParamUpdateRequest",
+    "StrategyParamError",
+    "WalkforwardRequest",
 ]

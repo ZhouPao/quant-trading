@@ -184,6 +184,7 @@ class WalkForward:
         oos_bars: int,
         step_bars: int | None = None,
         start_index: int = 0,
+        should_stop: Callable[[], bool] | None = None,
     ) -> WalkForwardResult:
         """执行全部滚动段，返回逐段结果与汇总。
 
@@ -192,6 +193,7 @@ class WalkForward:
             is_bars / oos_bars: 见 build_segments
             step_bars: 默认等于 oos_bars（OOS 首尾相接、不重叠）
             start_index: 首段 IS 起点，通常为前置预热根数
+            should_stop: 取消检查，粒度是「一段」；已完成的段保留
 
         Raises:
             ValueError: 切分非法、预热不足或所有参数组合在某段均失败
@@ -208,6 +210,8 @@ class WalkForward:
 
         results: list[SegmentResult] = []
         for seg in segments:
+            if should_stop is not None and should_stop():
+                break
             is_warmup = self._warmup_before(bars, seg.is_start)
             optimizer = GridOptimizer(
                 self.strategy_factory,

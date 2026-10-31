@@ -124,8 +124,12 @@ class GridOptimizer:
             raise ValueError(
                 f"unknown metric {metric!r}; available: {sorted(results[0][1])}"
             )
+        if not isinstance(results[0][1][metric], (int, float)):
+            # monthly_returns / modal_params 这类非数值列不可用于排序
+            raise ValueError(f"metric {metric!r} is not sortable (non-numeric)")
 
-        results.sort(key=lambda item: item[1][metric], reverse=True)
+        # 扩展指标可能为 None（无法计算）：排序时视为最差，而不是抛 TypeError
+        results.sort(key=lambda item: _rank(item[1][metric]), reverse=True)
         return results
 
     def _run_serial(
@@ -218,6 +222,11 @@ class GridOptimizer:
                     f"param {name!r} must be a scalar constant, "
                     f"got {type(value).__name__}"
                 )
+
+
+def _rank(value: float | int | None) -> float:
+    """排序键：None（指标无法计算）视为最差，保证降序时排在末尾。"""
+    return float("-inf") if value is None else float(value)
 
 
 def _mp_context() -> multiprocessing.context.BaseContext:

@@ -8,7 +8,12 @@ from decimal import Decimal
 
 import pytest
 
-from quant.dashboard.backtest import BacktestRequest, BacktestRequestError, BacktestService
+from quant.dashboard.backtest import (
+    BacktestRequest,
+    BacktestRequestError,
+    BacktestService,
+    WalkforwardRequest,
+)
 from quant.dashboard.tasks import (
     CANCELED,
     DONE,
@@ -86,6 +91,23 @@ def _request(**overrides) -> BacktestRequest:
     }
     data.update(overrides)
     return BacktestRequest(**data)
+
+
+def _wf_request(**overrides) -> WalkforwardRequest:
+    data = {
+        "strategy": "sma_cross",
+        "inst": INST,
+        "bar": "1H",
+        "start": "2026-09-05",
+        "end": "2026-09-10",
+        "warmup_bars": 20,
+        "grid": "fast_len=3,5;slow_len=15,20",
+        "metric": "sharpe",
+        "is_bars": 60,
+        "oos_bars": 20,
+    }
+    data.update(overrides)
+    return WalkforwardRequest(**data)
 
 
 async def _drain(tasks: TaskRunner, run_id: str, timeout: float = 5.0) -> dict:
@@ -243,6 +265,50 @@ class TestRerun:
 
         with pytest.raises(RunNotFound):
             await tasks.rerun("nope")
+
+
+class TestWalkforward:
+    async def test_persists_segments_and_summary(self, env) -> None:
+        store, _settings_, service = env
+        tasks = TaskRunner(store, service._settings, service)
+        try:
+            run_id = await tasks.submit_walkforward(_wf_request())
+            detail = await _drain(tasks, run_id)
+            segments = tasks.segments(run_id)
+            rerun_id = await tasks.rerun(run_id)
+            rerun_detail = await _drain(tasks, rerun_id)
+        finally:
+            await tasks.close()
+
+        assert detail["status"] == DONE
+        assert detail["kind"] == "walkforward"
+        # 汇总指标按 §8 落库，模态参数是独立列
+        assert detail["metrics"]["compounded_return"] is not None
+        assert detail["metrics"]["profitable_segments"] is not None
+        assert isinstance(detail["metrics"]["modal_params"], dict)
+        assert {item["kind"] for item in detail["artifacts"]} == {"segments"}
+
+        assert segments
+        first = segments[0]
+        assert set(first) >= {
+            "index",
+            "is_start",
+            "is_end",
+            "oos_start",
+            "oos_end",
+            "params",
+            "is_metrics",
+            "oos_metrics",
+        }
+        assert isinstance(first["params"], dict)
+        assert "sharpe" in first["oos_metrics"]
+
+        # 重跑要能从落库的参数结构还原网格与切分
+        assert rerun_detail["status"] == DONE
+        assert rerun_detail["kind"] == "walkforward"
+        assert rerun_detail["metrics"]["compounded_return"] == pytest.approx(
+            detail["metrics"]["compounded_return"]
+        )
 
 
 class TestHistory:

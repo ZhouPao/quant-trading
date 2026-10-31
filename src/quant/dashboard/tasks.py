@@ -25,11 +25,13 @@ import pandas as pd
 
 from quant.backtest.engine import BacktestResult
 from quant.backtest.report import ReportGenerator
-from quant.backtest.runner import parse_range
+from quant.backtest.runner import parse_grid, parse_range
+from quant.backtest.walkforward import WalkForwardResult
 from quant.dashboard.backtest import (
     BacktestRequest,
     BacktestRequestError,
     BacktestService,
+    WalkforwardRequest,
 )
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
@@ -46,7 +48,17 @@ CANCELED = "canceled"
 TERMINAL_STATUSES = frozenset({DONE, FAILED, CANCELED})
 
 #: 指标表里以整数存的列，其余数值列统一按文本存（避免浮点误差扩散到审计）。
-_INT_METRIC_COLUMNS = frozenset({"trade_count"})
+_INT_METRIC_COLUMNS = frozenset(
+    {
+        "trade_count",
+        "max_consecutive_losses",
+        "profitable_segments",
+        "total_oos_trades",
+    }
+)
+
+#: 需要反序列化回对象的 JSON 列（前端拿到的是结构而不是字符串）
+_JSON_METRIC_COLUMNS = frozenset({"monthly_returns", "modal_params"})
 
 
 class RunNotFound(KeyError):
@@ -122,10 +134,47 @@ class TaskRunner:
         self._ensure_worker()
         return run_id
 
+    async def submit_walkforward(self, req: WalkforwardRequest) -> str:
+        """登记 walk-forward 任务；params 存「基础参数 + 网格 + 切分」便于重跑。"""
+        base = await asyncio.to_thread(self._service.check_walkforward, req)
+        inst = req.inst or self._settings.engine.inst
+        start_ts, end_ts = _range_of(req)
+        now = _now_ms()
+        run_id = self._next_run_id(req.strategy, inst, now)
+
+        self._store.create_backtest_run(
+            run_id,
+            strategy_id=req.strategy,
+            inst_id=inst,
+            bar=req.bar,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            params=json.dumps(
+                {
+                    "base": _jsonable(base),
+                    "grid": _grid_payload(parse_grid(req.grid)),
+                    "metric": req.metric,
+                    "is_bars": req.is_bars,
+                    "oos_bars": req.oos_bars,
+                    "step_bars": req.step_bars,
+                },
+                sort_keys=True,
+            ),
+            kind="walkforward",
+            status=PENDING,
+            created_at=now,
+            warmup_bars=req.warmup_bars,
+        )
+        await self._queue.put((run_id, req))
+        self._ensure_worker()
+        return run_id
+
     async def rerun(self, run_id: str) -> str:
         """按旧任务的参数与区间重跑，返回新 run_id（旧结果保留）。"""
         row = self._require(run_id)
         req = _request_from_row(row)
+        if isinstance(req, WalkforwardRequest):
+            return await self.submit_walkforward(req)
         return await self.submit(req)
 
     async def cancel(self, run_id: str) -> str:
@@ -252,6 +301,24 @@ class TaskRunner:
             "trades": [dict(row) for row in window.to_dict("records")],
         }
 
+    def segments(self, run_id: str) -> list[dict[str, Any]]:
+        """读取 walk-forward 逐段明细（非 walkforward 任务返回空列表）。"""
+        path = self._artifact_path(run_id, "segments")
+        if path is None:
+            return []
+        frame = _read_parquet(path)
+        rows = []
+        for item in frame.to_dict("records"):
+            rows.append(
+                {
+                    **item,
+                    "params": json.loads(item["params"]),
+                    "is_metrics": json.loads(item["is_metrics"]),
+                    "oos_metrics": json.loads(item["oos_metrics"]),
+                }
+            )
+        return rows
+
     # ------------------------------------------------------------------
     # 执行
     # ------------------------------------------------------------------
@@ -281,10 +348,15 @@ class TaskRunner:
             return  # 排队期间被取消
         self._store.update_run_status(run_id, RUNNING, started_at=_now_ms())
 
+        should_stop = lambda: run_id in self._canceled  # noqa: E731
+        is_walkforward = isinstance(req, WalkforwardRequest)
         try:
-            payload, result = await self._service.build_async(
-                req, lambda: run_id in self._canceled
-            )
+            if is_walkforward:
+                payload, result = await self._service.build_walkforward_async(
+                    req, should_stop
+                )
+            else:
+                payload, result = await self._service.build_async(req, should_stop)
         except BacktestRequestError as e:
             self._store.update_run_status(
                 run_id, FAILED, finished_at=_now_ms(), error=str(e)
@@ -298,7 +370,9 @@ class TaskRunner:
 
         now = _now_ms()
         try:
-            artifacts = await asyncio.to_thread(self._write_artifacts, run_id, result)
+            artifacts = await asyncio.to_thread(
+                self._write_artifacts, run_id, result
+            )
         except OSError as e:
             # 磁盘写不进去时宁可整单 failed，也不要落一份半截产物
             self._store.update_run_status(
@@ -314,6 +388,50 @@ class TaskRunner:
         self._store.update_run_status(run_id, DONE, finished_at=_now_ms())
 
     def _write_artifacts(
+        self,
+        run_id: str,
+        result: BacktestResult | WalkForwardResult,
+    ) -> list[tuple[str, Path]]:
+        if isinstance(result, WalkForwardResult):
+            return self._write_walkforward_artifacts(run_id, result)
+        return self._write_backtest_artifacts(run_id, result)
+
+    def _write_walkforward_artifacts(
+        self, run_id: str, result: WalkForwardResult
+    ) -> list[tuple[str, Path]]:
+        """逐段 IS/OOS 明细；没有权益曲线，故不产出 equity/trades/report。"""
+        out_dir = Path(self._settings.backtest.artifacts_dir) / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        segments_path = out_dir / "segments.parquet"
+        pd.DataFrame(
+            [
+                {
+                    "index": item.segment.index,
+                    "is_start": item.is_range[0],
+                    "is_end": item.is_range[1],
+                    "oos_start": item.oos_range[0],
+                    "oos_end": item.oos_range[1],
+                    "params": json.dumps(_jsonable(item.params), sort_keys=True),
+                    "is_metrics": json.dumps(_jsonable(item.is_metrics)),
+                    "oos_metrics": json.dumps(_jsonable(item.oos_metrics)),
+                }
+                for item in result.segments
+            ],
+            columns=[
+                "index",
+                "is_start",
+                "is_end",
+                "oos_start",
+                "oos_end",
+                "params",
+                "is_metrics",
+                "oos_metrics",
+            ],
+        ).to_parquet(segments_path, index=False)
+        return [("segments", segments_path)]
+
+    def _write_backtest_artifacts(
         self, run_id: str, result: BacktestResult
     ) -> list[tuple[str, Path]]:
         out_dir = Path(self._settings.backtest.artifacts_dir) / run_id
@@ -399,16 +517,42 @@ def _jsonable(params: dict) -> dict:
 
 
 def _request_from_row(row: dict) -> BacktestRequest:
-    params = json.loads(row["params"] or "{}")
-    return BacktestRequest(
-        strategy=row["strategy_id"],
-        start=_date(row["start_ts"]),
-        end=_date(row["end_ts"] - 1),
-        inst=row["inst_id"],
-        bar=row["bar"],
-        params=";".join(f"{name}={value}" for name, value in params.items()),
-        warmup_bars=row["warmup_bars"],
+    data = json.loads(row["params"] or "{}")
+    common = {
+        "strategy": row["strategy_id"],
+        "start": _date(row["start_ts"]),
+        "end": _date(row["end_ts"] - 1),
+        "inst": row["inst_id"],
+        "bar": row["bar"],
+        "warmup_bars": row["warmup_bars"],
+    }
+    if row["kind"] == "walkforward":
+        # walkforward 的 params 存的是「基础参数 + 网格 + 切分」结构
+        return WalkforwardRequest(
+            **common,
+            params=_params_text(data.get("base") or {}),
+            grid=_grid_text(data.get("grid") or {}),
+            metric=data.get("metric", "sharpe"),
+            is_bars=int(data.get("is_bars", 1500)),
+            oos_bars=int(data.get("oos_bars", 500)),
+            step_bars=data.get("step_bars"),
+        )
+    return BacktestRequest(**common, params=_params_text(data))
+
+
+def _params_text(params: dict) -> str:
+    return ";".join(f"{name}={value}" for name, value in params.items())
+
+
+def _grid_text(grid: dict) -> str:
+    return ";".join(
+        f"{name}={','.join(str(value) for value in values)}"
+        for name, values in grid.items()
     )
+
+
+def _grid_payload(grid: dict) -> dict:
+    return {name: list(values) for name, values in grid.items()}
 
 
 def _date(ts: int) -> str:
@@ -437,6 +581,11 @@ def _metrics_payload(row: dict) -> dict[str, Any]:
             out[key] = None
         elif key in _INT_METRIC_COLUMNS:
             out[key] = int(value)
+        elif key in _JSON_METRIC_COLUMNS:
+            try:
+                out[key] = json.loads(value)
+            except (TypeError, ValueError):
+                out[key] = value
         else:
             try:
                 out[key] = float(value)

@@ -62,15 +62,23 @@ const METRIC_ORDER = [
   "total_return",
   "max_drawdown",
   "sharpe",
+  "calmar",
+  "sortino",
   "win_rate",
   "profit_factor",
   "trade_count",
+  "exposure_ratio",
+  "turnover",
+  "max_consecutive_losses",
+  "max_consecutive_loss_amount",
 ];
 const OPTIMIZE_METRICS = ["total_return", "sharpe", "max_drawdown", "trade_count"];
 const METRIC_SELECT = [
   "sharpe",
   "total_return",
   "max_drawdown",
+  "calmar",
+  "sortino",
   "win_rate",
   "profit_factor",
   "trade_count",
@@ -80,9 +88,15 @@ const METRIC_HINTS: Record<string, string> = {
   total_return: "区间累计收益",
   max_drawdown: "相对权益峰值",
   sharpe: "按日收益年化",
+  calmar: "年化收益 / 最大回撤",
+  sortino: "只惩罚下行波动",
   win_rate: "盈利平仓占比",
   profit_factor: "总盈利 / 总亏损",
   trade_count: "买卖合计笔数",
+  exposure_ratio: "有持仓的 K 线占比",
+  turnover: "成交名义 / 平均权益",
+  max_consecutive_losses: "连续亏损最多几笔",
+  max_consecutive_loss_amount: "单段连亏最大金额",
 };
 const ENGINE_STATUS: Record<string, string> = {
   signal: "已出信号",
@@ -1983,7 +1997,10 @@ function OptimizeResult({ data }: { data: OptimizeResponse }) {
       />
       <div className="bt-note">
         按「{METRIC_LABELS[data.metric] ?? data.metric}」
-        {data.metric === "max_drawdown" || data.metric === "avg_holding_bars"
+        {data.metric === "max_drawdown" ||
+        data.metric === "avg_holding_bars" ||
+        data.metric === "max_consecutive_losses" ||
+        data.metric === "max_consecutive_loss_amount"
           ? "从小到大"
           : "从大到小"}
         排序
@@ -2107,6 +2124,8 @@ function metricTone(
     case "total_return":
     case "annual_return":
     case "sharpe":
+    case "calmar":
+    case "sortino":
       return value > 0 ? "good" : value < 0 ? "bad" : "neutral";
     case "max_drawdown":
       return value < 0.1 ? "good" : value < 0.25 ? "warn" : "bad";
@@ -2114,6 +2133,9 @@ function metricTone(
       return value >= 0.5 ? "good" : value >= 0.35 ? "warn" : "bad";
     case "profit_factor":
       return value >= 1.5 ? "good" : value >= 1 ? "warn" : "bad";
+    case "max_consecutive_losses":
+    case "max_consecutive_loss_amount":
+      return value > 0 ? "warn" : "good";
     default:
       return "neutral";
   }

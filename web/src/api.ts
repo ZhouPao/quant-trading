@@ -412,6 +412,12 @@ export const METRIC_LABELS: Record<string, string> = {
   profit_factor: "盈亏比",
   trade_count: "交易次数",
   avg_holding_bars: "平均持仓K线数",
+  calmar: "卡玛比率",
+  sortino: "索提诺比率",
+  max_consecutive_losses: "最大连亏笔数",
+  max_consecutive_loss_amount: "最大连亏金额",
+  exposure_ratio: "持仓时间占比",
+  turnover: "换手率",
 };
 
 const PCT_METRICS = new Set([
@@ -419,6 +425,16 @@ const PCT_METRICS = new Set([
   "annual_return",
   "max_drawdown",
   "win_rate",
+  "exposure_ratio",
+  // walk-forward 汇总指标
+  "compounded_return",
+]);
+
+const INT_METRICS = new Set([
+  "trade_count",
+  "max_consecutive_losses",
+  "profitable_segments",
+  "total_oos_trades",
 ]);
 
 /** 按指标语义格式化：比率转百分比，缺失显示占位符。 */
@@ -426,7 +442,7 @@ export function metricText(key: string, value: number | null | undefined): strin
   if (value === null || value === undefined) return "—";
   if (!Number.isFinite(value)) return "—";
   if (PCT_METRICS.has(key)) return pct(String(value));
-  if (key === "trade_count") return String(Math.round(value));
+  if (INT_METRICS.has(key)) return String(Math.round(value));
   return value.toFixed(2);
 }
 

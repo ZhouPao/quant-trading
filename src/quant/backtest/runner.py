@@ -153,8 +153,10 @@ _METRIC_LABELS = {
 _PCT_METRICS = {"total_return", "annual_return", "max_drawdown", "win_rate"}
 
 
-def format_metric(key: str, value: float) -> str:
-    """按指标语义格式化（比率转百分比）。"""
+def format_metric(key: str, value: float | None) -> str:
+    """按指标语义格式化（比率转百分比）；None 显示为占位符。"""
+    if value is None:
+        return "—"
     if key in _PCT_METRICS:
         return f"{value:.2%}"
     if key == "profit_factor" and value == float("inf"):

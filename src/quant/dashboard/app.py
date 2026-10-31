@@ -27,9 +27,11 @@
 - GET /api/backtest/{run_id} 状态 + 指标 + 产物清单
 - GET /api/backtest/{run_id}/equity 降采样权益曲线
 - GET /api/backtest/{run_id}/trades 成交明细（分页）
+- GET /api/backtest/{run_id}/segments walk-forward 逐段 IS/OOS 明细
 - POST /api/backtest/{run_id}/cancel 取消任务（写操作）
 - POST /api/backtest/{run_id}/rerun  复制参数重跑（写操作）
 - POST /api/optimize  参数网格寻优（只返回排名，不落盘）
+- POST /api/walkforward 滚动 IS/OOS 验证任务，立即返回 run_id（?sync=1 同步）
 - POST /api/kill-switch 切换紧急停止标志（写操作）
 - POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
 - POST /api/positions/flatten 一键全平（写操作，直连 OKX）
@@ -57,6 +59,7 @@ from quant.dashboard.backtest import (
     OptimizeRequest,
     ParamUpdateRequest,
     StrategyParamError,
+    WalkforwardRequest,
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService
@@ -329,6 +332,21 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e)) from e
         return JSONResponse({"run_id": run_id, "status": "pending"})
 
+    @app.post("/api/walkforward")
+    async def walkforward(
+        req: WalkforwardRequest, sync: bool = Query(False)
+    ) -> JSONResponse:
+        if sync:
+            try:
+                return JSONResponse(await backtests.walkforward(req))
+            except BacktestRequestError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+        try:
+            run_id = await tasks.submit_walkforward(req)
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse({"run_id": run_id, "status": "pending"})
+
     @app.get("/api/backtest/runs")
     async def backtest_runs(
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
@@ -395,6 +413,14 @@ def create_app(
         except RunNotFound as e:
             raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
         return JSONResponse(tasks.trades(run_id, limit, offset))
+
+    @app.get("/api/backtest/{run_id}/segments")
+    async def backtest_segments(run_id: str) -> JSONResponse:
+        try:
+            tasks.get(run_id)
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        return JSONResponse({"segments": tasks.segments(run_id)})
 
     @app.post("/api/backtest/{run_id}/cancel")
     async def backtest_cancel(request: Request, run_id: str) -> JSONResponse:
@@ -511,6 +537,7 @@ def create_app(
                     "/api/backtest",
                     "/api/backtest/runs",
                     "/api/optimize",
+                    "/api/walkforward",
                     "/api/processes",
                 ],
             }

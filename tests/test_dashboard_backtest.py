@@ -574,3 +574,29 @@ class TestApp:
         assert body["kind"] == "optimize"
         assert len(body["results"]) == 2
         assert body["combo_count"] == 4
+
+    async def test_walkforward_endpoint_sync(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/walkforward?sync=1",
+                json={
+                    "strategy": "sma_cross",
+                    "start": "2026-09-05",
+                    "end": "2026-09-10",
+                    "warmup_bars": 20,
+                    "grid": "fast_len=3,5;slow_len=15,20",
+                    "metric": "sharpe",
+                    "is_bars": 60,
+                    "oos_bars": 20,
+                },
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["kind"] == "walkforward"
+        assert body["segment_count"] > 0
+        assert len(body["segments"]) == body["segment_count"]
+        assert body["metrics"]["compounded_return"] is not None
+        assert body["metrics"]["profitable_segments"] is not None

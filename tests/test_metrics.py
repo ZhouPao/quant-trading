@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -240,3 +241,139 @@ class TestTradeStats:
         m = compute_metrics(trades, _curve([(_TS0, "100")]), [_bar(_TS0)])
         assert m["trade_count"] == 0.0
         assert m["win_rate"] == 0.0
+
+
+# =====================================================================
+# 扩展指标（MS4-C §7）
+# =====================================================================
+
+
+class TestExtendedMetrics:
+    def test_empty_means_none_not_zero(self) -> None:
+        """无法计算的指标给 None，不写 0（0 会被误读为「算出来是 0」）。"""
+        m = compute_metrics([], [], [])
+
+        assert m["calmar"] is None
+        assert m["sortino"] is None
+        assert m["monthly_returns"] is None
+        assert m["max_consecutive_losses"] == 0
+        assert m["exposure_ratio"] == 0.0
+        assert m["turnover"] == 0.0
+
+    def test_calmar_none_without_drawdown(self) -> None:
+        """单调上涨没有回撤，calmar 无定义。"""
+        points = [
+            (_TS0, "100"),
+            (_TS0 + MS_PER_DAY, "101"),
+            (_TS0 + 2 * MS_PER_DAY, "102"),
+        ]
+        m = compute_metrics([], _curve(points), [_bar(ts) for ts, _ in points])
+
+        assert m["max_drawdown"] == 0.0
+        assert m["calmar"] is None
+
+    def test_calmar_uses_annual_return_over_drawdown(self) -> None:
+        points = [
+            (_TS0, "100"),
+            (_TS0 + MS_PER_DAY, "120"),
+            (_TS0 + 2 * MS_PER_DAY, "90"),
+            (_TS0 + 3 * MS_PER_DAY, "100"),
+        ]
+        m = compute_metrics([], _curve(points), [_bar(ts) for ts, _ in points])
+
+        assert m["max_drawdown"] == pytest.approx(0.25)
+        assert isinstance(m["calmar"], float)
+        assert m["calmar"] == pytest.approx(
+            m["annual_return"] / m["max_drawdown"]
+        )
+
+    def test_sortino_none_without_negative_days(self) -> None:
+        points = [
+            (_TS0, "100"),
+            (_TS0 + MS_PER_DAY, "110"),
+            (_TS0 + 2 * MS_PER_DAY, "121"),
+        ]
+        m = compute_metrics([], _curve(points), [_bar(ts) for ts, _ in points])
+
+        assert m["sortino"] is None
+
+    def test_sortino_known_value(self) -> None:
+        """日收益 [+0.2, -0.1]：mean=0.05，下行偏差=sqrt(0.01/2)。"""
+        points = [
+            (_TS0, "100"),
+            (_TS0 + MS_PER_DAY, "120"),
+            (_TS0 + 2 * MS_PER_DAY, "108"),
+        ]
+        m = compute_metrics([], _curve(points), [_bar(ts) for ts, _ in points])
+
+        expected = 0.05 / (0.005**0.5) * (365**0.5)
+        assert m["sortino"] == pytest.approx(expected)
+
+    def test_monthly_returns_aggregate_by_calendar_month(self) -> None:
+        month = 30 * MS_PER_DAY
+        points = [
+            (_TS0, "100"),
+            (_TS0 + month, "110"),
+            (_TS0 + 2 * month, "99"),
+        ]
+        m = compute_metrics([], _curve(points), [_bar(ts) for ts, _ in points])
+
+        rows = json.loads(str(m["monthly_returns"]))
+        # 首月只作基准，两条收益分别是 +10% 与 -10%
+        assert [row["ret"] for row in rows] == [
+            pytest.approx(0.1),
+            pytest.approx(-0.1),
+        ]
+        assert all("month" in row for row in rows)
+
+    def test_consecutive_losses(self) -> None:
+        """-10, -20, +30, -5 → 最长 2 笔，最大连续亏损额 30。"""
+        trades = [
+            _fill("buy", "100", _TS0),
+            _fill("sell", "90", _TS0 + _HOUR),
+            _fill("buy", "100", _TS0 + 2 * _HOUR),
+            _fill("sell", "80", _TS0 + 3 * _HOUR),
+            _fill("buy", "100", _TS0 + 4 * _HOUR),
+            _fill("sell", "130", _TS0 + 5 * _HOUR),
+            _fill("buy", "100", _TS0 + 6 * _HOUR),
+            _fill("sell", "95", _TS0 + 7 * _HOUR),
+        ]
+        bars = [_bar(_TS0 + i * _HOUR) for i in range(8)]
+        m = compute_metrics(trades, _curve([(_TS0, "100")]), bars)
+
+        assert m["max_consecutive_losses"] == 2
+        assert m["max_consecutive_loss_amount"] == pytest.approx(30.0)
+
+    def test_no_losing_streak(self) -> None:
+        trades = [
+            _fill("buy", "100", _TS0),
+            _fill("sell", "110", _TS0 + _HOUR),
+        ]
+        m = compute_metrics(
+            trades, _curve([(_TS0, "100")]), [_bar(_TS0), _bar(_TS0 + _HOUR)]
+        )
+
+        assert m["max_consecutive_losses"] == 0
+        assert m["max_consecutive_loss_amount"] == 0.0
+
+    def test_exposure_ratio_denominator_is_all_bars(self) -> None:
+        """4 根 bar 中持仓 2 根 → 0.5。"""
+        trades = [
+            _fill("buy", "100", _TS0),
+            _fill("sell", "110", _TS0 + 2 * _HOUR),
+        ]
+        bars = [_bar(_TS0 + i * _HOUR) for i in range(4)]
+        m = compute_metrics(trades, _curve([(_TS0, "100")]), bars)
+
+        assert m["exposure_ratio"] == pytest.approx(0.5)
+
+    def test_turnover_known_value(self) -> None:
+        """成交名义 100 + 110 = 210，平均权益 105 → 2.0。"""
+        trades = [
+            _fill("buy", "100", _TS0),
+            _fill("sell", "110", _TS0 + _HOUR),
+        ]
+        curve = _curve([(_TS0, "100"), (_TS0 + _HOUR, "110")])
+        m = compute_metrics(trades, curve, [_bar(_TS0), _bar(_TS0 + _HOUR)])
+
+        assert m["turnover"] == pytest.approx(2.0)
