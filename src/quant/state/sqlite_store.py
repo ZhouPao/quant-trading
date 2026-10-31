@@ -248,6 +248,20 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (run_id, kind)
     );
     """,
+    # v5 -> v6：策略启停矩阵（MS4-C §4.1）
+    #
+    # 主键只有 (strategy_id, inst_id)，bar 不在主键里：同一策略同一品种
+    # 只允许一个周期，否则两个周期会对同一持仓重复下单。
+    """
+    CREATE TABLE IF NOT EXISTS strategy_bindings (
+        strategy_id TEXT NOT NULL,
+        inst_id     TEXT NOT NULL,
+        bar         TEXT NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (strategy_id, inst_id)
+    );
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -1000,6 +1014,71 @@ class SQLiteStore:
             (strategy_id, limit, offset),
         )
         return [dict(r) for r in rows], int(total["n"]) if total else 0
+
+    # ------------------------------------------------------------------
+    # strategy bindings（MS4-C §4.1 / §10.3）
+    # ------------------------------------------------------------------
+
+    def list_bindings(self, strategy_id: str | None = None) -> list[dict]:
+        """启停矩阵；传 strategy_id 只看该策略，否则全量。"""
+        sql = (
+            "SELECT strategy_id, inst_id, bar, enabled, updated_at"
+            "  FROM strategy_bindings"
+        )
+        params: tuple = ()
+        if strategy_id is not None:
+            sql += " WHERE strategy_id = ?"
+            params = (strategy_id,)
+        sql += " ORDER BY strategy_id, inst_id"
+        return [dict(r) for r in self._query_all(sql, params)]
+
+    def get_binding(self, strategy_id: str, inst_id: str) -> dict | None:
+        row = self._query_one(
+            """
+            SELECT strategy_id, inst_id, bar, enabled, updated_at
+              FROM strategy_bindings
+             WHERE strategy_id = ? AND inst_id = ?
+            """,
+            (strategy_id, inst_id),
+        )
+        return dict(row) if row else None
+
+    def upsert_binding(
+        self,
+        strategy_id: str,
+        inst_id: str,
+        bar: str,
+        enabled: bool,
+        now_ms: int,
+    ) -> None:
+        """新增或更新一条绑定。
+
+        周期冲突（已有不同 bar）由调用方先校验并给出可读提示；这里只做写入，
+        因为「先读后写」在同一进程内已足够，跨进程改动由引擎下一轮轮询兜住。
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO strategy_bindings
+                    (strategy_id, inst_id, bar, enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(strategy_id, inst_id) DO UPDATE SET
+                    bar=excluded.bar,
+                    enabled=excluded.enabled,
+                    updated_at=excluded.updated_at
+                """,
+                (strategy_id, inst_id, bar, 1 if enabled else 0, now_ms),
+            )
+            self._conn.commit()
+
+    def delete_binding(self, strategy_id: str, inst_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM strategy_bindings WHERE strategy_id = ? AND inst_id = ?",
+                (strategy_id, inst_id),
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     # ------------------------------------------------------------------
     # backtest runs（MS4-C §10.4）

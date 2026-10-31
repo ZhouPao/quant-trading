@@ -170,6 +170,12 @@ class EngineSettings(BaseModel):
     # 每轮评估后发布的状态 JSON（看板只读），键后缀 :{strategy}:{inst}
     status_key: str = "quant:engine:status"
     status_timeout_seconds: int = 180      # 超过视为引擎离线
+    # --- 启停矩阵（MS4-C §4）---
+    # multi_binding=False 是回滚开关：只跑下面 strategy/inst/bar 这一个组合
+    multi_binding: bool = True
+    # Redis 绑定缓存丢失时：db=回落读 SQLite；halt=直接停止新开仓
+    bindings_fail_mode: str = "db"
+    bindings_key: str = "quant:strategy:bindings"
 
 
 class DashboardSettings(BaseModel):

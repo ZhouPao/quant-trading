@@ -350,6 +350,27 @@ export type ParamChangesResponse = {
   total: number;
 };
 
+export type StrategyBinding = {
+  strategy_id: string;
+  inst_id: string;
+  bar: string;
+  enabled: boolean;
+  updated_at: number;
+};
+
+export type BindingsResponse = {
+  strategy_id: string;
+  // 新增绑定时可省略 bar，后端用该默认周期
+  default_bar: string;
+  // false 表示回滚开关打开，引擎只跑 [engine] 单组合
+  multi_binding?: boolean;
+  bindings: StrategyBinding[];
+};
+
+export type BindingResponse = {
+  binding: StrategyBinding;
+};
+
 export type MetricMap = Record<string, number | null>;
 
 export type BacktestTrade = {
@@ -615,6 +636,27 @@ export async function fetchParamChanges(
   return getJson<ParamChangesResponse>(
     `/api/strategies/${encodeURIComponent(strategyId)}/param-changes?limit=5`,
     signal
+  );
+}
+
+export async function fetchBindings(signal: AbortSignal, strategyId: string) {
+  return getJson<BindingsResponse>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/bindings`,
+    signal
+  );
+}
+
+export async function updateBinding(
+  strategyId: string,
+  instId: string,
+  body: { enabled?: boolean; bar?: string },
+  token = ""
+) {
+  return postWrite<BindingResponse>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/bindings/${encodeURIComponent(instId)}`,
+    body,
+    token,
+    "PUT"
   );
 }
 

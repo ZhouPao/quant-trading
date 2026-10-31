@@ -21,6 +21,8 @@
 - GET /api/strategies/{id}/params 单个策略的生效参数与来源
 - PUT /api/strategies/{id}/params 保存参数覆盖并写审计（写操作）
 - GET /api/strategies/{id}/param-changes 参数变更历史（分页）
+- GET /api/strategies/{id}/bindings 启停矩阵（策略 × 品种）
+- PUT /api/strategies/{id}/bindings/{inst_id} 启用/停用或新增绑定（写操作）
 - POST /api/backtest  提交回测任务，立即返回 run_id（?sync=1 走旧同步路径）
 - GET /api/backtest/runs 回测历史（筛选 + 分页）
 - GET /api/backtest/compare 多组对比（同品种同周期）
@@ -56,6 +58,7 @@ from quant.dashboard.backtest import (
     BacktestRequest,
     BacktestRequestError,
     BacktestService,
+    BindingUpdateRequest,
     OptimizeRequest,
     ParamUpdateRequest,
     StrategyParamError,
@@ -144,7 +147,7 @@ def create_app(
     web_dir: Path | None = None,
     manual: ManualTrader | None = None,
 ) -> FastAPI:
-    backtests = BacktestService(service.settings, service.store)
+    backtests = BacktestService(service.settings, service.store, service.redis)
     tasks = TaskRunner(service.store, service.settings, backtests)
 
     @asynccontextmanager
@@ -315,6 +318,28 @@ def create_app(
             )
         except StrategyParamError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @app.get("/api/strategies/{strategy_id}/bindings")
+    async def strategy_bindings(strategy_id: str) -> JSONResponse:
+        try:
+            return JSONResponse(await backtests.bindings(strategy_id))
+        except StrategyParamError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @app.put("/api/strategies/{strategy_id}/bindings/{inst_id}")
+    async def update_strategy_binding(
+        request: Request,
+        strategy_id: str,
+        inst_id: str,
+        req: BindingUpdateRequest,
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse(
+                await backtests.set_binding(strategy_id, inst_id, req)
+            )
+        except StrategyParamError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.post("/api/backtest")
     async def backtest(
@@ -534,6 +559,7 @@ def create_app(
                     "/api/strategies",
                     "/api/strategies/{id}/params",
                     "/api/strategies/{id}/param-changes",
+                    "/api/strategies/{id}/bindings",
                     "/api/backtest",
                     "/api/backtest/runs",
                     "/api/optimize",

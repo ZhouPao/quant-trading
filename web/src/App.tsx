@@ -7,6 +7,7 @@ import {
   fetchAll,
   fetchCandles,
   fetchEquity,
+  fetchBindings,
   fetchParamChanges,
   fetchReports,
   fetchRiskLimits,
@@ -21,6 +22,7 @@ import {
   runOptimize,
   setKillSwitch,
   stamp,
+  updateBinding,
   updateStrategyParams,
   type AlertRow,
   type BacktestResponse,
@@ -42,6 +44,7 @@ import {
   type PositionRow,
   type RiskLimitRule,
   type RiskLimitsResponse,
+  type StrategyBinding,
   type StrategyInfo,
 } from "./api";
 import { CandleChart } from "./chart/CandleChart";
@@ -1083,6 +1086,13 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [changes, setChanges] = useState<ParamChange[]>([]);
+  const [bindings, setBindings] = useState<StrategyBinding[]>([]);
+  const [defaultBar, setDefaultBar] = useState("1H");
+  const [multiBinding, setMultiBinding] = useState(true);
+  const [newInst, setNewInst] = useState("");
+  const [newBar, setNewBar] = useState("");
+  const [bindingBusy, setBindingBusy] = useState("");
+  const [bindingError, setBindingError] = useState("");
   const strategyId = engine?.strategy;
 
   const loadInfo = useCallback(
@@ -1110,6 +1120,68 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
       .catch(() => setChanges([]));
     return () => controller.abort();
   }, [editing, strategyId, notice]);
+
+  const loadBindings = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!strategyId) return;
+      const res = await fetchBindings(
+        signal ?? new AbortController().signal,
+        strategyId
+      );
+      setBindings(res.bindings);
+      setDefaultBar(res.default_bar);
+      setMultiBinding(res.multi_binding ?? true);
+      setNewBar((prev) => prev || res.default_bar);
+    },
+    [strategyId]
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadBindings(controller.signal).catch(() => setBindings([]));
+    return () => controller.abort();
+  }, [loadBindings, notice]);
+
+  const toggleBinding = async (row: StrategyBinding) => {
+    if (!strategyId) return;
+    setBindingBusy(row.inst_id);
+    setBindingError("");
+    try {
+      await updateBinding(
+        strategyId,
+        row.inst_id,
+        { enabled: !row.enabled },
+        token
+      );
+      if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+      await loadBindings();
+    } catch (e) {
+      setBindingError((e as Error).message);
+    } finally {
+      setBindingBusy("");
+    }
+  };
+
+  const addBinding = async () => {
+    if (!strategyId || !newInst.trim()) return;
+    setBindingBusy(newInst.trim());
+    setBindingError("");
+    try {
+      await updateBinding(
+        strategyId,
+        newInst.trim(),
+        { bar: newBar.trim() || defaultBar, enabled: true },
+        token
+      );
+      if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+      setNewInst("");
+      await loadBindings();
+    } catch (e) {
+      setBindingError((e as Error).message);
+    } finally {
+      setBindingBusy("");
+    }
+  };
 
   const specs: ParamSpec[] = info?.param_spec ?? [];
   const sources = info?.sources ?? {};
@@ -1347,6 +1419,78 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
             )}
           </div>
         )}
+      </div>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            启停矩阵：停用只停止新开仓，已有持仓保留
+          </span>
+        </div>
+        {!multiBinding && (
+          <div className="kill-msg kill-msg-bad">
+            已开启单组合回滚（multi_binding=false），引擎只跑配置里的主组合，
+            此矩阵不生效
+          </div>
+        )}
+        {bindings.length === 0 ? (
+          <p className="kill-note">当前没有绑定，引擎不会评估该策略。</p>
+        ) : (
+          <ul className="param-history">
+            {bindings.map((row) => (
+              <li key={row.inst_id}>
+                <span className="mono">{row.inst_id}</span>
+                <span>{row.bar}</span>
+                <span className={row.enabled ? "tag-ok" : "tag-muted"}>
+                  {row.enabled ? "启用" : "已停用"}
+                </span>
+                <button
+                  type="button"
+                  className="kill-btn"
+                  disabled={bindingBusy === row.inst_id}
+                  onClick={() => void toggleBinding(row)}
+                >
+                  {row.enabled ? "停用" : "启用"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="param-head">
+          <input
+            className="kill-input"
+            placeholder="品种，如 ETH-USDT"
+            value={newInst}
+            onChange={(e) => setNewInst(e.target.value)}
+          />
+          <input
+            className="kill-input"
+            placeholder={`周期（默认 ${defaultBar}）`}
+            value={newBar}
+            onChange={(e) => setNewBar(e.target.value)}
+          />
+          <button
+            type="button"
+            className="kill-btn"
+            disabled={!newInst.trim() || bindingBusy === newInst.trim()}
+            onClick={() => void addBinding()}
+          >
+            新增绑定
+          </button>
+        </div>
+        <input
+          className="kill-input"
+          type="password"
+          placeholder="DASHBOARD_TOKEN（如已配置）"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+        />
+        {bindingError && (
+          <div className="kill-msg kill-msg-bad">绑定失败：{bindingError}</div>
+        )}
+        <p className="kill-note">
+          写入后同步 SQLite 与 Redis 缓存，引擎下一轮（≤ 轮询周期）生效，
+          无需重启；同一组合改周期须先解绑。
+        </p>
       </div>
       <div className="orders-line">
         <span className="orders-pill">

@@ -3,6 +3,10 @@
 每根 K 线收盘后，用本地 parquet 的历史 K 线回放策略，把产生的信号写入
 Redis 队列，交给 worker 在 OKX 模拟盘执行。
 
+支持多绑定（MS4-C §4.2）：每轮从 Redis 缓存读出启停矩阵，对每个启用的
+「策略 × 品种」组合各跑一次。每个组合持有**独立的策略实例与 Context**，
+K 线窗口按各自的 bar / window_size 裁剪；风控参数仍按 strategy_id 解析。
+
 与回测的差别：
 - 持仓与现金取真实（模拟盘）状态，而不是从初始资金推导
 - 水位之后漏掉的 bar 会逐根补评估（受 `max_catchup_bars` 限制），
@@ -37,6 +41,7 @@ from quant.queue.signal_queue import Deduper, SignalQueue
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 from quant.storage.validator import DataValidator
+from quant.strategies.bindings import Binding, BindingsUnavailable, read_bindings
 from quant.strategies.loader import StrategyConfigError
 from quant.strategies.params import ParamError, resolve_strategy
 
@@ -98,13 +103,9 @@ class LiveSignalEngine:
         )
         self._running = False
         self._started_ts = int(time.time() * 1000)
-        # 进程内累计计数，随状态 JSON 发布给看板（重启归零）
-        self._counters = {
-            "ticks": 0,
-            "signals": 0,
-            "skipped": 0,
-            "catch_up": 0,
-        }
+        # 进程内累计计数，按绑定分桶（随状态 JSON 发布给看板，重启归零）
+        self._counters: dict[tuple[str, str], dict[str, int]] = {}
+        self._bar_ms_cache: dict[str, int] = {}
         try:
             self._bar_ms = DataValidator._bar_size_ms(self._cfg.bar)  # type: ignore[attr-defined]
         except ValueError as e:
@@ -114,18 +115,22 @@ class LiveSignalEngine:
         """主循环，直到 stop()。"""
         self._running = True
         log.info(
-            f"strategy engine started strategy={self._cfg.strategy} "
-            f"inst={self._cfg.inst} bar={self._cfg.bar} "
-            f"interval={self._cfg.interval_seconds}s"
+            f"strategy engine started interval={self._cfg.interval_seconds}s "
+            f"multi_binding={self._cfg.multi_binding} "
+            f"fallback={self._cfg.strategy}/{self._cfg.inst}/{self._cfg.bar}"
         )
         while self._running:
             started = time.monotonic()
             try:
-                tick = await self.run_once()
-                self._log_tick(tick)
-                await self.publish_status(tick)
+                results = await self.run_all()
+                for binding, tick in results:
+                    await self.publish_status(tick, binding)
                 await self._heartbeat.beat(
-                    {"strategy": self._cfg.strategy, "inst": self._cfg.inst}
+                    {
+                        "strategy": self._cfg.strategy,
+                        "inst": self._cfg.inst,
+                        "bindings": len(results),
+                    }
                 )
             except Exception as e:  # noqa: BLE001
                 log.exception(f"engine cycle failed: {e}")
@@ -137,16 +142,62 @@ class LiveSignalEngine:
         self._running = False
 
     async def run_once(self, now_ms: int | None = None) -> EngineTick:
-        """评估最近一根已收盘 bar。"""
+        """评估所有启用绑定，返回「主组合」的结果（兼容单绑定调用）。
+
+        主组合是 `[engine] strategy/inst` 指定的那一对；它不在启用列表里时
+        返回第一个组合的结果，便于日志与测试仍能拿到一个明确的状态。
+        """
+        results = await self.run_all(now_ms)
+        if not results:
+            return EngineTick("skipped", reason="no enabled bindings")
+        primary = (self._cfg.strategy, self._cfg.inst)
+        for binding, tick in results:
+            if binding.key == primary:
+                return tick
+        return results[0][1]
+
+    async def run_all(
+        self, now_ms: int | None = None
+    ) -> list[tuple[Binding, EngineTick]]:
+        """跑本轮所有启用绑定；读不到矩阵时激活 kill switch 并跳过。"""
         now = int(time.time() * 1000) if now_ms is None else now_ms
-        last_closed = ((now - self._bar_ms) // self._bar_ms) * self._bar_ms
+        try:
+            bindings = await read_bindings(self._redis, self._store, self._settings)
+        except BindingsUnavailable as e:
+            await self._halt(e)
+            return []
+
+        enabled = [item for item in bindings if item.enabled]
+        if not enabled:
+            log.debug("no enabled bindings, skip cycle")
+            return []
+
+        # 账户可用资金是账户级快照，一轮读一次即可
+        cash = await self._available_cash()
+        results: list[tuple[Binding, EngineTick]] = []
+        for binding in enabled:
+            try:
+                tick = await self._run_binding(binding, now, cash)
+            except ValueError as e:
+                # 单个绑定的周期/配置非法不应拖垮其它组合
+                tick = EngineTick("error", reason=str(e))
+            self._log_tick(tick, binding)
+            results.append((binding, tick))
+        return results
+
+    async def _run_binding(
+        self, binding: Binding, now: int, cash: Decimal
+    ) -> EngineTick:
+        """评估单个绑定最近一根已收盘 bar。"""
+        bar_ms = self._bar_ms_for(binding.bar)
+        last_closed = ((now - bar_ms) // bar_ms) * bar_ms
 
         window = max(self._cfg.warmup_bars, self._settings.backtest.window_size)
         bars = await asyncio.to_thread(
             self._bars.load_bars,
-            self._cfg.inst,
-            self._cfg.bar,
-            last_closed - window * self._bar_ms,
+            binding.inst_id,
+            binding.bar,
+            last_closed - window * bar_ms,
             last_closed,
         )
         # 历史遗留的未收盘 bar（ts > last_closed）不参与评估
@@ -161,7 +212,7 @@ class LiveSignalEngine:
             )
 
         newest = bars[-1]
-        done_ts = await self._last_processed()
+        done_ts = await self._last_processed(binding)
         if done_ts is not None and newest.ts <= done_ts:
             return EngineTick("duplicate", newest.ts, reason="bar already processed")
 
@@ -170,29 +221,29 @@ class LiveSignalEngine:
         catch_up = max(len(pending) - 1, 0) if done_ts is not None else 0
 
         if await self._kill.is_active():
-            await self._mark(newest.ts)
+            await self._mark(binding, newest.ts)
             # 跳过的 bar 没有真正评估，不计入补评估数
             return EngineTick("skipped", newest.ts, reason="kill switch active")
 
-        if await self._has_open_orders():
-            await self._mark(newest.ts)
+        if await self._has_open_orders(binding):
+            await self._mark(binding, newest.ts)
             return EngineTick("skipped", newest.ts, reason="pending orders")
 
         try:
             # 与回测共用同一真相源：toml → DB 覆盖 → 显式传参
             strategy_cls, params, _sources = await asyncio.to_thread(
                 resolve_strategy,
-                self._cfg.strategy,
+                binding.strategy_id,
                 self._cfg.config_dir,
                 self._store,
                 resolve_from_db=self._settings.params.resolve_from_db,
             )
         except (StrategyConfigError, ParamError) as e:
             return EngineTick("error", newest.ts, reason=str(e))
+        # 每个绑定一个独立实例：策略可能持有内部状态，不能跨组合共享
         strategy = strategy_cls()
 
-        position = await asyncio.to_thread(self._store.get_position, self._cfg.inst)
-        cash = await self._available_cash()
+        position = await asyncio.to_thread(self._store.get_position, binding.inst_id)
         ctx = Context(position=position, params=params, cash=cash)
         strategy.on_init(ctx)
 
@@ -237,7 +288,7 @@ class LiveSignalEngine:
             self._apply_virtual_fill(ctx, out, bar)
 
         if not signals:
-            await self._mark(newest.ts)
+            await self._mark(binding, newest.ts)
             return EngineTick("no_signal", newest.ts, catch_up=catch_up)
 
         queued: list[Signal] = []
@@ -248,7 +299,7 @@ class LiveSignalEngine:
             await self._queue.push(signal)
             queued.append(signal)
 
-        await self._mark(newest.ts)
+        await self._mark(binding, newest.ts)
         if not queued:
             return EngineTick(
                 "duplicate", newest.ts, reason="dedup hit", catch_up=catch_up
@@ -325,7 +376,10 @@ class LiveSignalEngine:
         else:
             ctx.cash += notional
 
-    def _log_tick(self, tick: EngineTick) -> None:
+    def _log_tick(self, tick: EngineTick, binding: Binding | None = None) -> None:
+        tag = ""
+        if binding is not None:
+            tag = f" binding={binding.strategy_id}:{binding.inst_id}"
         if tick.status == "signal" and tick.signal is not None:
             s = tick.signal
             catch_up = (
@@ -336,42 +390,64 @@ class LiveSignalEngine:
                 f"inst={s.inst_id} qty={s.qty} bar_ts={tick.bar_ts}{catch_up}"
             )
         elif tick.status == "skipped":
-            log.warning(f"engine skipped bar_ts={tick.bar_ts}: {tick.reason}")
+            log.warning(f"engine skipped{tag} bar_ts={tick.bar_ts}: {tick.reason}")
         elif tick.status == "error":
-            log.error(f"engine error bar_ts={tick.bar_ts}: {tick.reason}")
+            log.error(f"engine error{tag} bar_ts={tick.bar_ts}: {tick.reason}")
         elif tick.status == "no_signal":
-            log.info(f"no signal bar_ts={tick.bar_ts}")
+            log.info(f"no signal{tag} bar_ts={tick.bar_ts}")
         else:
-            log.debug(f"engine tick {tick.status} bar_ts={tick.bar_ts} {tick.reason}")
+            log.debug(
+                f"engine tick {tick.status}{tag} "
+                f"bar_ts={tick.bar_ts} {tick.reason}"
+            )
 
     @property
     def status_key(self) -> str:
-        return f"{self._cfg.status_key}:{self._cfg.strategy}:{self._cfg.inst}"
+        """主组合的状态键（单绑定看板与测试沿用）。"""
+        cfg = self._cfg
+        return f"{cfg.status_key}:{cfg.strategy}:{cfg.inst}"
 
-    async def publish_status(self, tick: EngineTick) -> None:
-        """把本轮结果与累计计数写入 Redis，供只读看板展示健康度。"""
-        self._counters["ticks"] += 1
+    def _status_key_for(self, binding: Binding) -> str:
+        return f"{self._cfg.status_key}:{binding.strategy_id}:{binding.inst_id}"
+
+    async def publish_status(
+        self, tick: EngineTick, binding: Binding | None = None
+    ) -> None:
+        """把本轮结果与累计计数写入 Redis，供只读看板展示健康度。
+
+        多绑定时按绑定分别计数、分别写键；不传 binding 则视为主组合。
+        """
+        target = binding or Binding(
+            self._cfg.strategy, self._cfg.inst, self._cfg.bar, True
+        )
+        counters = self._counters.setdefault(
+            target.key, {"ticks": 0, "signals": 0, "skipped": 0, "catch_up": 0}
+        )
+        counters["ticks"] += 1
         if tick.status == "signal":
-            self._counters["signals"] += tick.signal_count
+            counters["signals"] += tick.signal_count
         elif tick.status == "skipped":
-            self._counters["skipped"] += 1
-        self._counters["catch_up"] += tick.catch_up
+            counters["skipped"] += 1
+        counters["catch_up"] += tick.catch_up
 
         payload = {
             "ts": int(time.time() * 1000),
             "started_ts": self._started_ts,
+            "strategy": target.strategy_id,
+            "inst": target.inst_id,
+            "bar": target.bar,
             "status": tick.status,
             "bar_ts": tick.bar_ts,
             "reason": tick.reason,
             "signal_count": tick.signal_count,
             "catch_up": tick.catch_up,
-            "ticks": self._counters["ticks"],
-            "signals_total": self._counters["signals"],
-            "skipped_total": self._counters["skipped"],
-            "catch_up_total": self._counters["catch_up"],
+            "ticks": counters["ticks"],
+            "signals_total": counters["signals"],
+            "skipped_total": counters["skipped"],
+            "catch_up_total": counters["catch_up"],
         }
         try:
-            await self._redis.set(self.status_key, json.dumps(payload))
+            await self._redis.set(self._status_key_for(target), json.dumps(payload))
         except Exception as e:  # noqa: BLE001
             log.warning(f"write engine status failed: {e}")
 
@@ -388,21 +464,50 @@ class LiveSignalEngine:
         log.warning(f"account snapshot unavailable, use cash fallback {fallback}")
         return fallback
 
-    async def _has_open_orders(self) -> bool:
+    async def _has_open_orders(self, binding: Binding) -> bool:
         try:
             orders = await asyncio.to_thread(self._store.get_open_orders)
         except Exception as e:  # noqa: BLE001
             log.warning(f"read open orders failed: {e}")
             return True  # 读不到就保守跳过，避免重复下单
-        return any(o.get("inst_id") == self._cfg.inst for o in orders)
+        return any(o.get("inst_id") == binding.inst_id for o in orders)
+
+    async def _halt(self, error: Exception) -> None:
+        """绑定读不到时停止新开仓：置 kill switch 并记录原因。
+
+        宁可少交易也不能猜一个默认组合继续下单；运维处理完缓存/库后
+        需要用 `quant kill-switch --off` 显式恢复。
+        """
+        log.error(f"bindings unavailable, halting new entries: {error}")
+        try:
+            await self._kill.enable(f"bindings unavailable: {error}")
+        except Exception as e:  # noqa: BLE001
+            log.error(f"activate kill switch failed: {e}")
+
+    def _bar_ms_for(self, bar: str) -> int:
+        cached = self._bar_ms_cache.get(bar)
+        if cached is not None:
+            return cached
+        try:
+            value = DataValidator._bar_size_ms(bar)  # type: ignore[attr-defined]
+        except ValueError as e:
+            raise ValueError(f"binding bar invalid: {bar!r}") from e
+        self._bar_ms_cache[bar] = value
+        return value
 
     @property
     def _marker_key(self) -> str:
         return f"{self._cfg.last_bar_key}:{self._cfg.strategy}:{self._cfg.inst}"
 
-    async def _last_processed(self) -> int | None:
+    def _marker_key_for(self, binding: Binding) -> str:
+        return (
+            f"{self._cfg.last_bar_key}:{binding.strategy_id}:{binding.inst_id}"
+        )
+
+    async def _last_processed(self, binding: Binding | None = None) -> int | None:
+        key = self._marker_key if binding is None else self._marker_key_for(binding)
         try:
-            raw = await self._redis.get(self._marker_key)
+            raw = await self._redis.get(key)
         except Exception as e:  # noqa: BLE001
             log.warning(f"read engine marker failed: {e}")
             return None
@@ -414,9 +519,10 @@ class LiveSignalEngine:
             log.warning(f"engine marker malformed: {raw!r}")
             return None
 
-    async def _mark(self, bar_ts: int) -> None:
+    async def _mark(self, binding: Binding | None, bar_ts: int) -> None:
+        key = self._marker_key if binding is None else self._marker_key_for(binding)
         try:
-            await self._redis.set(self._marker_key, str(bar_ts))
+            await self._redis.set(key, str(bar_ts))
         except Exception as e:  # noqa: BLE001
             log.warning(f"write engine marker failed: {e}")
 

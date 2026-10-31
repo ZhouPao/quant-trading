@@ -85,6 +85,8 @@ interval_seconds = 60                     # 轮询间隔；每根 bar 只评估�
 warmup_bars = 200                         # 回放窗口，需覆盖策略最慢周期
 config_dir = "./config/strategies"
 cash_fallback = "10000"                   # 读不到账户可用 USDT 时的兜底仓位基数
+multi_binding = true                      # false=回滚开关，只跑下面 strategy/inst/bar 一个组合
+bindings_fail_mode = "db"                 # 绑定缓存丢失时：db=回落读 SQLite / halt=停止新开仓
 
 [dashboard]
 host = "127.0.0.1"                        # 只读看板监听地址，默认仅本机

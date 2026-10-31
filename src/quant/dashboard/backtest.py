@@ -22,6 +22,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 
 from quant.backtest.engine import Backtest, BacktestResult
 from quant.backtest.optimizer import GridOptimizer
@@ -38,6 +39,8 @@ from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
 from quant.models.bar import Bar
 from quant.state.sqlite_store import SQLiteStore
+from quant.storage.validator import DataValidator
+from quant.strategies.bindings import Binding, ensure_seed, write_cache
 from quant.strategies.loader import StrategyConfigError
 from quant.strategies.params import (
     ParamError,
@@ -130,12 +133,29 @@ class WalkforwardRequest(BacktestRequest):
     step_bars: int | None = Field(None, ge=1)
 
 
-class BacktestService:
-    """看板回测服务：策略清单 + 单次回测 + 网格寻优。"""
+class BindingUpdateRequest(BaseModel):
+    """启停矩阵写入（MS4-C §4.3）：启用状态与周期都可缺省。
 
-    def __init__(self, settings: Settings, store: SQLiteStore | None = None) -> None:
+    `bar` 只在该组合尚未绑定时可省略（默认取 `[engine] bar`）；
+    已绑定不同周期时改 `bar` 会被拒绝，必须先解绑。
+    """
+
+    enabled: bool | None = None
+    bar: str | None = None
+
+
+class BacktestService:
+    """看板回测服务：策略清单 + 单次回测 + 网格寻优 + 启停矩阵。"""
+
+    def __init__(
+        self,
+        settings: Settings,
+        store: SQLiteStore | None = None,
+        redis: Redis | None = None,
+    ) -> None:
         self._settings = settings
         self._store = store
+        self._redis = redis
         self._config_dir = Path(settings.engine.config_dir)
         self._lock = asyncio.Semaphore(1)
 
@@ -167,6 +187,20 @@ class BacktestService:
         return await asyncio.to_thread(
             self._param_changes, strategy_id, limit, offset
         )
+
+    async def bindings(self, strategy_id: str) -> dict[str, object]:
+        """启停矩阵（MS4-C §4）：策略 × 品种的当前绑定。"""
+        return await asyncio.to_thread(self._bindings_sync, strategy_id)
+
+    async def set_binding(
+        self, strategy_id: str, inst_id: str, req: BindingUpdateRequest
+    ) -> dict[str, object]:
+        """启用/停用或新增绑定，并重建 Redis 缓存让引擎下一轮生效。"""
+        payload = await asyncio.to_thread(
+            self._set_binding_sync, strategy_id, inst_id, req
+        )
+        await self._rebuild_binding_cache()
+        return payload
 
     async def run(self, req: BacktestRequest) -> dict[str, object]:
         async with self._lock:
@@ -314,6 +348,81 @@ class BacktestService:
             raise StrategyParamError("store not configured")
         rows, total = self._store.list_param_changes(strategy_id, limit, offset)
         return {"changes": rows, "total": total}
+
+    def _bindings_sync(self, strategy_id: str) -> dict[str, object]:
+        if self._store is None:
+            raise StrategyParamError("store not configured")
+        # 未知策略在参数面板就该报错，别让空矩阵看起来像「没绑定」
+        self._strategy_detail(strategy_id)
+        ensure_seed(self._store, self._settings, _now_ms())
+        rows = self._store.list_bindings(strategy_id)
+        return {
+            "strategy_id": strategy_id,
+            "default_bar": self._settings.engine.bar,
+            # false 时引擎只跑 [engine] 单组合，页面需要提示矩阵未生效
+            "multi_binding": self._settings.engine.multi_binding,
+            "bindings": [_binding_payload(row) for row in rows],
+        }
+
+    def _set_binding_sync(
+        self, strategy_id: str, inst_id: str, req: BindingUpdateRequest
+    ) -> dict[str, object]:
+        """写绑定；周期冲突必须先解绑（M3-11 的硬要求）。"""
+        if self._store is None:
+            raise StrategyParamError("store not configured")
+        self._strategy_detail(strategy_id)
+
+        inst = inst_id.strip()
+        if not inst:
+            raise StrategyParamError("inst_id is empty")
+        bar = (req.bar or "").strip() or None
+        if bar is not None:
+            try:
+                DataValidator._bar_size_ms(bar)  # type: ignore[attr-defined]
+            except ValueError as e:
+                raise StrategyParamError(f"bar {bar!r} invalid") from e
+
+        existing = self._store.get_binding(strategy_id, inst)
+        if existing is None:
+            bar = bar or self._settings.engine.bar
+            enabled = True if req.enabled is None else req.enabled
+        else:
+            if bar is not None and bar != existing["bar"]:
+                raise StrategyParamError(
+                    f"该组合已绑定 {existing['bar']}，请先解绑再改周期"
+                )
+            bar = str(existing["bar"])
+            enabled = (
+                bool(existing["enabled"]) if req.enabled is None else req.enabled
+            )
+
+        self._store.upsert_binding(strategy_id, inst, bar, enabled, _now_ms())
+        row = self._store.get_binding(strategy_id, inst)
+        return {"binding": _binding_payload(row or {})}
+
+    async def _rebuild_binding_cache(self) -> None:
+        """重建 Redis 绑定缓存；失败时删键，让引擎回落读 SQLite。"""
+        if self._redis is None or self._store is None:
+            return
+        rows = await asyncio.to_thread(self._store.list_bindings)
+        bindings = [
+            Binding(
+                str(row["strategy_id"]),
+                str(row["inst_id"]),
+                str(row["bar"]),
+                bool(row["enabled"]),
+            )
+            for row in rows
+        ]
+        key = self._settings.engine.bindings_key
+        try:
+            await write_cache(self._redis, key, bindings)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"rebuild bindings cache failed: {e}; invalidate key")
+            try:
+                await self._redis.delete(key)
+            except Exception as err:  # noqa: BLE001
+                log.warning(f"invalidate bindings cache failed: {err}")
 
     def check(self, req: BacktestRequest) -> dict:
         """提交任务前的廉价校验（配置存在、日期合法），返回合并后的参数。"""
@@ -585,6 +694,17 @@ def _segment_payload(item: SegmentResult) -> dict[str, object]:
     }
 
 
+def _binding_payload(row: dict) -> dict[str, object]:
+    """绑定行转页面结构；`enabled` 统一成 bool，SQLite 存的是 0/1。"""
+    return {
+        "strategy_id": row.get("strategy_id"),
+        "inst_id": row.get("inst_id"),
+        "bar": row.get("bar"),
+        "enabled": bool(row.get("enabled", 0)),
+        "updated_at": row.get("updated_at"),
+    }
+
+
 def _sort_rank(value: float | int | None) -> float:
     """None 视为最差，保证排序不因 None 抛 TypeError。"""
     return float("-inf") if value is None else float(value)
@@ -650,6 +770,7 @@ __all__ = [
     "BacktestRequest",
     "BacktestRequestError",
     "BacktestService",
+    "BindingUpdateRequest",
     "METRIC_KEYS",
     "OptimizeRequest",
     "ParamUpdateRequest",
