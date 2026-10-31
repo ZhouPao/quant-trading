@@ -22,12 +22,18 @@ from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
 from quant.risk.config import RiskConfig
+from quant.risk.limits import RiskLimits
 from quant.state.sqlite_store import SQLiteStore
 
 
-def _signal(signal_id: str = "sig-1", qty: str = "1", side: str = "buy") -> Signal:
+def _signal(
+    signal_id: str = "sig-1",
+    qty: str = "1",
+    side: str = "buy",
+    strategy_id: str = "sma_cross",
+) -> Signal:
     return Signal(
-        strategy_id="sma_cross",
+        strategy_id=strategy_id,
         side=side,  # type: ignore[arg-type]
         order_type="market",
         inst_id="BTC-USDT",
@@ -344,6 +350,109 @@ class TestWorkerProcess:
         assert store.get_signal_status("sig-1") == "executed"
         # 无成交 → 持仓不变
         assert store.get_position("BTC-USDT").is_flat
+
+
+def _limits(strategy_id: str, **overrides) -> RiskLimits:
+    values = {
+        "max_position_pct": Decimal("0.9"),
+        "max_total_pct": Decimal("0.95"),
+        "max_order_qty": Decimal("100000"),
+        "daily_loss_limit": Decimal("0.5"),
+        "consecutive_loss_limit": 3,
+    }
+    values.update(overrides)
+    return RiskLimits(strategy_id=strategy_id, **values)
+
+
+@pytest.fixture
+def multi_env(tmp_path):
+    """两个策略共用一条队列：参数按信号自带的 strategy_id 路由（M8-8）。"""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    store = SQLiteStore(tmp_path / "quant.db")
+    queue = SignalQueue(redis)
+    configs = {
+        "sma_cross": _risk_config(max_order_qty=Decimal("100000")),
+        # 单笔上限 0.5 USDT：price=100 时最多 0.005 个
+        "rsi_rev": _risk_config(
+            strategy_id="rsi_rev", max_order_qty=Decimal("0.5")
+        ),
+    }
+    limits = {
+        "sma_cross": _limits("sma_cross"),
+        "rsi_rev": _limits("rsi_rev", max_order_qty=Decimal("0.5")),
+    }
+    keys = {sid: f"quant:risk:limits:{sid}" for sid in configs}
+    worker = Worker(
+        queue=queue,
+        risk=RiskChecker(configs["sma_cross"], store),
+        executor=Executor(),
+        store=store,
+        redis=redis,
+        price_provider=lambda inst_id: Decimal("100"),
+        heartbeat_interval=1,
+        overrides_key="quant:risk:overrides",
+        strategy_configs=configs,
+        strategy_limits=limits,
+        risk_limits_keys=keys,
+    )
+    yield worker, queue, store, redis
+    store.close()
+
+
+class TestWorkerMultiStrategy:
+    async def test_each_strategy_uses_own_limits(self, multi_env) -> None:
+        worker, queue, store, _ = multi_env
+        await queue.push(_signal(signal_id="a", strategy_id="sma_cross"))
+        await worker.run_once(timeout=1)
+        assert store.get_position("BTC-USDT").qty == Decimal("1")
+
+        await queue.push(_signal(signal_id="b", strategy_id="rsi_rev"))
+        await worker.run_once(timeout=1)
+
+        # rsi_rev 的单笔上限把它截到 0.005
+        assert store.get_position("BTC-USDT").qty == Decimal("1.005")
+        assert store.get_signal_status("b") == "executed"
+
+    async def test_unknown_strategy_goes_dead(self, multi_env) -> None:
+        worker, queue, store, _ = multi_env
+        await queue.push(_signal(strategy_id="ghost"))
+
+        await worker.run_once(timeout=1)
+
+        assert await queue.dead_length() == 1
+        assert await queue.inflight_length() == 0
+        # 不落 rejected：补齐配置后可以从死信重放
+        assert store.get_signal_status("sig-1") is None
+        assert store.get_position("BTC-USDT").is_flat
+
+    async def test_overrides_apply_per_strategy(self, multi_env) -> None:
+        worker, queue, store, redis = multi_env
+        await redis.hset(
+            "quant:risk:overrides", "rsi_rev:max_order_qty", "0.2"
+        )
+        await worker._refresh_limits()
+
+        await queue.push(_signal(signal_id="b", strategy_id="rsi_rev"))
+        await worker.run_once(timeout=1)
+        assert store.get_position("BTC-USDT").qty == Decimal("0.002")
+
+        # sma_cross 没有覆盖，仍按自己的上限走
+        await queue.push(_signal(signal_id="a", strategy_id="sma_cross"))
+        await worker.run_once(timeout=1)
+        assert store.get_position("BTC-USDT").qty == Decimal("1.002")
+
+    async def test_publishes_limits_per_strategy(self, multi_env) -> None:
+        worker, _, _, redis = multi_env
+
+        await worker._publish_risk_limits()
+
+        for sid in ("sma_cross", "rsi_rev"):
+            raw = await redis.get(f"quant:risk:limits:{sid}")
+            payload = json.loads(raw)
+            assert payload["strategy"] == sid
+            assert payload["ts"] > 0
+        payload = json.loads(await redis.get("quant:risk:limits:rsi_rev"))
+        assert payload["rules"]["max_order_qty"] == "0.5"
 
 
 class TestWorkerRecovery:

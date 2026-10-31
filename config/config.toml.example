@@ -36,7 +36,10 @@ dedup_ttl_seconds = 300                  # 5 分钟（TV 网络异常重发保�
 host = "127.0.0.1"
 port = 8000
 path = "/webhook/tv"
-auth_token = "${WEBHOOK_AUTH_TOKEN:-}"    # TV alert header 校验；空=不校验
+# TV alert 不能自定义请求头，token 可放在 URL(?token=)或 JSON 体 "token" 字段；
+# 也能用 X-Auth-Token 头（自建调用方）。对外监听时至少配一项，否则拒绝启动。
+auth_token = "${WEBHOOK_AUTH_TOKEN:-}"    # 空=不校验（仅限 127.0.0.1）
+hmac_secret = "${WEBHOOK_HMAC_SECRET:-}"  # X-Signature = hex(HMAC-SHA256(body))
 ack_timeout_seconds = 5
 
 [backtest]

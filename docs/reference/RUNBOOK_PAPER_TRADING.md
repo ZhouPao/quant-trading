@@ -40,6 +40,75 @@ API 凭证来自环境变量：`OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSPHRASE`�
 
 worker 在 `demo=false` 启动时会自动复检 Key 权限：查到只读 Key 或开着提币会直接拒绝启动。
 
+### 1.2 接入真实 TradingView webhook（M8-8）
+
+**鉴权**：TradingView 不能给 alert 加自定义请求头，所以 token 只能放在
+URL 查询串或 alert 正文里；两种都支持（`X-Auth-Token` 仍可用于自建调用方）。
+
+```toml
+[webhook]
+host = "127.0.0.1"          # 只让本机反代访问，公网入口交给 Caddy/Nginx
+port = 8000
+path = "/webhook/tv"
+auth_token = "${WEBHOOK_AUTH_TOKEN}"
+```
+
+`serve-webhook` 在 `host` 不是回环地址（`0.0.0.0` 或公网 IP）且
+`auth_token`/`hmac_secret` 都为空时**拒绝启动**——公开端点无鉴权等于把下单权交给互联网。
+
+**反向代理**（Caddy 示例，自动签 TLS；只放行 POST，健康检查除外）：
+
+```caddyfile
+tv.example.com {
+    handle /webhook/tv {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle /health {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+Nginx 对应写法：`location = /webhook/tv { proxy_pass http://127.0.0.1:8000; proxy_set_header X-Forwarded-For $remote_addr; limit_except POST { deny all; } }`。
+
+**TradingView alert 消息模板**（message 里直接填这一行 JSON，token 也可以只放 URL）：
+
+```json
+{"token":"<WEBHOOK_AUTH_TOKEN>","strategy_id":"sma_cross","side":"{{strategy.order.action}}","order_type":"market","inst_id":"BTC-USDT","size_pct":"0.2"}
+```
+
+- 每个策略一个 alert，`strategy_id` 必须与 `config/strategies/{id}.toml` 一致；
+- `qty` 可省略，由服务端按 `size_pct`（缺省 `[execution] default_size_pct`）算量；
+- webhook URL 填 `https://tv.example.com/webhook/tv`，也可以写成
+  `https://tv.example.com/webhook/tv?token=<WEBHOOK_AUTH_TOKEN>`。
+
+**多策略 worker**：一条队列按 `strategy_id` 路由，`--strategy` 逗号声明本进程
+负责哪些策略：
+
+```bash
+quant run-worker --strategy sma_cross,rsi_rev --broker okx --td-mode cash
+# 或交给 supervisor 统一拉起
+quant supervisor --strategy sma_cross,rsi_rev --broker okx --td-mode cash
+```
+
+未声明的 `strategy_id` 会被判为未知策略并进死信（`stage=route`），不会用别的
+策略阈值下单；在死信页确认原因、补齐 `config/strategies/{id}.toml` 后可直接重放。
+
+**验证**：
+
+```bash
+curl -X POST "https://tv.example.com/webhook/tv?token=$WEBHOOK_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy_id":"sma_cross","side":"buy","order_type":"market","inst_id":"BTC-USDT","size_pct":"0.01"}'
+# 期望 {"status":"ok","signal_id":"..."}；401 表示 token 不对
+```
+
+日志里每条 alert 都会带 `client=<真实 IP>`（反代后取 `X-Forwarded-For` 首跳），
+可据此核对来源。重复 alert 由去重键在 5 分钟内吞掉，返回 `duplicate`。
+
 ---
 
 ## 2. 启动进程
@@ -65,7 +134,7 @@ quant run-worker --strategy sma_cross --broker okx --td-mode cash --paper-mode -
 
 | 参数 | 含义 |
 |---|---|
-| `--strategy sma_cross` | 策略 ID，对应 `config/strategies/sma_cross.toml` |
+| `--strategy sma_cross` | 策略 ID，对应 `config/strategies/sma_cross.toml`；多个用逗号分隔（见 1.2） |
 | `--broker okx` | 使用 OKX REST 真实下单（模拟盘） |
 | `--td-mode cash` | 现货模式；合约用 `cross` / `isolated` |
 | `--paper-mode` | 放宽仓位上限到 100%，与回测 sizing 对齐 |

@@ -92,6 +92,10 @@ class WebhookSettings(BaseModel):
     port: int = 8000
     path: str = "/webhook/tv"
     auth_token: str = ""
+    #: HMAC-SHA256 共享密钥（X-Signature 头）；与 auth_token 二选一，
+    #: auth_token 非空时优先。公网端点建议用 HMAC，避免 token 明文写进
+    #: TradingView alert 正文而被平台日志留存。
+    hmac_secret: str = ""
     ack_timeout_seconds: int = 5
 
 

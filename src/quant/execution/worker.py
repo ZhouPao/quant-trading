@@ -71,6 +71,9 @@ class Worker:
             Callable[[str], Awaitable[InstrumentSpec | None]] | None
         ) = None,
         alert_service: AlertService | None = None,
+        strategy_configs: dict[str, RiskConfig] | None = None,
+        strategy_limits: dict[str, RiskLimits] | None = None,
+        risk_limits_keys: dict[str, str] | None = None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -104,6 +107,14 @@ class Worker:
         self.alert_service = alert_service
         self.sizer = sizer
         self.spec_provider = spec_provider
+        # 多策略路由（M8-8）：同一队列里的信号按自身 strategy_id 取对应
+        # 风控参数。为空表示沿用上面注入的单策略配置（原有行为）。
+        self._configs: dict[str, RiskConfig] = dict(strategy_configs or {})
+        self._limits: dict[str, RiskLimits] = dict(strategy_limits or {})
+        self._limit_keys: dict[str, str] = dict(risk_limits_keys or {})
+        # 每策略一个 checker：checker 内部持有 config，直接改写共享实例
+        # 会在 to_thread 执行中被换掉，等于用别的策略的阈值判定
+        self._checkers: dict[str, RiskChecker] = {}
         self._running = False
 
     async def run(self) -> None:
@@ -179,6 +190,20 @@ class Worker:
             await self.queue.remove_inflight(signal)
             return
 
+        # 多策略路由：参数按信号自带的 strategy_id 取，不按进程启动参数。
+        # 未配置的策略直接进死信（可修配置后重放），绝不用别的策略阈值下单。
+        resolved = self._resolve(signal)
+        if resolved is None:
+            reason = (
+                f"unknown strategy: {signal.strategy_id}"
+                f"（已配置 {','.join(sorted(self._configs))}）"
+            )
+            log.warning(f"signal dead-lettered {reason} id={signal.signal_id}")
+            await self.queue.push_dead(signal, reason=reason, stage="route")
+            await self.queue.remove_inflight(signal)
+            return
+        risk, limits = resolved
+
         # 熔断：按品种拒绝（不影响其它品种，也不触发 kill switch）
         if self.circuit is not None:
             state = await self.circuit.state(signal.inst_id)
@@ -197,7 +222,7 @@ class Worker:
                     limit_name="circuit_amplitude_pct",
                 )
                 await asyncio.to_thread(
-                    self.risk.record_event,
+                    risk.record_event,
                     decision,
                     signal,
                     now_ms=int(time.time() * 1000),
@@ -223,7 +248,7 @@ class Worker:
         # 服务端仓位计算（M8-14）：信号没带 qty 时先按权益比例补量。
         # 补出的量仍要过风控（只会被继续下调）与预检，不绕过任何限制。
         if signal.qty is None:
-            sized = await self._size_position(signal, equity, market_price)
+            sized = await self._size_position(signal, equity, market_price, limits)
             if sized is None:
                 rejected = RiskDecision(
                     approved=False,
@@ -233,7 +258,7 @@ class Worker:
                     limit_name="position_sizing",
                 )
                 await asyncio.to_thread(
-                    self.risk.record_event,
+                    risk.record_event,
                     rejected,
                     signal,
                     now_ms=int(time.time() * 1000),
@@ -252,7 +277,7 @@ class Worker:
             # 后续风控、落库、审计统一按服务端算出的量，避免各处口径不一
             signal = replace(signal, qty=sized.qty)
             await asyncio.to_thread(
-                self.risk.record_sized,
+                risk.record_sized,
                 signal,
                 now_ms=int(time.time() * 1000),
                 equity=equity,
@@ -268,7 +293,7 @@ class Worker:
             )
 
         decision = await asyncio.to_thread(
-            self.risk.check,
+            risk.check,
             signal,
             market_price,
             day_start_ms_utc8(),
@@ -276,7 +301,7 @@ class Worker:
         )
         # 审计留痕：只记拒绝/减量/硬停止，写失败不阻断交易
         await asyncio.to_thread(
-            self.risk.record_event,
+            risk.record_event,
             decision,
             signal,
             now_ms=int(time.time() * 1000),
@@ -318,7 +343,7 @@ class Worker:
                     actual_value=pre.actual_value,
                 )
                 await asyncio.to_thread(
-                    self.risk.record_event,
+                    risk.record_event,
                     rejected,
                     signal,
                     now_ms=int(time.time() * 1000),
@@ -388,11 +413,41 @@ class Worker:
         except Exception as e:  # noqa: BLE001
             log.warning(f"publish risk_halt alert failed: {e}")
 
+    def _resolve(
+        self, signal: Signal
+    ) -> tuple[RiskChecker, RiskLimits | None] | None:
+        """按信号 strategy_id 取（checker, 生效限额）。
+
+        未配置多策略时返回注入的单策略 checker；配置了但信号所属策略不在
+        其中时返回 None，由调用方判定为未知策略。
+        """
+        if not self._configs:
+            return self.risk, self._current_limits or self.base_limits
+
+        config = self._configs.get(signal.strategy_id)
+        if config is None:
+            return None
+        checker = self._checkers.get(signal.strategy_id)
+        if checker is None or checker.config is not config:
+            # 重建而不是改写共享 checker：to_thread 里正在跑的判定不能被换参数
+            checker = RiskChecker(
+                config,
+                self.risk.store,
+                self.risk.equity,
+                allow_initial_equity_fallback=(
+                    self.risk.allow_initial_equity_fallback
+                ),
+                event_log=self.risk.event_log,
+            )
+            self._checkers[signal.strategy_id] = checker
+        return checker, self._limits.get(signal.strategy_id)
+
     async def _size_position(
         self,
         signal: Signal,
         equity: Decimal | None,
         price: Decimal | None,
+        limits: RiskLimits | None = None,
     ) -> SizingResult | None:
         """按权益比例算量；没有 sizer 时返回 None（走拒单分支）。
 
@@ -413,7 +468,7 @@ class Worker:
             signal,
             equity,
             price,
-            self._current_limits or self.base_limits,
+            limits or self._current_limits or self.base_limits,
             spec=spec,
         )
 
@@ -448,7 +503,12 @@ class Worker:
         读取失败时**保留上一轮的生效值**——Redis 抖动时若退回配置值，
         阈值会突然收紧（或放宽），比继续用上一次的人工决定更危险。
         """
-        if not self.overrides_key or self.base_limits is None:
+        if not self.overrides_key:
+            return
+        if self._configs:
+            await self._refresh_multi()
+            return
+        if self.base_limits is None:
             return
         try:
             raw = await self.redis.hgetall(self.overrides_key)
@@ -478,20 +538,54 @@ class Worker:
         self.risk_limits = limits_payload(limits, paper_mode=self._paper_mode)
         log.warning(f"risk limits refreshed from overrides fields={changed}")
 
+    async def _refresh_multi(self) -> None:
+        """多策略：逐策略重读覆盖层（字段前缀 `{strategy}:`）。"""
+        try:
+            raw = await self.redis.hgetall(self.overrides_key)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"read risk overrides failed: {e}")
+            return
+
+        for strategy_id, base in list(self._limits.items()):
+            overrides = parse_override_hash(raw, strategy_id)
+            limits = apply_overrides(base, overrides)
+            if limits == base:
+                continue
+            self._limits[strategy_id] = limits
+            self._configs[strategy_id] = RiskConfig(
+                strategy_id=strategy_id,
+                **{name: limits.value(name) for name in LIMIT_FIELDS},  # type: ignore[arg-type]
+            )
+            log.warning(f"risk limits refreshed strategy={strategy_id}")
+
     async def _publish_risk_limits(self) -> None:
         """发布本进程实际生效的风控参数（含 paper-mode 覆盖）。
 
         看板只读该键；TTL 取多个心跳周期，worker 停机后键自然过期，
         卡片据此显示「未知」而不是展示过期的生效值。
         """
+        if self._configs:
+            now = int(time.time() * 1000)
+            for strategy_id, key in self._limit_keys.items():
+                limits = self._limits.get(strategy_id)
+                if limits is None:
+                    continue
+                await self._publish_limits(
+                    key,
+                    {**limits_payload(limits, paper_mode=self._paper_mode), "ts": now},
+                )
+            return
         if not self.risk_limits_key or self.risk_limits is None:
             return
-        payload = {**self.risk_limits, "ts": int(time.time() * 1000)}
+        await self._publish_limits(
+            self.risk_limits_key,
+            {**self.risk_limits, "ts": int(time.time() * 1000)},
+        )
+
+    async def _publish_limits(self, key: str, payload: dict) -> None:
         try:
             await self.redis.set(
-                self.risk_limits_key,
-                json.dumps(payload, ensure_ascii=False),
-                ex=self.risk_limits_ttl,
+                key, json.dumps(payload, ensure_ascii=False), ex=self.risk_limits_ttl
             )
         except Exception as e:  # noqa: BLE001
             # 发布失败不影响交易主流程

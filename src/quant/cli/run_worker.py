@@ -39,7 +39,7 @@ from quant.okx.ws_client import WSClient
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
 from quant.risk.circuit_breaker import CircuitBreaker
-from quant.risk.config import load_risk_config, load_strategy_risk
+from quant.risk.config import RiskConfig, load_risk_config, load_strategy_risk
 from quant.risk.limits import (
     LIMIT_FIELDS,
     RiskLimits,
@@ -129,6 +129,29 @@ def _apply_paper_mode(config):
     )
 
 
+def _paper_mode_limits(limits: RiskLimits, config: RiskConfig) -> RiskLimits:
+    """把 paper-mode 的仓位放宽同步到生效限额，并标注来源为 override。"""
+    merged = {name: limits.value(name) for name in LIMIT_FIELDS}
+    merged["max_position_pct"] = config.max_position_pct
+    merged["max_total_pct"] = config.max_total_pct
+    sources = {name: limits.source(name) for name in LIMIT_FIELDS}
+    sources["max_position_pct"] = "override"
+    sources["max_total_pct"] = "override"
+    return RiskLimits(
+        strategy_id=limits.strategy_id,
+        applied=sources,
+        **merged,  # type: ignore[arg-type]
+    )
+
+
+def _parse_strategies(raw: str) -> list[str]:
+    """把 `--strategy a,b` 解析成去重后的策略列表（保持声明顺序）。"""
+    ids = list(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
+    if not ids:
+        raise ValueError("--strategy 不能为空")
+    return ids
+
+
 def _build_broker(args, settings: Settings, client: OKXClient | None):
     if args.broker == "okx":
         if client is None:
@@ -176,14 +199,40 @@ async def _run(args, settings: Settings) -> int:
         # 死信双写 SQLite，供看板查看与重放（MS4-B §10）
         store=store if settings.storage.dead_letter_persist else None,
     )
-    # 生效参数 = ① 代码默认 / ② 全局 [risk] / ③ 策略 [risk] 取严后的结果
-    risk_config = load_risk_config(
-        args.strategy,
-        config_dir=args.config_dir,
-        defaults=settings.risk,
-    )
-    if args.paper_mode:
-        risk_config = _apply_paper_mode(risk_config)
+    # 生效参数 = ① 代码默认 / ② 全局 [risk] / ③ 策略 [risk] 取严后的结果。
+    # 多策略（M8-8）：--strategy 可用逗号声明多个，信号按自带 strategy_id
+    # 取各自参数；未声明的策略会被 worker 判为未知策略并进死信。
+    strategies = _parse_strategies(args.strategy)
+    strategy_configs: dict[str, RiskConfig] = {}
+    strategy_limits: dict[str, RiskLimits] = {}
+    risk_limit_keys: dict[str, str] = {}
+    for strategy_id in strategies:
+        config = load_risk_config(
+            strategy_id,
+            config_dir=args.config_dir,
+            defaults=settings.risk,
+        )
+        if args.paper_mode:
+            config = _apply_paper_mode(config)
+        limits = resolve_limits(
+            strategy_id,
+            defaults=settings.risk,
+            strategy_risk=load_strategy_risk(
+                strategy_id, config_dir=args.config_dir
+            ),
+        )
+        if args.paper_mode:
+            limits = _paper_mode_limits(limits, config)
+        strategy_configs[strategy_id] = config
+        # 基线 = 合并后的「全局+策略」，paper-mode 覆盖也只存在于本进程。
+        # worker 每轮心跳在其上叠 Redis 在线覆盖层（M7-8）。
+        strategy_limits[strategy_id] = limits
+        risk_limit_keys[strategy_id] = (
+            f"{settings.monitor.risk_limits_key}:{strategy_id}"
+        )
+
+    primary = strategies[0]
+    risk_config = strategy_configs[primary]
     risk = RiskChecker(
         risk_config,
         store,
@@ -194,29 +243,7 @@ async def _run(args, settings: Settings) -> int:
         event_log=settings.risk.event_log,
     )
     # 发布的是「生效值」而非配置文件原值：paper-mode 覆盖只存在于本进程
-    limits = resolve_limits(
-        args.strategy,
-        defaults=settings.risk,
-        strategy_risk=load_strategy_risk(
-            args.strategy, config_dir=args.config_dir
-        ),
-    )
-    if args.paper_mode:
-        # paper-mode 绕过取严直接改生效值，来源记为 override（人工决定）
-        merged = {name: limits.value(name) for name in LIMIT_FIELDS}
-        merged["max_position_pct"] = risk_config.max_position_pct
-        merged["max_total_pct"] = risk_config.max_total_pct
-        sources = {name: limits.source(name) for name in LIMIT_FIELDS}
-        sources["max_position_pct"] = "override"
-        sources["max_total_pct"] = "override"
-        limits = RiskLimits(
-            strategy_id=limits.strategy_id,
-            applied=sources,
-            **merged,  # type: ignore[arg-type]
-        )
-    # 基线 = 合并后的「全局+策略」，paper-mode 覆盖也只存在于本进程。
-    # worker 每轮心跳在其上叠 Redis 在线覆盖层（M7-8）。
-    base_limits = limits
+    base_limits = strategy_limits[primary]
     risk_limits = limits_payload(base_limits, paper_mode=bool(args.paper_mode))
 
     client: OKXClient | None = None
@@ -322,9 +349,7 @@ async def _run(args, settings: Settings) -> int:
             kill_switch=KillSwitch(redis),
             reconcile_interval=reconcile_interval,
             equity_provider=equity_provider,
-            risk_limits_key=(
-                f"{settings.monitor.risk_limits_key}:{args.strategy}"
-            ),
+            risk_limits_key=risk_limit_keys[primary],
             risk_limits=risk_limits,
             risk_limits_ttl=settings.monitor.risk_limits_ttl_seconds,
             circuit=(
@@ -339,10 +364,15 @@ async def _run(args, settings: Settings) -> int:
             sizer=sizer,
             spec_provider=spec_provider,
             alert_service=alert_service,
+            # 多策略：同一队列按 strategy_id 路由到各自阈值（M8-8）
+            strategy_configs=strategy_configs,
+            strategy_limits=strategy_limits,
+            risk_limits_keys=risk_limit_keys,
         )
 
         log.info(
-            f"worker started strategy={args.strategy} broker={args.broker} "
+            f"worker started strategy={','.join(strategies)} "
+            f"broker={args.broker} "
             f"ws={'on' if args.ws else 'off'} "
             f"paper_mode={'on' if args.paper_mode else 'off'} "
             f"max_position_pct={risk_config.max_position_pct} "

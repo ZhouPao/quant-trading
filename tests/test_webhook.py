@@ -212,6 +212,38 @@ class TestWebhookServer:
 
         assert ok.status_code == 200
 
+    async def test_token_accepted_from_query(self, fake_redis) -> None:
+        """TV 无法自定义请求头，凭据可以放在 URL 上（M8-8）。"""
+        client, queue = _client(fake_redis, auth_token="secret-token")
+        async with client:
+            resp = await client.post(
+                "/webhook/tv?token=secret-token", json=VALID
+            )
+
+        assert resp.status_code == 200
+        assert await queue.pending_length() == 1
+
+    async def test_token_accepted_from_body(self, fake_redis) -> None:
+        """TV 也可以把 token 写进 alert message 正文（M8-8）。"""
+        client, queue = _client(fake_redis, auth_token="secret-token")
+        async with client:
+            resp = await client.post(
+                "/webhook/tv", json={**VALID, "token": "secret-token"}
+            )
+
+        assert resp.status_code == 200
+        assert await queue.pending_length() == 1
+
+    async def test_wrong_body_token_rejected(self, fake_redis) -> None:
+        client, queue = _client(fake_redis, auth_token="secret-token")
+        async with client:
+            resp = await client.post(
+                "/webhook/tv", json={**VALID, "token": "nope"}
+            )
+
+        assert resp.status_code == 401
+        assert await queue.pending_length() == 0
+
     async def test_hmac_required(self, fake_redis) -> None:
         body = json.dumps(VALID).encode()
         sig = hmac.new(b"hmac-secret", body, hashlib.sha256).hexdigest()

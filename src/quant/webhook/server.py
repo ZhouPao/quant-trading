@@ -8,9 +8,14 @@
 - 401 鉴权失败
 - 400 解析失败（原始 body 入死信）
 - 200 {"status": "ok" | "duplicate"}
+
+鉴权（M8-8 真 webhook）：TradingView 的 alert 不能自定义请求头，因此
+token 除 `X-Auth-Token` 外还接受 `?token=` 查询参数与 JSON 体里的
+`token` 字段；HMAC 签名只能由能自行构造请求的调用方使用。
 """
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -22,6 +27,35 @@ from quant.webhook.auth import verify_signature, verify_token
 from quant.webhook.parser import AlertParser
 
 log = get_logger("webhook.server")
+
+
+def _request_token(request: Request, body: bytes) -> str:
+    """按「请求头 → 查询参数 → JSON 体」顺序取 token。
+
+    TV 只能配 URL 与 message 正文，后两处是它唯一能带凭证的位置。
+    """
+    token = request.headers.get("X-Auth-Token", "")
+    if token:
+        return token
+    token = request.query_params.get("token", "")
+    if token:
+        return token
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("token") or "")
+    return ""
+
+
+def _client_ip(request: Request) -> str:
+    """真实客户端 IP：反代后取 X-Forwarded-For 第一跳。"""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 
 class WebhookServer:
@@ -62,12 +96,14 @@ class WebhookServer:
         @app.post(self._path)
         async def receive_alert(request: Request) -> dict:
             body = await request.body()
+            client = _client_ip(request)
 
             # 1. 鉴权：token 优先，其次 HMAC
             if self._auth_token:
                 if not verify_token(
-                    request.headers.get("X-Auth-Token", ""), self._auth_token
+                    _request_token(request, body), self._auth_token
                 ):
+                    log.warning(f"rejected alert: invalid token client={client}")
                     raise HTTPException(status_code=401, detail="invalid token")
             elif self._hmac_secret:
                 if not verify_signature(
@@ -75,6 +111,9 @@ class WebhookServer:
                     request.headers.get("X-Signature", ""),
                     self._hmac_secret,
                 ):
+                    log.warning(
+                        f"rejected alert: invalid signature client={client}"
+                    )
                     raise HTTPException(
                         status_code=401, detail="invalid signature"
                     )
@@ -92,6 +131,7 @@ class WebhookServer:
                 await self._queue.push_dead_raw(
                     body.decode("utf-8", errors="replace"), reason=str(e)
                 )
+                log.warning(f"alert parse failed client={client}: {e}")
                 raise HTTPException(
                     status_code=400, detail=f"parse error: {e}"
                 ) from e
@@ -105,7 +145,8 @@ class WebhookServer:
             await self._queue.push(signal)
             log.info(
                 f"signal enqueued strategy={signal.strategy_id} "
-                f"side={signal.side} inst={signal.inst_id} id={signal.signal_id}"
+                f"side={signal.side} inst={signal.inst_id} id={signal.signal_id} "
+                f"client={client}"
             )
             return {"status": "ok", "signal_id": signal.signal_id}
 

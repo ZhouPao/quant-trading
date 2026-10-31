@@ -302,7 +302,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="启动信号消费 worker（spec §9）",
     )
     p_worker.add_argument(
-        "--strategy", required=True, help="策略 ID, 如 sma_cross"
+        "--strategy",
+        required=True,
+        help="策略 ID，如 sma_cross；多个用逗号分隔（信号按 strategy_id 路由）",
     )
     p_worker.add_argument(
         "--config", default="config/config.toml", help="配置文件路径"
@@ -509,7 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="一条命令拉起全部常驻进程，崩溃自动重启（M4 扩展）",
     )
     p_sup.add_argument(
-        "--strategy", default="sma_cross", help="策略 ID（传给 run-worker）"
+        "--strategy", default="sma_cross",
+        help="策略 ID（传给 run-worker；多个用逗号分隔）",
     )
     p_sup.add_argument(
         "--broker",

@@ -26,7 +26,8 @@ from quant.cli.fetch_candles import main as fetch_main
 from quant.cli.fetch_candles import parse_date_to_ms
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
 from quant.cli.fetch_instruments import main as fetch_instruments_main
-from quant.cli.run_worker import _apply_paper_mode
+from quant.cli.run_worker import _apply_paper_mode, _parse_strategies
+from quant.cli.serve_webhook import needs_auth
 from quant.cli.sync_candles import _sync_once
 from quant.cli.validate_data import main as validate_main
 from quant.foundation.config import OKXSettings, Settings, StorageSettings
@@ -847,6 +848,40 @@ class TestApplyPaperMode:
         _apply_paper_mode(config)
         assert config.max_position_pct == Decimal("0.3")
         assert config.max_total_pct == Decimal("0.8")
+
+
+class TestMultiStrategyParsing:
+    """多策略（M8-8）：--strategy 用逗号声明，信号按 strategy_id 路由。"""
+
+    def test_single_strategy(self) -> None:
+        assert _parse_strategies("sma_cross") == ["sma_cross"]
+
+    def test_comma_separated_keeps_order(self) -> None:
+        assert _parse_strategies("b, a ,c") == ["b", "a", "c"]
+
+    def test_duplicates_removed(self) -> None:
+        assert _parse_strategies("a,a,b") == ["a", "b"]
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            _parse_strategies(" , ")
+
+
+class TestWebhookPublicBind:
+    """公网监听必须配鉴权，否则任何人可推送下单信号（M8-8）。"""
+
+    def test_loopback_without_auth_is_allowed(self) -> None:
+        assert needs_auth("127.0.0.1", "", "") is False
+        assert needs_auth("localhost", "", "") is False
+        assert needs_auth("::1", "", "") is False
+
+    def test_public_without_auth_is_refused(self) -> None:
+        assert needs_auth("0.0.0.0", "", "") is True
+        assert needs_auth("203.0.113.7", "", "") is True
+
+    def test_public_with_token_or_hmac_is_allowed(self) -> None:
+        assert needs_auth("0.0.0.0", "tk", "") is False
+        assert needs_auth("0.0.0.0", "", "secret") is False
 
 
 # =====================================================================
