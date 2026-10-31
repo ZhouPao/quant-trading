@@ -690,6 +690,12 @@ class TestBuildParserNewCommands:
         assert args.broker == "mock"
         assert args.ws is False
 
+    def test_check_live_parsed(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["check-live"])
+        assert args.command == "check-live"
+        assert args.config == "config/config.toml"
+
     def test_run_worker_paper_mode_flag(self) -> None:
         parser = build_parser()
         args = parser.parse_args(

@@ -22,6 +22,24 @@ quant kill-switch --status
 配置文件：`config/config.toml`，其中 `[okx] demo = true` 表示模拟盘。
 API 凭证来自环境变量：`OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSPHRASE`。
 
+### 1.1 切换到实盘（M8-7）
+
+模拟盘验证通过后按下面顺序切；任何一步不满足都不要改 `demo`：
+
+1. OKX 后台建**子账户** API Key：只勾「读取 + 交易」，**不要勾提币**，并绑定服务器公网 IP。
+2. 把新 Key 写入 `.env` 的 `OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSPHRASE`。
+3. `config/config.toml` 把 `[okx] demo` 改为 `false`。
+4. 跑自检，必须没有 `[FAIL]`（主账户、未绑 IP 只给 `[WARN]`）：
+
+   ```bash
+   quant check-live
+   ```
+
+5. 重启 supervisor 拉起的进程；看板顶栏 `MODE` 应显示红色「实盘」，标题栏为「实盘 · 真实资金」。
+6. 首次实盘先在看板执行页用最小数量手工下一单，确认成交与持仓后，再恢复自动策略。
+
+worker 在 `demo=false` 启动时会自动复检 Key 权限：查到只读 Key 或开着提币会直接拒绝启动。
+
 ---
 
 ## 2. 启动进程

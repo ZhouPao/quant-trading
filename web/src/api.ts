@@ -7,6 +7,7 @@ export type Heartbeat = {
 export type Overview = {
   ts: number;
   snapshot_ts: number | null;
+  trading_mode: "demo" | "live";
   snapshot_age_seconds: number | null;
   account: {
     total_equity: string;

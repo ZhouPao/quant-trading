@@ -139,9 +139,25 @@ class TestOverview:
             "known": True,
         }
         assert overview["orders"] == {}
+        # 交易环境来自配置：默认 demo=true，看板据此显示模拟盘（M8-7）
+        assert overview["trading_mode"] == "demo"
         # 快照缺失时账户列会变空，必须显式降级而不是静默显示 —
         assert overview["degraded"] == ["snapshot"]
         assert overview["positions_count"] == 0
+
+    async def test_trading_mode_is_live_when_demo_off(self, tmp_path) -> None:
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SQLiteStore(tmp_path / "quant.db")
+        settings = Settings(
+            okx=OKXSettings(api_key="k", secret="s", passphrase="p", demo=False)
+        )
+        service = DashboardService(store, redis, settings)
+        try:
+            overview = await service.overview()
+
+            assert overview["trading_mode"] == "live"
+        finally:
+            store.close()
 
     async def test_reads_published_snapshot(self, env) -> None:
         service, _store, redis, settings = env

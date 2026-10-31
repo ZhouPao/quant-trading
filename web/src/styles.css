@@ -130,6 +130,11 @@ code {
   letter-spacing: 0.14em;
 }
 
+/* 实盘模式：标题栏与 M8-7 自检的提醒同色，避免误认成模拟盘 */
+.brand-sub.brand-live {
+  color: var(--bad);
+}
+
 .topmeta {
   display: flex;
   align-items: center;

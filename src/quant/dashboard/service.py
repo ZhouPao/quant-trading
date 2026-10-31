@@ -495,6 +495,9 @@ class DashboardService:
         return {
             "ts": now,
             "snapshot_ts": snapshot_ts,
+            # 交易环境：来自配置而非快照。看板据此把「实盘」标红，
+            # 避免在真实资金下误以为是模拟盘（M8-7）。
+            "trading_mode": "demo" if self._settings.okx.demo else "live",
             "snapshot_age_seconds": _age_seconds(snapshot_ts, now),
             "account": snapshot.get("account") if snapshot else None,
             "metrics": snapshot.get("metrics") if snapshot else None,

@@ -257,6 +257,18 @@ class OKXClient:
             return []
         return data
 
+    def get_account_config(self) -> dict:
+        """查询账户配置（M8-7 实盘自检）。
+
+        端点：GET /api/v5/account/config
+        返回 data[0]，含 uid/mainUid（子账户）、perm（权限）、ip（绑定 IP）、
+        acctLv（账户模式）等字段。
+        """
+        data = self.get("/api/v5/account/config")
+        if not isinstance(data, list) or not data:
+            return {}
+        return data[0]
+
     def get_error_rate(self) -> float | None:
         """累计请求错误率（0~1）；尚无请求时返回 None（M4 监控）。
 

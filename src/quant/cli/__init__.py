@@ -16,6 +16,7 @@ import sys
 from quant.cli.align_data import main as align_data_main
 from quant.cli.backtest import main as backtest_main
 from quant.cli.check_data import main as check_data_main
+from quant.cli.check_live import main as check_live_main
 from quant.cli.dashboard import main as dashboard_main
 from quant.cli.fetch_candles import main as fetch_candles_main
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
@@ -493,6 +494,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # check-live
+    p_live = sub.add_parser(
+        "check-live",
+        help="实盘接入自检：Key 权限（交易/提币）、子账户、IP 绑定",
+    )
+    p_live.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     # supervisor
     p_sup = sub.add_parser(
         "supervisor",
@@ -584,6 +594,8 @@ def main(argv: list[str] | None = None) -> int:
         return validate_data_main(args)
     elif args.command == "check-data":
         return check_data_main(args)
+    elif args.command == "check-live":
+        return check_live_main(args)
     elif args.command == "align-data":
         return align_data_main(args)
     elif args.command == "serve-webhook":

@@ -545,6 +545,8 @@ export default function App() {
   const stale =
     overview !== undefined &&
     (overview.snapshot_age_seconds === null || overview.snapshot_age_seconds > 180);
+  // 实盘/模拟盘来自配置（settings.okx.demo），与快照无关；拿不到时按未知处理
+  const liveMode = overview?.trading_mode === "live";
 
   return (
     <div className="shell">
@@ -554,7 +556,13 @@ export default function App() {
           <span className="brand-mark">Q</span>
           <div className="brand-text">
             <span className="brand-title">QUANT / OPS</span>
-            <span className="brand-sub">模拟盘只读终端</span>
+            <span className={liveMode ? "brand-sub brand-live" : "brand-sub"}>
+              {overview === undefined
+                ? "交易终端"
+                : liveMode
+                  ? "实盘 · 真实资金"
+                  : "模拟盘终端"}
+            </span>
           </div>
         </div>
         <div className="topmeta">
@@ -565,6 +573,14 @@ export default function App() {
       </header>
 
       <div className="rail" role="status" aria-live="polite">
+        <Chip
+          label="MODE"
+          value={
+            overview === undefined ? "—" : liveMode ? "实盘" : "模拟盘"
+          }
+          tone={overview === undefined ? "idle" : liveMode ? "bad" : "idle"}
+          note={liveMode ? "真实资金" : "OKX 模拟盘"}
+        />
         <Chip
           label="KILL SWITCH"
           value={

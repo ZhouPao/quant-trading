@@ -655,6 +655,25 @@ class TestOKXClientHighLevelMethods:
         with patch.object(c._client, "get", return_value=mock_resp):
             assert c.get_positions() == []
 
+    def test_get_account_config_returns_dict(self):
+        """get_account_config 应返回 data[0]（M8-7 实盘自检）。"""
+        c = _make_client_no_sync()
+        okx_data = [{"uid": "1002", "mainUid": "1001", "perm": "read_only,trade"}]
+        mock_resp = httpx.Response(
+            200, json={"code": "0", "msg": "", "data": okx_data}
+        )
+        with patch.object(c._client, "get", return_value=mock_resp) as mock_get:
+            result = c.get_account_config()
+        assert result == okx_data[0]
+        assert "/api/v5/account/config" in mock_get.call_args.args[0]
+
+    def test_get_account_config_empty_returns_empty_dict(self):
+        """账户配置空数据应返回空 dict，交给自检按「未知」处理。"""
+        c = _make_client_no_sync()
+        mock_resp = httpx.Response(200, json={"code": "0", "msg": "", "data": []})
+        with patch.object(c._client, "get", return_value=mock_resp):
+            assert c.get_account_config() == {}
+
     def test_get_error_rate_none_without_requests(self):
         """无请求时 get_error_rate 应返回 None。"""
         c = _make_client_no_sync()

@@ -29,10 +29,12 @@ from quant.execution.reconciler import Reconciler
 from quant.execution.sizing import InstrumentSpec, PositionSizer
 from quant.execution.worker import Worker
 from quant.foundation.config import Settings
+from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger, setup_logger
 from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import EmailAlerter
 from quant.okx.client import OKXClient
+from quant.okx.live_check import FAIL, WARN, has_failures, run_checks
 from quant.okx.ws_client import WSClient
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
@@ -135,6 +137,32 @@ def _build_broker(args, settings: Settings, client: OKXClient | None):
     return Executor(settings.backtest.commission_rate)
 
 
+def _check_live_startup(client: OKXClient) -> bool:
+    """实盘启动自检（M8-7）：Key 必须「只开交易+读取、不开提币」。
+
+    与 `quant check-live` 共用判定。查到的权限不合规直接拒绝启动；
+    网络/鉴权失败只告警放行——不能因为一次抖动让进程起不来，
+    鉴权问题会在随后下单时暴露。
+    """
+    log = get_logger("cli.run_worker")
+    log.warning("实盘模式：下单将进入真实账户，确认 [okx] demo=false 是预期设置")
+    try:
+        items = run_checks(client)
+    except QuantError as e:
+        log.warning(f"实盘自检失败（{e}），继续启动；请手动执行 quant check-live")
+        return True
+    for item in items:
+        if item.status == FAIL:
+            log.error(f"实盘自检未通过 {item.name}: {item.detail}")
+        elif item.status == WARN:
+            log.warning(f"实盘自检提醒 {item.name}: {item.detail}")
+    if has_failures(items):
+        log.error("实盘 Key 权限不合规，拒绝启动（要求只开交易+读取、不开提币）")
+        return False
+    log.info("实盘自检通过：Key 权限符合要求")
+    return True
+
+
 async def _run(args, settings: Settings) -> int:
     log = get_logger("cli.run_worker")
 
@@ -201,6 +229,8 @@ async def _run(args, settings: Settings) -> int:
     try:
         if args.broker == "okx":
             client = OKXClient(settings.okx)
+            if not settings.okx.demo and not _check_live_startup(client):
+                return 1
         broker = _build_broker(args, settings, client)
         # 告警服务同时供 worker（风控硬停止）与对账（差异）使用
         alert_service = AlertService(
