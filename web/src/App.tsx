@@ -137,6 +137,55 @@ const ALERT_LEVEL_RANK: Record<string, number> = {
   INFO: 1,
 };
 
+// 左侧导航即 PRD §2.2 的 10 个模块，顺序与第 4 章需求分节一一对应
+const TABS = [
+  { key: "overview", label: "首页总览", status: "live" },
+  { key: "market", label: "市场监控", status: "live" },
+  { key: "strategy", label: "策略研究", status: "live" },
+  { key: "backtest", label: "回测分析", status: "live" },
+  { key: "factors", label: "因子库", status: "todo" },
+  { key: "portfolio", label: "组合管理", status: "todo" },
+  { key: "risk", label: "风险控制", status: "live" },
+  { key: "execution", label: "交易执行", status: "live" },
+  { key: "logs", label: "日志告警", status: "live" },
+  { key: "settings", label: "系统设置", status: "todo" },
+] as const;
+
+type TabKey = (typeof TABS)[number]["key"];
+type PendingTab = "factors" | "portfolio" | "settings";
+
+const TAB_KEY = "quant.dashboard.tab";
+
+function loadTab(): TabKey {
+  const raw = window.localStorage.getItem(TAB_KEY);
+  return TABS.some((item) => item.key === raw) ? (raw as TabKey) : "overview";
+}
+
+// 尚未实现的模块只展示范围说明，避免空白页让人误以为功能已就绪
+const PENDING_MODULES: Record<
+  PendingTab,
+  { title: string; code: string; detail: string; items: string[] }
+> = {
+  factors: {
+    title: "因子库",
+    code: "M5",
+    detail: "因子注册、时序/横截面计算与缓存、有效性检验。",
+    items: ["因子注册表与元数据", "时序 / 横截面双范围计算", "IC / 分层回测等有效性检验"],
+  },
+  portfolio: {
+    title: "组合管理",
+    code: "M6",
+    detail: "多策略 × 多品种的权重、资金分配、再平衡与归因。",
+    items: ["equal / fixed / inverse_vol / vol_target 四种分配法", "再平衡冷却期", "收益归因"],
+  },
+  settings: {
+    title: "系统设置",
+    code: "M10",
+    detail: "配置只读与白名单热改、凭证健康、保留分档、进程控制、备份自检。",
+    items: ["配置视图与白名单热改", "凭证健康检查", "数据保留与备份自检"],
+  },
+};
+
 // 回测历史只存指标摘要（不存权益曲线与成交），避免撑爆 localStorage
 const HISTORY_KEY = "quant.backtest.history.v1";
 const HISTORY_LIMIT = 20;
@@ -219,7 +268,17 @@ export default function App() {
   const [riskError, setRiskError] = useState<string | null>(null);
   // 人工恢复熔断后立即重取，不必等下一次轮询
   const [riskRefresh, setRiskRefresh] = useState(0);
+  const [tab, setTab] = useState<TabKey>(loadTab);
   const timer = useRef<number | null>(null);
+
+  const selectTab = useCallback((next: TabKey) => {
+    setTab(next);
+    try {
+      window.localStorage.setItem(TAB_KEY, next);
+    } catch {
+      // 隐私模式下不持久化，切换仍然生效
+    }
+  }, []);
 
   const load = useCallback(async (signal: AbortSignal) => {
     try {
@@ -447,7 +506,32 @@ export default function App() {
         </div>
       )}
 
+      <div className="layout">
+        <aside className="sidebar">
+          <nav aria-label="模块导航">
+            <span className="nav-title">模块</span>
+            <ul className="nav-list">
+              {TABS.map((item, index) => (
+                <li key={item.key}>
+                  <button
+                    type="button"
+                    className={`nav-item ${tab === item.key ? "nav-on" : ""}`}
+                    aria-current={tab === item.key ? "page" : undefined}
+                    onClick={() => selectTab(item.key)}
+                  >
+                    <span className="nav-idx">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="nav-label">{item.label}</span>
+                    {item.status === "todo" && <span className="nav-tag">未开始</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        </aside>
+
       <main className="grid">
+        {tab === "overview" && (
+          <>
         <section className="card hero reveal" style={{ animationDelay: "40ms" }}>
           <div className="card-head">
             <h2>账户权益</h2>
@@ -548,7 +632,11 @@ export default function App() {
             />
           </div>
         </section>
+          </>
+        )}
 
+        {tab === "risk" && (
+          <>
         <section className="card risk-limits reveal" style={{ animationDelay: "105ms" }}>
           <div className="card-head">
             <h2>风控限额</h2>
@@ -576,17 +664,22 @@ export default function App() {
           </div>
           <KillSwitchPanel state={overview?.kill_switch} />
         </section>
+          </>
+        )}
 
-        <EnginePanel engine={data?.engine} />
+        {tab === "strategy" && <EnginePanel engine={data?.engine} />}
 
-        <ChartPanel />
+        {tab === "market" && <ChartPanel />}
 
-        <BacktestPanel />
+        {tab === "backtest" && <BacktestPanel />}
 
+        {tab === "execution" && (
         <section className="card positions reveal" style={{ animationDelay: "140ms" }}>
           <PositionsPanel rows={positions} />
         </section>
+        )}
 
+        {tab === "logs" && (
         <section className="card alerts reveal" style={{ animationDelay: "190ms" }}>
           <div className="card-head">
             <h2>告警</h2>
@@ -596,7 +689,10 @@ export default function App() {
           </div>
           <AlertPanel alerts={alerts} />
         </section>
+        )}
 
+        {tab === "execution" && (
+          <>
         <section className="card dead reveal" style={{ animationDelay: "215ms" }}>
           <DeadLettersPanel />
         </section>
@@ -612,7 +708,10 @@ export default function App() {
           </div>
           <PnlPanel pnl={data?.pnl} />
         </section>
+          </>
+        )}
 
+        {tab === "backtest" && (
         <section className="card reports reveal" style={{ animationDelay: "280ms" }}>
           <div className="card-head">
             <h2>模拟盘日报</h2>
@@ -624,7 +723,9 @@ export default function App() {
           </div>
           <ReportsPanel reports={reports} />
         </section>
+        )}
 
+        {tab === "market" && (
         <section className="card quality reveal" style={{ animationDelay: "300ms" }}>
           <div className="card-head">
             <h2>数据质量</h2>
@@ -636,7 +737,10 @@ export default function App() {
           </div>
           <QualityPanel quality={quality} />
         </section>
+        )}
 
+        {tab === "execution" && (
+          <>
         <section className="card orders reveal" style={{ animationDelay: "280ms" }}>
           <div className="card-head">
             <h2>最近订单</h2>
@@ -664,7 +768,14 @@ export default function App() {
             rows={fills.map((row) => fillCells(row))}
           />
         </section>
+          </>
+        )}
+
+        {(tab === "factors" || tab === "portfolio" || tab === "settings") && (
+          <ModulePlaceholder tab={tab} />
+        )}
       </main>
+      </div>
 
       <footer className="footer">
         <span>只读终端 · 每 {POLL_MS / 1000}s 轮询</span>
@@ -673,6 +784,25 @@ export default function App() {
         </span>
       </footer>
     </div>
+  );
+}
+
+/** 未开始模块的占位卡：只说明范围，不提供任何写操作。 */
+function ModulePlaceholder({ tab }: { tab: PendingTab }) {
+  const meta = PENDING_MODULES[tab];
+  return (
+    <section className="card placeholder reveal">
+      <div className="card-head">
+        <h2>{meta.title}</h2>
+        <span className="card-note">PRD {meta.code} · 未开始</span>
+      </div>
+      <p className="placeholder-text">{meta.detail}</p>
+      <ul className="placeholder-list">
+        {meta.items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -706,6 +836,9 @@ function RiskLimitsPanel({
     );
   }
 
+  // 旧后端可能尚未返回 circuits，这里兜底为空数组
+  const circuits = risk.circuits ?? [];
+
   const resume = async (instId: string) => {
     setBusy(instId);
     setMsg(null);
@@ -731,9 +864,9 @@ function RiskLimitsPanel({
 
   return (
     <>
-      {risk.circuits.length > 0 && (
+      {circuits.length > 0 && (
         <div className="risk-circuits">
-          {risk.circuits.map((item) => {
+          {circuits.map((item) => {
             const awaiting = item.status === "awaiting_resume";
             return (
               <div className="risk-circuit" key={item.inst_id}>

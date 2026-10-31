@@ -247,6 +247,143 @@ code {
 
 /* ---------------- layout ---------------- */
 
+.layout {
+  display: grid;
+  grid-template-columns: 204px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.sidebar {
+  position: sticky;
+  top: 16px;
+  align-self: start;
+}
+
+.nav-title {
+  display: block;
+  margin-bottom: 8px;
+  padding-left: 12px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+
+.nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--dim);
+  font-family: var(--body);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.nav-item:hover {
+  color: var(--ink);
+  background: rgba(226, 240, 228, 0.04);
+}
+
+.nav-item.nav-on {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(200, 242, 79, 0.06);
+}
+
+.nav-idx {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dimmer);
+}
+
+.nav-item.nav-on .nav-idx {
+  color: var(--accent);
+}
+
+.nav-label {
+  flex: 1;
+}
+
+.nav-tag {
+  padding: 2px 4px;
+  border: 1px solid var(--line-strong);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  color: var(--dimmer);
+}
+
+.placeholder {
+  grid-column: 1 / -1;
+}
+
+.placeholder-text {
+  margin: 0 0 12px;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.placeholder-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+@media (max-width: 1080px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .nav-list {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 4px;
+    padding-bottom: 4px;
+  }
+
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .nav-item.nav-on {
+    border-left-color: transparent;
+    border-bottom-color: var(--accent);
+  }
+
+  .nav-tag {
+    display: none;
+  }
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));

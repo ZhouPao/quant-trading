@@ -639,7 +639,9 @@ export async function fetchAll(signal: AbortSignal) {
 
 /** 风控限额单独拉取：后端尚未部署该接口时不能拖垮整个页面。 */
 export async function fetchRiskLimits(signal: AbortSignal) {
-  return getJson<RiskLimitsResponse>("/api/risk-limits", signal);
+  const data = await getJson<RiskLimitsResponse>("/api/risk-limits", signal);
+  // 兼容旧后端：尚未返回 circuits 字段时补空数组，避免渲染期崩溃
+  return { ...data, circuits: data.circuits ?? [] };
 }
 
 export type RiskOverrideItem = {
