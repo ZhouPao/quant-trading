@@ -644,6 +644,34 @@ export async function fetchRiskLimits(signal: AbortSignal) {
   return { ...data, circuits: data.circuits ?? [] };
 }
 
+export type ProcessItem = {
+  name: string;
+  online: boolean;
+  last_ts: number | null;
+  age_seconds: number | null;
+  pid: number | null;
+  restarts: number | null;
+  last_exit_code: number | null;
+  interval_seconds: number;
+  /** no_key / not_managed 等判定原因 */
+  reason?: string | null;
+};
+
+export type ProcessesResponse = {
+  ts: number;
+  processes: ProcessItem[];
+  online: number;
+  total: number;
+  offline: string[];
+  degraded: string[];
+};
+
+/** M1-5：7 个常驻进程各自心跳，判活逻辑全在后端。 */
+export async function fetchProcesses(signal: AbortSignal) {
+  const data = await getJson<ProcessesResponse>("/api/processes", signal);
+  return { ...data, processes: data.processes ?? [] };
+}
+
 export type RiskOverrideItem = {
   id: number;
   strategy_id: string;

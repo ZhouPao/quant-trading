@@ -12,6 +12,7 @@ import {
   fetchParamChanges,
   fetchQuality,
   fetchQualityReport,
+  fetchProcesses,
   fetchReports,
   fetchRiskLimits,
   fetchRiskOverrides,
@@ -57,6 +58,7 @@ import {
   type ReportItem,
   type ReportsResponse,
   type PositionRow,
+  type ProcessesResponse,
   type RiskLimitRule,
   type RiskLimitsResponse,
   type RiskOverridesResponse,
@@ -269,6 +271,8 @@ export default function App() {
   // 人工恢复熔断后立即重取，不必等下一次轮询
   const [riskRefresh, setRiskRefresh] = useState(0);
   const [tab, setTab] = useState<TabKey>(loadTab);
+  // M1-5 进程健康：进程心跳变化比行情慢，15s 一拉即可
+  const [processes, setProcesses] = useState<ProcessesResponse | null>(null);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -383,6 +387,25 @@ export default function App() {
     };
   }, [riskRefresh]);
 
+  // M1-5：7 个进程心跳，接口失败只影响这张卡
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchProcesses(controller.signal)
+        .then(setProcesses)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setProcesses(null);
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, 15_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, []);
+
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
   const orders = data?.orders.orders ?? [];
@@ -405,11 +428,22 @@ export default function App() {
     [overview, data, risk, equity, reports, quality],
   );
   const alertStats = useMemo(() => {
-    let error = 0;
+    const byLevel: Record<string, number> = {};
+    const byRule = new Map<string, number>();
     for (const alert of alerts) {
-      if (alert.level.toUpperCase() === "ERROR") error += 1;
+      const level = alert.level.toUpperCase();
+      byLevel[level] = (byLevel[level] ?? 0) + 1;
+      byRule.set(alert.rule, (byRule.get(alert.rule) ?? 0) + 1);
     }
-    return { total: alerts.length, error };
+    const rules = [...byRule.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    return {
+      total: alerts.length,
+      error: byLevel.ERROR ?? 0,
+      byLevel,
+      rules,
+    };
   }, [alerts]);
 
   const stale =
@@ -631,6 +665,98 @@ export default function App() {
               tone="neutral"
             />
           </div>
+        </section>
+
+        <section className="card pos-summary reveal" style={{ animationDelay: "105ms" }}>
+          <div className="card-head">
+            <h2>持仓摘要</h2>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => selectTab("execution")}
+            >
+              去交易执行 {positions.length} 个品种 →
+            </button>
+          </div>
+          <Table
+            empty={positions.length === 0}
+            emptyHint="当前无持仓"
+            head={["品种", "方向", "数量", "开仓均价", "未实现盈亏", "杠杆"]}
+            rows={positions.map((row) => positionSummaryCells(row))}
+            onRowClick={() => selectTab("execution")}
+          />
+        </section>
+
+        <section className="card alert-summary reveal" style={{ animationDelay: "115ms" }}>
+          <div className="card-head">
+            <h2>告警摘要</h2>
+            <span className="card-note">最近 {alerts.length} 条 · 已读状态待 M9-7</span>
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => selectTab("logs")}
+            >
+              查看全部 →
+            </button>
+          </div>
+          <div className="metric-grid">
+            <Metric
+              label="ERROR"
+              value={String(alertStats.byLevel.ERROR ?? 0)}
+              hint="需立即处理"
+              tone={(alertStats.byLevel.ERROR ?? 0) > 0 ? "bad" : "good"}
+            />
+            <Metric
+              label="WARNING"
+              value={String(alertStats.byLevel.WARNING ?? 0)}
+              hint="待观察"
+              tone={(alertStats.byLevel.WARNING ?? 0) > 0 ? "warn" : "good"}
+            />
+            <Metric
+              label="INFO"
+              value={String(alertStats.byLevel.INFO ?? 0)}
+              hint="仅记录"
+              tone="neutral"
+            />
+          </div>
+          {alertStats.rules.length > 0 && (
+            <ul className="alert-rules">
+              {alertStats.rules.map(([rule, count]) => (
+                <li key={rule}>
+                  <span className="mono">{rule}</span>
+                  <b>{count}</b>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="card process-health reveal" style={{ animationDelay: "125ms" }}>
+          <div className="card-head">
+            <h2>进程健康</h2>
+            <span className="card-note">
+              {processes
+                ? `${processes.online} / ${processes.total} 在线${
+                    processes.offline.length > 0
+                      ? ` · 离线 ${processes.offline.join(" / ")}`
+                      : ""
+                  }`
+                : "接口不可用"}
+            </span>
+          </div>
+          <ProcessGrid processes={processes} />
+          {data?.engine && (
+            <p className="proc-engine mono">
+              engine 当前周期 {data.engine.strategy} · {data.engine.inst} ·{" "}
+              {data.engine.bar}
+              {data.engine.watermark_age_seconds === null
+                ? " · 尚未评估"
+                : ` · 最近评估 ${age(data.engine.watermark_age_seconds)} 前`}
+              {data.engine.lag_bars !== null
+                ? ` · 落后 ${data.engine.lag_bars} 根`
+                : ""}
+            </p>
+          )}
         </section>
           </>
         )}
@@ -3601,6 +3727,24 @@ function AlertItem({ alert }: { alert: AlertRow }) {
   );
 }
 
+/** M1-2 持仓摘要：只读，跳转交易执行做实际减仓/平仓。 */
+function positionSummaryCells(row: PositionRow): ReactNode[] {
+  const qty = Number(row.local_qty ?? row.qty ?? 0);
+  const pnl = row.unrealized_pnl ?? row.strategy_unrealized_pnl;
+  return [
+    <span key="inst" className="mono strong">{row.inst_id}</span>,
+    <span key="side" className={qty >= 0 ? "long" : "short"}>
+      {qty >= 0 ? "多头" : "空头"}
+    </span>,
+    <span key="qty" className="mono">{compactQty(row.local_qty ?? row.qty)}</span>,
+    <span key="avg" className="mono">{num(row.local_avg_price ?? row.avg_price, 2)}</span>,
+    <span key="upl" className={`mono ${sign(pnl)}`}>{num(pnl, 2)}</span>,
+    <span key="lev" className="mono">
+      {row.leverage ? `${num(row.leverage, 0)}x` : "—"}
+    </span>,
+  ];
+}
+
 function positionCells(row: PositionRow): ReactNode[] {
   return [
     <span key="inst" className="mono strong">{row.inst_id}</span>,
@@ -3664,6 +3808,42 @@ function StatusTag({ status }: { status: string }) {
     rejected: "tag-bad",
   };
   return <span className={`tag ${map[status] ?? "tag-muted"}`}>{status}</span>;
+}
+
+/** M1-5 进程健康：判活与 TTL 全在后端，前端只负责呈现。 */
+function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
+  if (!processes) {
+    return <div className="empty">/api/processes 不可用，无法判断进程状态</div>;
+  }
+  return (
+    <div className="proc-grid">
+      {processes.processes.map((item) => (
+        <div
+          key={item.name}
+          className={`proc-item ${item.online ? "proc-on" : "proc-off"}`}
+        >
+          <div className="proc-top">
+            <span className="proc-dot" />
+            <span className="proc-name mono">{item.name}</span>
+            <span className="proc-state">{item.online ? "在线" : "离线"}</span>
+          </div>
+          <span className="proc-meta mono">
+            {item.online
+              ? item.age_seconds === null
+                ? "刚启动"
+                : `心跳 ${age(item.age_seconds)} 前`
+              : item.reason === "not_managed"
+                ? "未托管"
+                : "无心跳"}
+          </span>
+          <span className="proc-meta mono">
+            pid {item.pid ?? "—"}
+            {item.restarts !== null ? ` · 重启 ${item.restarts}` : ""}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function heartbeatNote(seconds: number | null | undefined): string {

@@ -165,11 +165,11 @@
 | M1-2 | 持仓摘要 | 各品种方向、数量、开仓均价、未实现盈亏、杠杆；一行一品种，可跳转交易执行 | F5.2 | ✅ |
 | M1-3 | 风险摘要 | 保证金率、实时最大回撤、强平价距离、撤单率；超标项用颜色区分 | F5.3 | ✅ |
 | M1-4 | 权益曲线 | 近 24 小时 / 7 天 / 30 天三档切换（默认 24h）；数据来自 `equity_snapshots`，保留 365 天 | 新增 | ✅ |
-| M1-5 | 进程与引擎健康 | **7 个进程各自心跳**（supervisor/candles/webhook/worker/engine/monitor/dashboard）+ engine 当前周期与最近评估时间；任一进程心跳过期即标红。**后端 `GET /api/processes` 已就绪**，看板暂无该卡片 | 新增 | 🟡 |
+| M1-5 | 进程与引擎健康 | **7 个进程各自心跳**（supervisor/candles/webhook/worker/engine/monitor/dashboard）+ engine 当前周期与最近评估时间；任一进程心跳过期即标红。看板「进程健康」卡按 `/api/processes` 呈现 7 进程在线/心跳/pid/重启次数，并附 engine 当前策略·品种·周期、最近评估与落后根数 | 新增 | ✅ |
 | M1-6 | 今日事件流 | 当日信号/下单/成交/告警按时间倒序合并成一条流；支持按类型筛选；点击可跳到对应模块 | 新增 | ⬜ |
 | M1-7 | 数据新鲜度 | 引擎消费的 `品种 × 周期` 最新已收盘 bar 时间与滞后根数；超过阈值标红并提示「engine 落后 N 根」 | 新增 | ⬜ |
 | M1-8 | 今日盈亏汇总 | 当日已实现盈亏 + 未实现盈亏变化 + 手续费，按品种拆分；口径与 M4 回测指标一致 | 新增 | ⬜ |
-| M1-9 | 告警摘要卡 | 未读 ERROR / WARNING 计数，按规则分组；点击跳转告警列表（M9-5）；已读状态由 M9-7 提供 | 新增 | 🟡 |
+| M1-9 | 告警摘要卡 | 未读 ERROR / WARNING 计数，按规则分组；点击跳转告警列表（M9-5）；已读状态由 M9-7 提供。看板已有「告警摘要」卡（按级别计数 + Top5 规则，点击跳日志告警），**未读状态仍依赖 M9-7** | 新增 | 🟡 |
 | M1-10 | 降级与时效标注 | 任一数据源读取失败或键过期，卡片显示「数据截至 HH:MM」并列出降级项；不允许把缺失静默渲染成 0 或「—」 | 新增 | 🟡 |
 
 **进程心跳规范**：每个进程启动时写 `quant:process:{name}`（pid、started_at），运行期间按各自轮询间隔刷新 `quant:heartbeat:{name}`（TTL = 2 × 间隔）。dashboard 读取 7 个键，缺失或过期即 `status=down`；supervisor 额外记录 `restarts` 计数供排查重启风暴。
@@ -1020,3 +1020,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 17，熔断人工确认恢复落地） | M7-12 由 ⬜ 改 ✅：熔断键改为不设 TTL，冷却到期后 `status` 跃迁为 `awaiting_resume`，引擎与 worker 继续拦截该品种；新增 `DashboardService.resume_circuit()` 与 `POST /api/risk/circuits/{inst_id}/resume`（写操作守卫），只允许冷却结束后调用，恢复时写 `decision=resumed` 的 `risk_events` 并发 INFO 告警；看板「风险规则」对 `awaiting_resume` 显示「确认恢复」按钮，恢复后立即重取；`[risk] circuit_resume_requires_confirm=false` 可回滚到 TTL 自动恢复。同步修正 M7-6 描述与 `CircuitBreakerState` 字段表（`status` 实际为 `tripped`/`awaiting_resume`，新增 `requires_confirm`） |
 | 2026-10-31 | v0.6（补充 18，熔断键保留风险入档） | 修正 §4.7.3 中 `quant:risk:circuit:{inst_id}`「带 TTL」的过期描述（默认不设 TTL）；M7-12 补充已知风险：熔断键永久保留，长期无人确认会让该品种持续不开新仓，`awaiting_resume` 期间 bar 不补评估，Redis 未持久化重启会丢失熔断状态（等同自动恢复）；`docs/reference/RUNBOOK_PAPER_TRADING.md` 新增 §4.1 熔断处置（查看/恢复/删键应急/回滚开关）与「某品种一直不开仓」排查项 |
 | 2026-10-31 | v0.6（补充 19，阈值在线调整与审计落地） | M7-8 由 ⬜ 改 ✅、M7-14 由 ⬜ 改 ✅：新增 `risk/overrides.py`（`RiskOverrideService.set/clear/list`），覆盖值写 Redis hash `quant:risk:overrides`（字段 `{strategy}:{param}`）、审计追加写 `risk_overrides`（只追加、撤销置 `revoked_at`）；写入顺序为「先 Redis 后审计」，审计失败回滚 Redis；变更原因必填，比例类字段约束 (0,1]。worker 新增 `_refresh_limits()`，每轮心跳重读覆盖层并重建 `RiskConfig`，因此最长 60s 生效、无需重启；Redis 读失败保留上一轮生效值（不静默退回配置）。新增 `GET/POST /api/risk/overrides` 与 `DELETE /api/risk/overrides/{strategy_id}/{param}`（写操作守卫）；看板「风控限额」内嵌在线调整表单、生效覆盖 chip（可一键清除）与变更历史，规则行补 `default/global/strategy/override` 来源标注。M7-9 保持 🟡（来源已展示，触发次数仍缺接口） |
+| 2026-10-31 | v0.6（补充 20，看板按 10 模块导航） | 看板按 §2.2 改为左侧 10 模块导航（首页总览/市场监控/策略研究/回测分析/因子库/组合管理/风险控制/交易执行/日志告警/系统设置），现有卡片按第 4 章归位：权益+风险摘要+持仓摘要+告警摘要+进程健康归 M1、K 线与数据质量归 M2、策略参数与启停归 M3、回测与模拟盘日报（M4-8）归 M4、风控限额/熔断/kill switch 归 M7、持仓减仓、订单、成交、成交盈亏、死信归 M8、告警归 M9；M5/M6/M10 显示范围占位卡。M1-5 由 🟡 改 ✅（新增「进程健康」卡，7 进程 + engine 当前周期/最近评估/落后根数）；M1-9 补充看板已按级别与 Top5 规则计数、点击跳日志告警，未读状态仍依赖 M9-7，故保持 🟡 |
