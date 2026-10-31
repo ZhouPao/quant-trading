@@ -176,6 +176,32 @@ class TestSilence:
         assert [r["suppressed"] for r in rows] == [1, 1]
         assert alerter.sent == []
 
+    async def test_silenced_alert_state_and_ack(self, env) -> None:
+        """M9-7：静音期的告警落 state=silenced，仍可标记已读。"""
+        service, store, _redis, _alerter, _settings = env
+        await service.silence(
+            "margin_ratio", inst_id=None, hours=1, reason="", by="owner"
+        )
+        alert_id = await service.publish(_event(ts=10))
+
+        row = store.list_alerts(10)[0][0]
+        assert row["state"] == "silenced"
+        assert row["suppressed"] == 1
+
+        assert await service.ack(alert_id, "alice")
+        assert store.list_alerts(10)[0][0]["state"] == "acked"
+
+    async def test_silenced_alert_can_be_resolved(self, env) -> None:
+        """静音期的告警在规则恢复时同样要关闭，不能留在 silenced。"""
+        service, store, _redis, _alerter, _settings = env
+        await service.silence(
+            "margin_ratio", inst_id=None, hours=1, reason="", by="owner"
+        )
+        await service.publish(_event(ts=10))
+
+        assert await service.resolve("margin_ratio", inst_id=None) == 1
+        assert store.list_alerts(10)[0][0]["state"] == "resolved"
+
     async def test_active_silences_excludes_expired_and_revoked(self, env) -> None:
         service, store, _redis, _alerter, _settings = env
         now = int(time.time() * 1000)

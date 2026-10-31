@@ -4833,6 +4833,7 @@ function AlertPanel({
         >
           <option value="ALL">全部状态</option>
           <option value="open">未读</option>
+          <option value="silenced">静音中</option>
           <option value="acked">已读</option>
           <option value="resolved">已解决</option>
         </select>
@@ -5033,7 +5034,7 @@ function AlertItem({
   const level = alert.level.toLowerCase();
   const tone = level === "error" ? "bad" : level === "info" ? "ok" : "warn";
   const state = alert.state ?? "open";
-  const ackable = state === "open" && Boolean(alert.alert_id);
+  const ackable = (state === "open" || state === "silenced") && Boolean(alert.alert_id);
   return (
     <li className={`alert alert-${tone}`}>
       <div className="alert-top">

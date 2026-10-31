@@ -268,6 +268,9 @@ class MonitorSettings(BaseModel):
     engine_timeout_seconds: int = 180
     monitor_heartbeat_key: str = "quant:heartbeat:monitor"
     monitor_heartbeat_timeout_seconds: int = 300
+    # 无 TTL 的「最后一次心跳」时间戳：monitor 重启时据此判断上次停了多久。
+    # 带 TTL 的心跳键在长时间停机后已过期，读不到任何线索（M9-4）。
+    monitor_last_beat_key: str = "quant:heartbeat:monitor:last"
     queue_backlog_threshold: int = 50
     margin_ratio_threshold: float = 0.1
     balance_change_threshold: float = 0.10

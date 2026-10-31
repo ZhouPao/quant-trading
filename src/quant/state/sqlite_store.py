@@ -1073,6 +1073,9 @@ class SQLiteStore:
     ) -> bool:
         """写入一条告警。`alert_id` 由事件内容派生，重复发布视为幂等。
 
+        被静音压制的告警直接落 `state='silenced'`（M9-7）：它仍在库里、
+        仍可被标记已读与被恢复关闭，只是不发邮件，看板据此显示「静音中」。
+
         Returns:
             是否真的插入了新行（重复 ID 返回 False）。
         """
@@ -1082,7 +1085,7 @@ class SQLiteStore:
                 INSERT OR IGNORE INTO alerts (
                     alert_id, rule, level, message, fingerprint, inst_id,
                     strategy_id, state, suppressed, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     alert_id,
@@ -1092,6 +1095,7 @@ class SQLiteStore:
                     fingerprint,
                     inst_id,
                     strategy_id,
+                    "silenced" if suppressed else "open",
                     1 if suppressed else 0,
                     created_at,
                 ),
@@ -1178,13 +1182,13 @@ class SQLiteStore:
         )
         if row is None:
             return False
-        if row["state"] != "open":
+        if row["state"] not in ("open", "silenced"):
             # 已 acked / resolved：保持首次确认信息，不重复写
             return True
         self._execute(
             """
             UPDATE alerts SET state = 'acked', acked_at = ?, acked_by = ?
-             WHERE alert_id = ? AND state = 'open'
+             WHERE alert_id = ? AND state IN ('open', 'silenced')
             """,
             (now_ms, by, alert_id),
         )
@@ -1203,7 +1207,7 @@ class SQLiteStore:
         return self._execute(
             f"""
             UPDATE alerts SET state = 'resolved', resolved_at = ?
-             WHERE {where} AND state IN ('open', 'acked')
+             WHERE {where} AND state IN ('open', 'acked', 'silenced')
             """,
             (now_ms, *params),
         )

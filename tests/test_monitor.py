@@ -1533,3 +1533,75 @@ async def test_service_email_is_per_alert(redis, tmp_path) -> None:
     finally:
         store.close()
 
+
+class TestMonitorRestartGap:
+    """M9-4：重启后按上次心跳判断停机时长。
+
+    带 TTL 的心跳键在长时间停机后已过期，读不到线索；因此另存一个无 TTL
+    的时间戳，启动时只判一次。
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_baseline_no_alert(self, redis) -> None:
+        """首次部署没有可比对的基线，不该报「上次中断」。"""
+        monitor = _monitor(redis, _balance("10000"))
+
+        alerts = await monitor.check_previous_heartbeat(1_700_000_000_000)
+
+        assert alerts == []
+
+    @pytest.mark.asyncio
+    async def test_short_gap_no_alert(self, redis) -> None:
+        """停机小于阈值（默认 300s）属于正常重启。"""
+        now = 1_700_000_000_000
+        await redis.set("quant:heartbeat:monitor:last", now - 60_000)
+        monitor = _monitor(redis, _balance("10000"))
+
+        alerts = await monitor.check_previous_heartbeat(now)
+
+        assert alerts == []
+
+    @pytest.mark.asyncio
+    async def test_long_gap_reports_warning(self, redis) -> None:
+        now = 1_700_000_000_000
+        await redis.set("quant:heartbeat:monitor:last", now - 45 * 60_000)
+        monitor = _monitor(redis, _balance("10000"))
+
+        alerts = await monitor.check_previous_heartbeat(now)
+
+        assert len(alerts) == 1
+        alert = alerts[0]
+        assert alert.rule == "monitor_restart"
+        assert alert.level == "WARNING"
+        assert "45 分钟" in alert.message
+
+    @pytest.mark.asyncio
+    async def test_invalid_baseline_is_ignored(self, redis) -> None:
+        """脏值不能当成「停了很久」，也不能让启动失败。"""
+        await redis.set("quant:heartbeat:monitor:last", "not-a-ts")
+        monitor = _monitor(redis, _balance("10000"))
+
+        assert await monitor.check_previous_heartbeat(1_700_000_000_000) == []
+
+    @pytest.mark.asyncio
+    async def test_run_once_records_last_beat_without_ttl(self, redis) -> None:
+        """每轮都要刷新该键，且不能带 TTL——否则长停机后又读不到。"""
+        import time
+
+        await redis.set("quant:heartbeat:worker", str(int(time.time() * 1000)))
+        monitor = _monitor(redis, _balance("10000"))
+
+        await monitor.run_once()
+
+        raw = await redis.get("quant:heartbeat:monitor:last")
+        assert raw is not None and int(raw) > 0
+        assert await redis.ttl("quant:heartbeat:monitor:last") == -1
+
+    @pytest.mark.asyncio
+    async def test_disabled_key_skips_check(self, redis) -> None:
+        """键留空即关闭该检测（灰度回滚用）。"""
+        await redis.set("quant:heartbeat:monitor:last", 1_000)
+        monitor = _monitor(redis, _balance("10000"), monitor_last_beat_key="")
+
+        assert await monitor.check_previous_heartbeat(1_700_000_000_000) == []
+

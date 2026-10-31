@@ -139,6 +139,8 @@ class Monitor:
         # 上一轮开始的墙钟时间，用于识别宿主机休眠/进程挂起
         self._last_cycle_ts: int | None = None
         self._running = False
+        # 上一轮结束时间戳（无 TTL 键）：重启时据此判断上次停机多久（M9-4）
+        self._last_beat_ms: int | None = None
         self.metrics: RiskMetrics = RiskMetrics.empty(0)
         self.positions: list[PositionSnapshot] = []
 
@@ -149,6 +151,12 @@ class Monitor:
             log.info(
                 f"规则级启停：{'/'.join(self._settings.disabled_rules)} 已停用（M9-2）"
             )
+        # 上一次心跳中断检测（M9-4）：只在启动时判一次，否则每轮都会重报
+        gap_alerts = await self.check_previous_heartbeat(int(time.time() * 1000))
+        if gap_alerts:
+            for alert in gap_alerts:
+                log.warning(f"[{alert.rule}] {alert.message}")
+            await self._publish_alerts(gap_alerts)
         while self._running:
             try:
                 await self.run_once()
@@ -225,7 +233,59 @@ class Monitor:
             ts,
             ex=self._settings.monitor_heartbeat_timeout_seconds,
         )
+        await self._record_last_beat(ts)
         return alerts
+
+    async def _record_last_beat(self, ts: int) -> None:
+        """记录无 TTL 的最后心跳时间，供下次重启判断停机时长。
+
+        写失败只记日志：这是辅助信息，不能影响监控主循环。
+        """
+        key = self._settings.monitor_last_beat_key
+        if not key:
+            return
+        self._last_beat_ms = ts
+        try:
+            await self._redis.set(key, ts)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"write last heartbeat failed: {e}")
+
+    async def check_previous_heartbeat(self, now_ms: int) -> list[Alert]:
+        """启动时核对上次心跳，停机超过阈值即补一条告警（M9-4）。
+
+        带 TTL 的心跳键在长时间停机后已过期，读不到任何线索，所以另存
+        一个无 TTL 的时间戳。首次部署（键不存在）不告警——没有可比对的基线。
+        """
+        key = self._settings.monitor_last_beat_key
+        if not key:
+            return []
+        try:
+            raw = await self._redis.get(key)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"read last heartbeat failed: {e}")
+            return []
+        if raw is None:
+            return []
+        try:
+            last = int(raw)
+        except (TypeError, ValueError):
+            log.warning(f"last heartbeat key has non-numeric value: {raw!r}")
+            return []
+        gap_ms = now_ms - last
+        timeout_ms = self._settings.monitor_heartbeat_timeout_seconds * 1000
+        if gap_ms <= timeout_ms:
+            return []
+        return [
+            Alert(
+                rule="monitor_restart",
+                level="WARNING",
+                message=(
+                    f"上次心跳中断约 {gap_ms / 60_000:.0f} 分钟，"
+                    "期间监控未运行（持仓/告警可能漏采）"
+                ),
+                ts=now_ms,
+            )
+        ]
 
     async def _publish_snapshot(self, snap: AccountSnapshot, ts: int) -> None:
         """把本轮快照写到 Redis，供只读看板消费。

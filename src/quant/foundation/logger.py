@@ -48,9 +48,12 @@ def _redact_message(msg: str) -> str:
 
 
 def _redact_filter(record: dict[str, Any]) -> bool:
-    """loguru patcher：在写入前替换敏感字段。"""
+    """loguru patcher：写入前替换敏感字段，并补齐模块前缀（M9-1）。"""
     try:
         record["message"] = _redact_message(record["message"])
+        # get_logger 绑定的是业务模块名（如 cli.run_worker）；未绑定的调用方
+        # 退回 Python 模块名，保证每行都有可检索的模块前缀
+        record["extra"].setdefault("name", record["module"])
     except Exception:
         pass
     return True
@@ -72,7 +75,7 @@ def setup_logger(
         lambda msg: print(msg, end=""),
         level=level,
         format=(
-            "{time:YYYY-MM-DD HH:mm:ss.SSS}|{level:<5}|{module}|{message}"
+            "{time:YYYY-MM-DD HH:mm:ss.SSS}|{level:<5}|{extra[name]}|{message}"
         ),
         filter=_redact_filter,
         enqueue=True,
@@ -84,7 +87,7 @@ def setup_logger(
         rotation=rotation,
         retention=retention,
         format=(
-            "{time:YYYY-MM-DDTHH:mm:ss.SSSZ}|{level:<5}|{module}|{message}"
+            "{time:YYYY-MM-DDTHH:mm:ss.SSSZ}|{level:<5}|{extra[name]}|{message}"
         ),
         filter=_redact_filter,
         enqueue=True,
