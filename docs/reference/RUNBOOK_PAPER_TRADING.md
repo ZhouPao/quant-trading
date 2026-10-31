@@ -593,6 +593,58 @@ quant kill-switch --off
 
 ---
 
+## 4.1 极端行情熔断（按品种，M7-6 / M7-12）
+
+engine 每轮用已收盘 bar 判 `(high − low) / open`，**严格大于**
+`[risk] circuit_amplitude_pct`（默认 10%）即熔断该品种，冷却
+`circuit_cooldown_seconds`（默认 900 秒）。冷却结束后**不会自动恢复交易**，
+状态转 `awaiting_resume`，必须人工确认。
+
+熔断只影响单个品种：其它品种照常交易，也没有动 kill switch
+（状态键 `quant:risk:circuit:{inst_id}` 与 `quant:kill-switch` 完全分开）。
+
+**风险（务必知道）**：`circuit_resume_requires_confirm = true`（默认）时，
+熔断键**不设 TTL、不会自己消失**。只要没人去看板点「确认恢复」，
+该品种就会一直不开新仓——这不是故障，是刻意用「宁可少交易」换「不踩第二波」。
+看板长期没人看、或者熔断告警邮件被忽略时，漏掉的是整段行情，
+而日志与告警里只有一条 `circuit breaker tripped`。因此：
+
+- 收到 `circuit_breaker` 告警后，**当天**就要决定恢复还是保持暂停；
+- `awaiting_resume` 期间的行情不会被补评估（水位已推进到最新 bar），
+  恢复后从下一根开始，不会用过期价格补单；
+- Redis 未开启持久化并发生重启时，熔断键会一起丢失，相当于自动恢复交易，
+  此时必须人工核对行情，不能当成「系统已评估过风险」；
+- 不想承担「忘记确认导致长期不开仓」的风险时，把
+  `[risk] circuit_resume_requires_confirm` 设为 `false`（重启 engine 生效），
+  退回「TTL 到期自动恢复」的旧行为。
+
+```bash
+# 查看当前熔断中的品种（值为 JSON）
+redis-cli --scan --pattern 'quant:risk:circuit:*'
+redis-cli GET quant:risk:circuit:BTC-USDT
+
+# 人工确认恢复（写操作守卫：本机 Host + 自定义头；配置了 token 还要带 X-Dashboard-Token）
+curl -X POST -H 'Host: 127.0.0.1:8080' -H 'X-Dashboard-Request: 1' \
+  http://127.0.0.1:8080/api/risk/circuits/BTC-USDT/resume
+# {"inst_id":"BTC-USDT","resumed":true,"triggered_ts":...,"reason":"..."}
+
+# 紧急起量：直接删键等同于「跳过确认」，会立即恢复该品种交易，用前先看行情
+redis-cli DEL quant:risk:circuit:BTC-USDT
+```
+
+冷却期未结束时接口返回 `{"resumed": false, "reason": "cooldown not finished"}`，
+这是刻意的：冷却没走完就放行，等于把阈值变成摆设。恢复动作会写一条
+`decision=resumed` 的 `risk_events`，并在看板告警流里留一条 INFO；
+触发与恢复都可事后核对：
+
+```bash
+sqlite3 data/state/quant.db \
+  "SELECT datetime(ts/1000,'unixepoch','localtime'), inst_id, decision, reason
+     FROM risk_events WHERE rule='circuit_breaker' ORDER BY ts DESC LIMIT 20;"
+```
+
+---
+
 ## 5. 停止进程
 
 - 手动分进程启动：各终端 `Ctrl+C` 即可优雅退出。
@@ -614,6 +666,7 @@ worker 退出时会把 inflight 信号回滚，下次启动自动恢复。
 | 偏离报告 FAIL | 适当调大 `--window-hours`，覆盖回测信号的完整窗口 |
 | engine 一直 `no signal`、`fills` 为空 | 先确认本地数据里真的有交叉，而不是链路故障。见下方排查步骤 |
 | 下单量比预期小 | 看日志是 `qty adjusted by max_order_qty` 还是 `max_position_pct`，两者原因不同 |
+| 某品种一直不开仓，日志有 `circuit breaker awaiting manual resume` | 该品种熔断冷却已结束但没人确认。看板「风险规则」点「确认恢复」，或按 §4.1 调接口。**熔断键不设 TTL，不确认就一直暂停** |
 
 `no signal` 排查步骤：
 
@@ -629,6 +682,7 @@ worker 退出时会把 inflight 信号回滚，下次启动自动恢复。
 3. 检查水位是否落后于最新 bar：水位键
    `quant:engine:last-bar:{strategy}:{inst}`。落后属正常，下一轮会自动补评估；
    日志会打印 `engine catching up N bar(s)`。
-4. 检查是否被跳过：`grep -E 'skipped|kill switch|catch-up truncated' logs/engine.log`。
-   kill switch 生效或有未完成挂单时会跳过并推进水位；`catch-up truncated`
-   表示停机超过 `max_catchup_bars`，更早的信号已丢弃。
+4. 检查是否被跳过：`grep -E 'skipped|kill switch|circuit breaker|catch-up truncated' logs/engine.log`。
+   kill switch 生效、品种熔断中或有未完成挂单时会跳过并推进水位；
+   `circuit breaker awaiting manual resume` 说明熔断已过冷却但没人工确认（见 §4.1）；
+   `catch-up truncated` 表示停机超过 `max_catchup_bars`，更早的信号已丢弃。
