@@ -1079,6 +1079,101 @@ class TestEngine:
         assert data["degraded"] == ["redis"]
 
 
+class TestFreshness:
+    """M1-7：区分「引擎落后」与「本地数据停更」两种不新鲜。"""
+
+    HOUR = 3_600_000
+
+    @staticmethod
+    def _bar(ts: int) -> Bar:
+        value = Decimal("100")
+        return Bar(
+            ts=ts,
+            open=value,
+            high=value,
+            low=value,
+            close=value,
+            vol=Decimal("1"),
+            vol_quote=value,
+            confirm=1,
+            inst_id="BTC-USDT",
+            bar_size="1H",
+        )
+
+    @staticmethod
+    async def _set_watermark(settings, redis, ts: int) -> None:
+        await redis.set(
+            f"{settings.engine.last_bar_key}:"
+            f"{settings.engine.strategy}:{settings.engine.inst}",
+            str(ts),
+        )
+
+    async def test_fresh_when_local_and_engine_in_sync(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        now = int(time.time() * 1000)
+        last_closed = (now // self.HOUR) * self.HOUR - self.HOUR
+        BarStorage(settings.storage.data_dir).save_bars([self._bar(last_closed)])
+        await self._set_watermark(settings, redis, last_closed)
+
+        data = await service.freshness()
+
+        item = data["items"][0]
+        assert item["inst_id"] == settings.engine.inst
+        assert item["bar"] == settings.engine.bar
+        assert item["last_bar_ts"] == last_closed
+        assert item["lag_bars"] == 0
+        assert item["missing_bars"] == 0
+        assert item["stale"] is False
+        assert data["stale_count"] == 0
+        assert data["degraded"] == []
+
+    async def test_stale_when_engine_lagging(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        now = int(time.time() * 1000)
+        last_closed = (now // self.HOUR) * self.HOUR - self.HOUR
+        BarStorage(settings.storage.data_dir).save_bars(
+            [self._bar(last_closed - self.HOUR), self._bar(last_closed)]
+        )
+        await self._set_watermark(settings, redis, last_closed - self.HOUR)
+
+        data = await service.freshness()
+
+        item = data["items"][0]
+        assert item["lag_bars"] == 1
+        assert item["missing_bars"] == 0
+        assert item["stale"] is True
+        assert data["stale_count"] == 1
+
+    async def test_stale_when_candles_stopped(self, engine_env) -> None:
+        """水位与本地末尾相等（lag_bars=0），但两者都过期了。"""
+        service, _store, settings, redis = engine_env
+        now = int(time.time() * 1000)
+        last_closed = (now // self.HOUR) * self.HOUR - self.HOUR
+        stale_ts = last_closed - 3 * self.HOUR
+        BarStorage(settings.storage.data_dir).save_bars([self._bar(stale_ts)])
+        await self._set_watermark(settings, redis, stale_ts)
+
+        data = await service.freshness()
+
+        item = data["items"][0]
+        assert item["lag_bars"] == 0
+        assert item["missing_bars"] == 3
+        assert item["stale"] is True
+
+    async def test_degraded_when_redis_down(self, tmp_path) -> None:
+        store = SQLiteStore(tmp_path / "quant.db")
+        settings = _settings()
+        settings.storage.data_dir = tmp_path / "data"
+        service = DashboardService(store, _BrokenRedis(), settings)
+        try:
+            data = await service.freshness()
+        finally:
+            store.close()
+
+        assert data["degraded"] == ["redis"]
+        assert data["items"][0]["stale"] is False
+
+
 class TestCandles:
     HOUR = 3_600_000
 
@@ -1533,6 +1628,24 @@ class TestApp:
         payload = response.json()
         assert payload["online"] is False
         assert payload["status"] is None
+
+    async def test_freshness_endpoint(self, engine_env, tmp_path) -> None:
+        service, _store, _settings, _redis = engine_env
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/freshness")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["threshold_bars"] == 1
+        assert payload["stale_count"] == 0
+        assert len(payload["items"]) == 1
+        # 本地无 bar 时不把缺失渲染成「新鲜」以外的具体数字
+        assert payload["items"][0]["last_bar_ts"] is None
+        assert payload["items"][0]["lag_bars"] is None
 
     async def test_candles_endpoint(self, candle_env, tmp_path) -> None:
         service, _store, _settings = candle_env

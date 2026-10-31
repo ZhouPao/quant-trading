@@ -689,6 +689,37 @@ curl -s 'http://127.0.0.1:8080/api/risk/overrides?strategy_id=sma_cross'
 
 ---
 
+## 4.3 数据不新鲜（M1-7）
+
+**先看结论**：看板「首页总览 → 数据新鲜度」卡或
+
+```bash
+curl -s http://127.0.0.1:8080/api/freshness | python3 -m json.tool
+```
+
+关注三项：`lag_bars`（引擎水位落后本地最新已收盘 bar 几根）、
+`missing_bars`（本地最新 bar 比「此刻应有 bar」缺几根）、`stale`。
+达到 1 根即标红（阈值见 `threshold_bars`）。
+
+两种不新鲜，处理方式完全不同：
+
+| 现象 | 含义 | 处理 |
+|---|---|---|
+| `lag_bars ≥ 1`，`missing_bars = 0` | 数据到位了，**engine 没跟上** | 看 `/api/engine` 的 `status/reason`；确认 engine 进程在线、`max_catchup_bars` 是否够；必要时重启 engine |
+| `missing_bars ≥ 1`，`lag_bars = 0` | 水位与本地末尾一致但**两者都已过期**，candles 停更 | 检查 `logs/` 里 candles 的同步日志、网络与 OKX 连通性；恢复后 candles 会补历史，engine 随水位自动追 |
+| 两者都 ≥ 1 | 既断数据又落后 | 先修 candles，再观察 engine 是否自动补齐 |
+
+**为什么不能只看 `lag_bars`**：断网时 candles 与 engine 会一起卡在同一个
+bar 上，`lag_bars` 恒为 0，看起来「完全同步」。`missing_bars` 专门用来
+暴露这种情况。
+
+**注意**：`/api/freshness` 目前只返回 engine 主组合（`engine.inst` ×
+`engine.bar`）。开启 `engine.multi_binding` 后其余绑定组合各自消费同一份
+本地数据，数据缺口仍然体现在这一条上；引擎逐组合的落后情况要看
+`/api/engine`。
+
+---
+
 ## 5. 停止进程
 
 - 手动分进程启动：各终端 `Ctrl+C` 即可优雅退出。

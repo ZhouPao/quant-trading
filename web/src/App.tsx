@@ -14,6 +14,7 @@ import {
   fetchQuality,
   fetchQualityReport,
   fetchProcesses,
+  fetchFreshness,
   fetchReports,
   fetchRiskLimits,
   fetchRiskOverrides,
@@ -48,6 +49,7 @@ import {
   type EquityPoint,
   type EquityResponse,
   type FillRow,
+  type FreshnessResponse,
   type KillSwitchState,
   type MetricMap,
   type OptimizeResponse,
@@ -277,6 +279,8 @@ export default function App() {
   const [tab, setTab] = useState<TabKey>(loadTab);
   // M1-5 进程健康：进程心跳变化比行情慢，15s 一拉即可
   const [processes, setProcesses] = useState<ProcessesResponse | null>(null);
+  // M1-7 数据新鲜度与进程健康同频，都是分钟级信号
+  const [freshness, setFreshness] = useState<FreshnessResponse | null>(null);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -396,7 +400,7 @@ export default function App() {
     };
   }, [riskRefresh]);
 
-  // M1-5：7 个进程心跳，接口失败只影响这张卡
+  // M1-5 进程心跳与 M1-7 数据新鲜度同频；两者互不拖累，各自失败各自置空
   useEffect(() => {
     const controller = new AbortController();
     const pull = () => {
@@ -405,6 +409,12 @@ export default function App() {
         .catch((err) => {
           if ((err as Error).name === "AbortError") return;
           setProcesses(null);
+        });
+      fetchFreshness(controller.signal)
+        .then(setFreshness)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setFreshness(null);
         });
     };
     pull();
@@ -738,6 +748,18 @@ export default function App() {
               ))}
             </ul>
           )}
+        </section>
+
+        <section className="card freshness reveal" style={{ animationDelay: "120ms" }}>
+          <div className="card-head">
+            <h2>数据新鲜度</h2>
+            <span className="card-note">
+              {freshness
+                ? `${freshness.stale_count > 0 ? `${freshness.stale_count} 项落后` : "全部新鲜"} · 阈值 ${freshness.threshold_bars} 根`
+                : "接口不可用"}
+            </span>
+          </div>
+          <FreshnessPanel freshness={freshness} />
         </section>
 
         <section className="card process-health reveal" style={{ animationDelay: "125ms" }}>
@@ -4041,6 +4063,61 @@ function StatusTag({ status }: { status: string }) {
     rejected: "tag-bad",
   };
   return <span className={`tag ${map[status] ?? "tag-muted"}`}>{status}</span>;
+}
+
+/** M1-7 数据新鲜度：区分「引擎落后」与「本地数据本身缺根」。 */
+function FreshnessPanel({ freshness }: { freshness: FreshnessResponse | null }) {
+  if (!freshness) {
+    return <div className="empty">/api/freshness 不可用，无法判断数据是否最新</div>;
+  }
+  if (freshness.items.length === 0) {
+    return <div className="empty">尚未配置引擎消费的品种与周期</div>;
+  }
+  return (
+    <ul className="fresh-list">
+      {freshness.items.map((item) => {
+        const notes: string[] = [];
+        if (
+          item.lag_bars !== null &&
+          item.lag_bars >= freshness.threshold_bars
+        ) {
+          notes.push(`engine 落后 ${item.lag_bars} 根`);
+        }
+        if (
+          item.missing_bars !== null &&
+          item.missing_bars >= freshness.threshold_bars
+        ) {
+          notes.push(`本地缺 ${item.missing_bars} 根`);
+        }
+        return (
+          <li
+            key={`${item.inst_id}-${item.bar}`}
+            className={`fresh-item ${item.stale ? "fresh-bad" : "fresh-ok"}`}
+          >
+            <div className="fresh-top">
+              <span className="mono strong">{item.inst_id}</span>
+              <span className="mono">{item.bar}</span>
+              <span className="fresh-state">{item.stale ? "落后" : "新鲜"}</span>
+            </div>
+            <div className="fresh-meta mono">
+              <span>
+                最新已收盘 {item.last_bar_ts ? clock(item.last_bar_ts) : "—"}
+                {item.lag_seconds !== null ? ` · ${age(item.lag_seconds)} 前` : ""}
+              </span>
+              <span>
+                engine 水位{" "}
+                {item.engine_watermark_ts ? clock(item.engine_watermark_ts) : "—"}
+              </span>
+            </div>
+            {notes.length > 0 && <p className="fresh-note">{notes.join(" · ")}</p>}
+            {item.degraded.length > 0 && (
+              <p className="fresh-note">降级：{item.degraded.join(" / ")}</p>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 /** M1-5 进程健康：判活与 TTL 全在后端，前端只负责呈现。 */

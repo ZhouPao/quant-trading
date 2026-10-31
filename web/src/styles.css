@@ -430,6 +430,78 @@ code {
   grid-column: span 12;
 }
 
+/* M1-7 数据新鲜度 */
+.freshness {
+  grid-column: span 12;
+}
+
+.fresh-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.fresh-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 2px;
+  background: rgba(226, 240, 228, 0.02);
+}
+
+.fresh-ok {
+  border-left-color: var(--ok);
+}
+
+.fresh-bad {
+  border-left-color: var(--bad);
+  background: rgba(255, 95, 95, 0.06);
+}
+
+.fresh-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fresh-state {
+  margin-left: auto;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.fresh-ok .fresh-state {
+  color: var(--ok);
+}
+
+.fresh-bad .fresh-state {
+  color: var(--bad);
+}
+
+.fresh-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 9px;
+  color: var(--dimmer);
+}
+
+.fresh-note {
+  margin: 0;
+  font-size: 10px;
+  color: var(--warn);
+}
+
+.fresh-bad .fresh-note {
+  color: var(--bad);
+}
+
 .link-btn {
   border: 0;
   background: none;

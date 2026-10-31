@@ -46,6 +46,10 @@ from quant.storage.validator import DataValidator
 
 log = get_logger("dashboard.service")
 
+#: M1-7：落后达到该根数即视为不新鲜。PRD 验收要求「落后超过 1 根必须标红」，
+#: 而落后 1 根时引擎已经错过一根 bar，提前一根报出更有用。
+FRESHNESS_LAG_THRESHOLD = 1
+
 
 def _age_seconds(ts: int | None, now_ms: int) -> int | None:
     if ts is None:
@@ -951,6 +955,65 @@ class DashboardService:
             "ticks": _field_int(status, "ticks"),
             "started_ts": _field_int(status, "started_ts"),
             "max_catchup_bars": cfg.max_catchup_bars,
+            "degraded": degraded,
+        }
+
+    async def freshness(self) -> dict[str, object]:
+        """M1-7 数据新鲜度：引擎消费的 `inst × bar` 是否落后。
+
+        `lag_bars` 直接复用 `engine()` 的口径（本地最新已收盘 bar 与引擎
+        水位之差）。另算 `missing_bars`——本地最新 bar 相对「此刻应有 bar」
+        的缺口：断网时 candles 停止同步，引擎水位与本地末尾仍然相等
+        （lag_bars=0），只看 lag_bars 会漏掉这种「一起卡住」的情况。
+
+        当前 engine 只发布主组合（`engine.inst` × `engine.bar`）的水位与
+        状态键，因此只返回这一条；多绑定的逐组合新鲜度需要 engine 另行
+        发布各组合水位，不在本期范围。
+        """
+        now = int(time.time() * 1000)
+        cfg = self._settings.engine
+        eng = await self.engine()
+        degraded = list(eng.get("degraded") or [])  # type: ignore[arg-type]
+
+        bar_ms: int | None = None
+        try:
+            bar_ms = DataValidator._bar_size_ms(cfg.bar)  # type: ignore[attr-defined]
+        except ValueError:
+            if "bar" not in degraded:
+                degraded.append("bar")
+
+        local_bar_ts = eng.get("local_bar_ts")
+        local_ts = local_bar_ts if isinstance(local_bar_ts, int) else None
+        expected_ts: int | None = None
+        missing_bars: int | None = None
+        if bar_ms is not None:
+            expected_ts = ((now - bar_ms) // bar_ms) * bar_ms
+            if local_ts is not None:
+                missing_bars = max((expected_ts - local_ts) // bar_ms, 0)
+
+        lag_raw = eng.get("lag_bars")
+        lag_bars = lag_raw if isinstance(lag_raw, int) else None
+        stale = (
+            lag_bars is not None and lag_bars >= FRESHNESS_LAG_THRESHOLD
+        ) or (missing_bars is not None and missing_bars >= FRESHNESS_LAG_THRESHOLD)
+
+        item = {
+            "inst_id": cfg.inst,
+            "bar": cfg.bar,
+            "last_bar_ts": local_ts,
+            "lag_seconds": _age_seconds(local_ts, now),
+            "lag_bars": lag_bars,
+            "expected_ts": expected_ts,
+            "missing_bars": missing_bars,
+            "engine_watermark_ts": eng.get("watermark_ts"),
+            "stale": stale,
+            "degraded": degraded,
+        }
+        return {
+            "ts": now,
+            "threshold_bars": FRESHNESS_LAG_THRESHOLD,
+            "items": [item],
+            "stale_count": 1 if stale else 0,
             "degraded": degraded,
         }
 

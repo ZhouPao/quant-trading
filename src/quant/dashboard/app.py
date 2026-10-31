@@ -409,6 +409,10 @@ def create_app(
     async def engine() -> JSONResponse:
         return JSONResponse(await service.engine())
 
+    @app.get("/api/freshness")
+    async def freshness() -> JSONResponse:
+        return JSONResponse(await service.freshness())
+
     @app.get("/api/candles")
     async def candles(
         inst: str | None = Query(None, description="默认取 engine.inst"),

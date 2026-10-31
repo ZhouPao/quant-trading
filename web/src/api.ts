@@ -701,6 +701,36 @@ export async function fetchProcesses(signal: AbortSignal) {
   return { ...data, processes: data.processes ?? [] };
 }
 
+/** M1-7 数据新鲜度：引擎实际消费的 inst × bar。 */
+export type FreshnessItem = {
+  inst_id: string;
+  bar: string;
+  last_bar_ts: number | null;
+  lag_seconds: number | null;
+  /** 本地最新已收盘 bar 与引擎水位的差 */
+  lag_bars: number | null;
+  /** 此刻应有的已收盘 bar 时间 */
+  expected_ts: number | null;
+  /** 本地最新 bar 相对 expected_ts 的缺口，用于发现 candles 停更 */
+  missing_bars: number | null;
+  engine_watermark_ts: number | null;
+  stale: boolean;
+  degraded: string[];
+};
+
+export type FreshnessResponse = {
+  ts: number;
+  threshold_bars: number;
+  items: FreshnessItem[];
+  stale_count: number;
+  degraded: string[];
+};
+
+export async function fetchFreshness(signal: AbortSignal) {
+  const data = await getJson<FreshnessResponse>("/api/freshness", signal);
+  return { ...data, items: data.items ?? [] };
+}
+
 export type RiskOverrideItem = {
   id: number;
   strategy_id: string;
