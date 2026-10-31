@@ -14,6 +14,9 @@ import {
   fetchQualityReport,
   fetchReports,
   fetchRiskLimits,
+  fetchRiskOverrides,
+  clearRiskOverride,
+  setRiskOverride,
   resumeCircuit,
   fetchStrategies,
   discardDeadLetter,
@@ -56,6 +59,7 @@ import {
   type PositionRow,
   type RiskLimitRule,
   type RiskLimitsResponse,
+  type RiskOverridesResponse,
   type StrategyBinding,
   type StrategyInfo,
 } from "./api";
@@ -767,7 +771,195 @@ function RiskLimitsPanel({
           <RiskLimitRow key={rule.key} rule={rule} />
         ))}
       </div>
+      <RiskOverridesEditor strategy={risk.strategy} />
     </>
+  );
+}
+
+// 在线调整只暴露阈值字段；顺序与后端 LIMIT_FIELDS 一致
+const RISK_PARAM_LABELS: Record<string, string> = {
+  daily_loss_limit: "日亏损比例",
+  consecutive_loss_limit: "连续亏损笔数",
+  max_order_qty: "单笔最大名义 (USDT)",
+  max_position_pct: "单品种仓位比例",
+  max_total_pct: "总仓位比例",
+};
+
+const RISK_SOURCE_TEXT: Record<string, string> = {
+  default: "默认",
+  global: "全局",
+  strategy: "策略",
+  override: "覆盖",
+};
+
+/** 阈值在线调整（M7-8）+ 变更审计（M7-14）。 */
+function RiskOverridesEditor({ strategy }: { strategy: string | null }) {
+  const [data, setData] = useState<RiskOverridesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [param, setParam] = useState(Object.keys(RISK_PARAM_LABELS)[0]);
+  const [value, setValue] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ bad: boolean; text: string } | null>(null);
+
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      try {
+        const res = await fetchRiskOverrides(signal, strategy);
+        setData(res);
+        setError(null);
+      } catch (err) {
+        // 主动 abort 不算错误
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      }
+    },
+    [strategy],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  /** 写操作后立即重取：不必等下一次页面轮询。 */
+  const refresh = () => load(new AbortController().signal);
+
+  if (!strategy) return null;
+
+  const token = window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "";
+
+  const save = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await setRiskOverride(
+        {
+          strategy_id: strategy,
+          param,
+          value: value.trim(),
+          reason: reason.trim(),
+        },
+        token,
+      );
+      setMsg({
+        bad: false,
+        text: `${RISK_PARAM_LABELS[param] ?? param} 已设为 ${value.trim()}，worker 下一轮心跳生效`,
+      });
+      setValue("");
+      setReason("");
+      await refresh();
+    } catch (err) {
+      setMsg({ bad: true, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async (name: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await clearRiskOverride(strategy, name, token);
+      setMsg({
+        bad: !res.cleared,
+        text: res.cleared
+          ? `${RISK_PARAM_LABELS[name] ?? name} 覆盖已清除，回落到配置层`
+          : "该字段当前没有生效的覆盖",
+      });
+      await refresh();
+    } catch (err) {
+      setMsg({ bad: true, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const effective = data?.effective ?? {};
+
+  return (
+    <div className="risk-ov">
+      <div className="risk-ov-head">在线调整阈值</div>
+      <div className="risk-ov-form">
+        <select
+          value={param}
+          onChange={(event) => setParam(event.target.value)}
+        >
+          {Object.entries(RISK_PARAM_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <input
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder={effective[param] ?? "新值"}
+          inputMode="decimal"
+        />
+        <input
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="变更原因（必填，写入审计）"
+        />
+        <button
+          type="button"
+          className="dl-btn"
+          disabled={busy || !value.trim() || !reason.trim()}
+          onClick={save}
+        >
+          {busy ? "提交中…" : "保存"}
+        </button>
+      </div>
+      <p className="risk-ov-hint">
+        覆盖值立即写 Redis，worker 下一轮心跳重读生效（最长 60s），不写回
+        toml；清除后回落到全局/策略取严结果。每次调整都会记入
+        <code>risk_overrides</code>。
+      </p>
+      {Object.keys(effective).length > 0 && (
+        <div className="risk-ov-active">
+          {Object.entries(effective).map(([name, val]) => (
+            <span className="risk-ov-chip" key={name}>
+              {RISK_PARAM_LABELS[name] ?? name} = <b>{val}</b>
+              <button
+                type="button"
+                onClick={() => clear(name)}
+                disabled={busy}
+                title="清除覆盖，回落到配置值"
+              >
+                清除
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {msg && (
+        <p className={msg.bad ? "dl-msg dl-bad" : "dl-msg"}>{msg.text}</p>
+      )}
+      {error && <p className="dl-msg dl-bad">读取覆盖失败：{error}</p>}
+      {data && data.items.length > 0 && (
+        <details className="risk-ov-history">
+          <summary>变更历史（{data.total ?? data.items.length}）</summary>
+          <ul>
+            {data.items.map((item) => (
+              <li key={item.id}>
+                <span className="mono">{stamp(item.changed_at)}</span>
+                <span>{RISK_PARAM_LABELS[item.param] ?? item.param}</span>
+                <span className="mono">
+                  {item.old_value ?? "配置值"} → {item.new_value}
+                </span>
+                <span>{item.changed_by}</span>
+                <span className="risk-ov-reason">{item.reason}</span>
+                {item.revoked_at ? (
+                  <span className="risk-ov-revoked">已清除</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -785,7 +977,14 @@ function RiskLimitRow({ rule }: { rule: RiskLimitRule }) {
   return (
     <div className={`risk-item risk-${rule.level}`}>
       <div className="risk-top">
-        <span className="risk-label">{rule.label}</span>
+        <span className="risk-label">
+          {rule.label}
+          {rule.source ? (
+            <em className={`risk-src risk-src-${rule.source}`}>
+              {RISK_SOURCE_TEXT[rule.source] ?? rule.source}
+            </em>
+          ) : null}
+        </span>
         <span className="risk-value">
           {rule.used === null ? "参考" : num(rule.used)} / {num(rule.limit)}
         </span>

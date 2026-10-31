@@ -34,7 +34,12 @@ from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
 from quant.risk.circuit_breaker import CircuitBreaker
 from quant.risk.config import load_risk_config, load_strategy_risk
-from quant.risk.limits import LIMIT_FIELDS, RiskLimits, resolve_limits
+from quant.risk.limits import (
+    LIMIT_FIELDS,
+    RiskLimits,
+    limits_payload,
+    resolve_limits,
+)
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 
@@ -130,12 +135,10 @@ async def _run(args, settings: Settings) -> int:
             applied=sources,
             **merged,  # type: ignore[arg-type]
         )
-    risk_limits = {
-        "strategy": risk_config.strategy_id,
-        "paper_mode": bool(args.paper_mode),
-        "rules": {name: str(limits.value(name)) for name in LIMIT_FIELDS},
-        "sources": {name: limits.source(name) for name in LIMIT_FIELDS},
-    }
+    # 基线 = 合并后的「全局+策略」，paper-mode 覆盖也只存在于本进程。
+    # worker 每轮心跳在其上叠 Redis 在线覆盖层（M7-8）。
+    base_limits = limits
+    risk_limits = limits_payload(base_limits, paper_mode=bool(args.paper_mode))
 
     client: OKXClient | None = None
     public_client: OKXClient | None = None
@@ -233,6 +236,9 @@ async def _run(args, settings: Settings) -> int:
                 if settings.risk.circuit_enabled
                 else None
             ),
+            overrides_key=settings.monitor.risk_overrides_key,
+            base_limits=base_limits,
+            paper_mode=bool(args.paper_mode),
         )
 
         log.info(

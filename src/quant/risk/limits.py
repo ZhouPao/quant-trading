@@ -163,6 +163,46 @@ def parse_override_hash(raw: Mapping[str, object], strategy_id: str) -> dict[str
     return result
 
 
+def apply_overrides(
+    base: RiskLimits, overrides: Mapping[str, object]
+) -> RiskLimits:
+    """在已合并的限额上叠第四层「在线覆盖」。
+
+    在线调整是人工作出的明确决定，因此**不参与取严**：覆盖值直接替换
+    合并结果，来源统一记为 ``override``。缺少或非法的字段保持原值。
+    """
+    values: dict[str, Decimal | int] = {
+        name: base.value(name) for name in LIMIT_FIELDS
+    }
+    applied = dict(base.applied)
+    for name in LIMIT_FIELDS:
+        value = _coerce(name, overrides.get(name))
+        if value is not None:
+            values[name] = value
+            applied[name] = SOURCE_OVERRIDE
+    return RiskLimits(
+        strategy_id=base.strategy_id,
+        max_position_pct=values["max_position_pct"],  # type: ignore[arg-type]
+        max_total_pct=values["max_total_pct"],  # type: ignore[arg-type]
+        max_order_qty=values["max_order_qty"],  # type: ignore[arg-type]
+        daily_loss_limit=values["daily_loss_limit"],  # type: ignore[arg-type]
+        consecutive_loss_limit=values["consecutive_loss_limit"],  # type: ignore[arg-type]
+        applied=applied,
+    )
+
+
+def limits_payload(
+    limits: RiskLimits, *, paper_mode: bool
+) -> dict[str, object]:
+    """worker 发布给看板的生效值（值 + 来源）。"""
+    return {
+        "strategy": limits.strategy_id,
+        "paper_mode": paper_mode,
+        "rules": {name: str(limits.value(name)) for name in LIMIT_FIELDS},
+        "sources": {name: limits.source(name) for name in LIMIT_FIELDS},
+    }
+
+
 __all__ = [
     "CODE_DEFAULTS",
     "INT_FIELDS",
@@ -172,6 +212,8 @@ __all__ = [
     "SOURCE_OVERRIDE",
     "SOURCE_STRATEGY",
     "RiskLimits",
+    "apply_overrides",
+    "limits_payload",
     "parse_override_hash",
     "resolve_limits",
 ]

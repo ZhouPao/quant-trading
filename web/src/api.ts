@@ -248,6 +248,8 @@ export type RiskLimitRule = {
   ratio: string | null;
   level: "ok" | "warn" | "halt";
   detail: string;
+  /** 该限值来自哪一层：default/global/strategy/override */
+  source: string | null;
 };
 
 export type RiskCircuit = {
@@ -524,6 +526,29 @@ async function postGuarded<T>(
   return (await response.json()) as T;
 }
 
+/** 带写操作守卫头的 DELETE（用于清除覆盖这类无 body 的写操作）。 */
+async function deleteGuarded<T>(path: string, token = ""): Promise<T> {
+  const response = await fetch(path, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/json",
+      "X-Dashboard-Request": "1",
+      ...(token ? { "X-Dashboard-Token": token } : {}),
+    },
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: unknown };
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      // 非 JSON 响应，保留状态码
+    }
+    throw new Error(detail);
+  }
+  return (await response.json()) as T;
+}
+
 export type ReportRow = {
   metric: string;
   paper: string;
@@ -615,6 +640,94 @@ export async function fetchAll(signal: AbortSignal) {
 /** 风控限额单独拉取：后端尚未部署该接口时不能拖垮整个页面。 */
 export async function fetchRiskLimits(signal: AbortSignal) {
   return getJson<RiskLimitsResponse>("/api/risk-limits", signal);
+}
+
+export type RiskOverrideItem = {
+  id: number;
+  strategy_id: string;
+  param: string;
+  old_value: string | null;
+  new_value: string;
+  reason: string | null;
+  source: string;
+  changed_by: string;
+  changed_at: number;
+  revoked_at: number | null;
+  revoked_by: string | null;
+};
+
+export type RiskOverridesResponse = {
+  ts: number;
+  strategy_id: string | null;
+  /** 当前生效的覆盖：{param: value} */
+  effective: Record<string, string>;
+  items: RiskOverrideItem[];
+  total: number | null;
+  degraded: string[];
+};
+
+export type RiskOverrideResult = {
+  strategy_id: string;
+  param: string;
+  old_value: string | null;
+  new_value: string;
+  reason: string;
+  changed_by: string;
+  changed_at: number;
+};
+
+export type RiskOverrideClearResult = {
+  strategy_id: string;
+  param: string;
+  cleared: boolean;
+  reason?: string;
+  old_value?: string | null;
+  revoked?: number;
+  cleared_at?: number;
+};
+
+/** 在线阈值覆盖与变更审计（M7-8 / M7-14）。 */
+export async function fetchRiskOverrides(
+  signal: AbortSignal,
+  strategyId?: string | null,
+  limit = 20,
+) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (strategyId) query.set("strategy_id", strategyId);
+  return getJson<RiskOverridesResponse>(
+    `/api/risk/overrides?${query.toString()}`,
+    signal,
+  );
+}
+
+/** 写入/更新一条覆盖：调完 worker 下一轮心跳即生效，无需重启。 */
+export async function setRiskOverride(
+  payload: {
+    strategy_id: string;
+    param: string;
+    value: string;
+    reason: string;
+    by?: string;
+  },
+  token = "",
+) {
+  return postGuarded<RiskOverrideResult>(
+    "/api/risk/overrides",
+    payload,
+    token,
+  );
+}
+
+/** 清除覆盖，回落到配置层（全局/策略取严结果）。 */
+export async function clearRiskOverride(
+  strategyId: string,
+  param: string,
+  token = "",
+) {
+  return deleteGuarded<RiskOverrideClearResult>(
+    `/api/risk/overrides/${encodeURIComponent(strategyId)}/${encodeURIComponent(param)}`,
+    token,
+  );
 }
 
 /** 权益曲线单独拉取：时间范围由页面切换，后端上限 720 小时（30 天）。 */

@@ -75,6 +75,7 @@ from quant.dashboard.service import DashboardService
 from quant.dashboard.tasks import RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
+from quant.risk.overrides import OverrideError
 from quant.webhook.auth import verify_token
 
 log = get_logger("dashboard.app")
@@ -126,6 +127,16 @@ class ReplayBatchRequest(BaseModel):
     """批量重放死信。"""
 
     ids: list[str]
+
+
+class RiskOverrideRequest(BaseModel):
+    """阈值在线调整：值用字符串传，避免浮点丢精度。"""
+
+    strategy_id: str
+    param: str
+    value: str
+    reason: str
+    by: str = "dashboard"
 
 
 def _host_only(raw: str) -> str:
@@ -241,6 +252,56 @@ def create_app(
     @app.get("/api/risk-limits")
     async def risk_limits() -> JSONResponse:
         return JSONResponse(await service.risk_limits())
+
+    @app.get("/api/risk/overrides")
+    async def risk_overrides(
+        strategy_id: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+        include_revoked: bool = Query(True),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await service.risk_overrides(
+                strategy_id=strategy_id,
+                limit=limit,
+                offset=offset,
+                include_revoked=include_revoked,
+            )
+        )
+
+    @app.post("/api/risk/overrides")
+    async def set_risk_override(
+        request: Request, req: RiskOverrideRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            result = await service.set_risk_override(
+                req.strategy_id,
+                req.param,
+                req.value,
+                reason=req.reason,
+                by=req.by,
+            )
+        except OverrideError as e:
+            # 字段名/取值/原因不合法属于调用方问题，不是服务故障
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse(result)
+
+    @app.delete("/api/risk/overrides/{strategy_id}/{param}")
+    async def clear_risk_override(
+        request: Request,
+        strategy_id: str,
+        param: str,
+        by: str = Query("dashboard"),
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            result = await service.clear_risk_override(
+                strategy_id, param, by=by
+            )
+        except OverrideError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse(result)
 
     @app.get("/api/alerts")
     async def alerts(

@@ -105,6 +105,8 @@ web_dir = "./web/dist"                    # 前端构建产物目录
 
 [monitor]
 alerts_persist = true                     # 告警写 SQLite；false 退回「只写 Redis」的旧行为
+risk_limits_key = "quant:risk:limits"     # worker 发布生效阈值（键后缀 :{strategy}），看板只读
+risk_overrides_key = "quant:risk:overrides" # 在线阈值覆盖 hash（{strategy}:{param}）；清空即全部回落配置
 
 [report]
 enabled = false                           # true=monitor 每日定时出模拟盘偏离日报

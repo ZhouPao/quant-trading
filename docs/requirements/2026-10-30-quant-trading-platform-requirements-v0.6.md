@@ -532,8 +532,8 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 #### 4.7.3 存储
 
 - **SQLite 新增 2 张表**：`risk_events`（每次判定一条，`hits` 存 JSON）、`risk_overrides`（阈值变更留痕：字段、改前、改后、时间、原因、操作来源）
-- **Redis**：`quant:risk:limits`（阈值覆盖层，值带变更时间戳）、`quant:risk:circuit:{inst_id}`（熔断状态；默认**不设 TTL**，需人工确认恢复，仅在 `circuit_resume_requires_confirm=false` 时带 cooldown TTL）
-- 覆盖值只存在于 Redis 与 `risk_overrides`，**不写回 toml**；进程重启后从 Redis 恢复
+- **Redis**：`quant:risk:limits:{strategy}`（worker 发布的生效值，带 TTL）、`quant:risk:overrides`（hash，字段 `{strategy}:{param}` → 值；**唯一生效源**，worker 每轮心跳重读）、`quant:risk:circuit:{inst_id}`（熔断状态；默认**不设 TTL**，需人工确认恢复，仅在 `circuit_resume_requires_confirm=false` 时带 cooldown TTL）
+- 覆盖值只存在于 Redis 与 `risk_overrides`，**不写回 toml**；进程重启后从 Redis 恢复。清空该 hash 即全部回落配置值（应急回滚手段）
 
 #### 4.7.4 接口
 
@@ -556,13 +556,13 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M7-5 | 实时风险指标 | 保证金率、实时回撤、强平距离、撤单率；与首页 M1-3 同源 | F5.3 | ✅ |
 | M7-6 | 极端行情熔断 | 单根振幅 `(high−low)/open` 超阈值（默认 10%）按品种暂停 N 分钟并告警。已落地：`CircuitBreaker.evaluate()` 在引擎每轮评估已收盘 bar 时判定，触发后该品种跳过并推进水位（恢复后不补评估过期 bar），落 `risk_events` 并产生 `circuit_breaker` 告警；worker 同步拒绝该品种信号，其它品种不受影响；冷却期结束后转 `awaiting_resume`，需人工确认恢复 | 4.7（v0.5） | ✅ |
 | M7-7 | 下单前预检 | 余额、价格/数量精度、最小下单量、最小名义金额；当前仅手工交易校验 `minSz`，需下沉到 worker 使自动路径同样生效 | F4.4 | 🟡 |
-| M7-8 | 阈值在线调整 | 看板改阈值 → 写 Redis 覆盖层 + 落 `risk_overrides`；不重启即生效，变更可追溯 | 新增 | ⬜ |
-| M7-9 | 风控规则页 | 展示生效规则、阈值及来源（全局/策略/覆盖）、今日触发次数与最近一次详情。**阈值与来源已展示**；`risk_events` 只写不读，触发次数与最近详情缺查询接口 | 新增 | 🟡 |
+| M7-8 | 阈值在线调整 | 看板改阈值 → 写 Redis 覆盖层 + 落 `risk_overrides`；不重启即生效，变更可追溯。已落地：`RiskOverrideService.set/clear/list` 写 Redis hash `quant:risk:overrides`（字段 `{strategy}:{param}`）并追加审计行；worker 每轮心跳 `_refresh_limits()` 重读覆盖层并重建 `RiskConfig`，因此最长一个心跳周期（默认 60s）生效；`GET/POST /api/risk/overrides`、`DELETE /api/risk/overrides/{strategy_id}/{param}`；看板「风控限额」内嵌「在线调整阈值」表单与生效覆盖列表 | 新增 | ✅ |
+| M7-9 | 风控规则页 | 展示生效规则、阈值及来源（全局/策略/覆盖）、今日触发次数与最近一次详情。**阈值与来源已展示**（规则行显示 `default/global/strategy/override` 标注，override 红色高亮）；`risk_events` 只写不读，触发次数与最近详情缺查询接口 | 新增 | 🟡 |
 | M7-10 | 两层参数合并 | 全局默认 + 策略覆盖取严；`RiskLimits.applied` 标注每字段来源，页面可解释「这个值从哪来」。看板「风险规则」面板已显示 global/strategy/override 来源 | 新增 | ✅ |
 | M7-11 | 风控事件落库 | 每次判定写 `risk_events`，含命中规则、限值、实际值、调整前后数量、当时权益；拒绝与减量都记 | 新增 | ✅ |
 | M7-12 | 熔断恢复策略 | 冷却期结束不自动放行，需人工在风控页确认恢复；恢复动作写 `risk_events`。已落地：冷却到期状态转 `awaiting_resume`（键不设 TTL，引擎与 worker 继续拦截），`POST /api/risk/circuits/{inst_id}/resume` 仅在冷却结束后可用，恢复时写一条 `decision=resumed` 的 `risk_events` 并发 INFO 告警；`[risk] circuit_resume_requires_confirm=false` 可回滚到自动恢复。**已知风险**：熔断键永久保留，若长期无人确认，该品种会一直不开新仓；且 `awaiting_resume` 期间的 bar 不补评估，Redis 未持久化重启会丢失熔断状态（等同自动恢复）。运维口径见 `docs/reference/RUNBOOK_PAPER_TRADING.md` §4.1 | 新增 | ✅ |
 | M7-13 | 熔断与 kill switch 职责分离 | 熔断只作用于单个品种、有自动冷却；kill switch 作用于全局、只能人工解除。两者互不复用状态键。状态键分别为 `quant:risk:circuit:{inst_id}` 与 `quant:kill-switch`，单测覆盖「熔断不激活 kill switch」「其它品种照常交易」 | 新增 | ✅ |
-| M7-14 | 阈值变更审计 | `risk_overrides` 记录字段、改前、改后、时间、原因、来源；覆盖值可从页面一键清除回落到配置值 | 新增 | ⬜ |
+| M7-14 | 阈值变更审计 | `risk_overrides` 记录字段、改前、改后、时间、原因、来源；覆盖值可从页面一键清除回落到配置值。已落地：`insert_risk_override` 只追加不覆盖，`revoke_risk_overrides` 置 `revoked_at/revoked_by` 而非删行；`RiskOverrideService` 先写 Redis 后写审计，**审计失败回滚 Redis**，避免「生效了但查不到谁改的」；变更原因必填，比例类字段约束在 (0,1]；看板「变更历史」可查全部记录（含已清除） | 新增 | ✅ |
 | M7-15 | 权益口径统一 | 一律使用 monitor 账户快照的 `total_equity`；未拿到快照时不得退回 `initial_equity` 做真实下单判定，应拒绝并记原因。`[risk] allow_initial_equity_fallback` 默认 `false`，worker 已按配置传入 | 新增 | ✅ |
 | M7-16 | 规则边界单测 | 每条规则覆盖：恰好等于阈值、无可用价格、空持仓、权益为 0、多规则同时命中时的优先级。`tests/test_risk.py` 已覆盖上述边界 | 新增 | ✅ |
 | M7-17 | 风控与告警联动 | `halt=true` 或熔断触发时，同步产生 M9 告警；同一次事件不重复告警（按 signal_id 去重）。熔断分支已接入（引擎直接 `AlertService.publish`）；`halt`（日亏损/连亏）的告警联动仍未接 | 新增 | 🟡 |
@@ -1019,3 +1019,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 16，极端行情熔断落地） | M7-6 由 ⬜ 改 ✅：新增 `risk/circuit_breaker.py`，按 `(high−low)/open` 严格大于阈值判定，状态存 `quant:risk:circuit:{inst_id}` 并带 TTL 自动到期（该 TTL 行为已被补充 17 改为人工确认恢复）；引擎每轮检查待评估 bar，触发后跳过该品种、推进水位（恢复后不补评估过期 bar）、落 `risk_events` 并产生 `circuit_breaker` 告警；worker 对熔断品种的信号直接拒绝（不触发 kill switch）；看板「风险规则」显示熔断中的品种与预计解除时间；`[risk] circuit_enabled`/`circuit_amplitude_pct`/`circuit_cooldown_seconds` 三项配置，前两项默认 10% 与 900 秒。M7-13 由 ⬜ 改 ✅（状态键与 kill switch 完全分离，单测覆盖）；M7-17 由 ⬜ 改 🟡（熔断告警分支已接，`halt` 告警未接）。M7-12 仍 ⬜：当前冷却结束后自动恢复，人工确认恢复待后续实现 |
 | 2026-10-31 | v0.6（补充 17，熔断人工确认恢复落地） | M7-12 由 ⬜ 改 ✅：熔断键改为不设 TTL，冷却到期后 `status` 跃迁为 `awaiting_resume`，引擎与 worker 继续拦截该品种；新增 `DashboardService.resume_circuit()` 与 `POST /api/risk/circuits/{inst_id}/resume`（写操作守卫），只允许冷却结束后调用，恢复时写 `decision=resumed` 的 `risk_events` 并发 INFO 告警；看板「风险规则」对 `awaiting_resume` 显示「确认恢复」按钮，恢复后立即重取；`[risk] circuit_resume_requires_confirm=false` 可回滚到 TTL 自动恢复。同步修正 M7-6 描述与 `CircuitBreakerState` 字段表（`status` 实际为 `tripped`/`awaiting_resume`，新增 `requires_confirm`） |
 | 2026-10-31 | v0.6（补充 18，熔断键保留风险入档） | 修正 §4.7.3 中 `quant:risk:circuit:{inst_id}`「带 TTL」的过期描述（默认不设 TTL）；M7-12 补充已知风险：熔断键永久保留，长期无人确认会让该品种持续不开新仓，`awaiting_resume` 期间 bar 不补评估，Redis 未持久化重启会丢失熔断状态（等同自动恢复）；`docs/reference/RUNBOOK_PAPER_TRADING.md` 新增 §4.1 熔断处置（查看/恢复/删键应急/回滚开关）与「某品种一直不开仓」排查项 |
+| 2026-10-31 | v0.6（补充 19，阈值在线调整与审计落地） | M7-8 由 ⬜ 改 ✅、M7-14 由 ⬜ 改 ✅：新增 `risk/overrides.py`（`RiskOverrideService.set/clear/list`），覆盖值写 Redis hash `quant:risk:overrides`（字段 `{strategy}:{param}`）、审计追加写 `risk_overrides`（只追加、撤销置 `revoked_at`）；写入顺序为「先 Redis 后审计」，审计失败回滚 Redis；变更原因必填，比例类字段约束 (0,1]。worker 新增 `_refresh_limits()`，每轮心跳重读覆盖层并重建 `RiskConfig`，因此最长 60s 生效、无需重启；Redis 读失败保留上一轮生效值（不静默退回配置）。新增 `GET/POST /api/risk/overrides` 与 `DELETE /api/risk/overrides/{strategy_id}/{param}`（写操作守卫）；看板「风控限额」内嵌在线调整表单、生效覆盖 chip（可一键清除）与变更历史，规则行补 `default/global/strategy/override` 来源标注。M7-9 保持 🟡（来源已展示，触发次数仍缺接口） |

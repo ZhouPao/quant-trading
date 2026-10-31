@@ -282,6 +282,9 @@ class MonitorSettings(BaseModel):
     # worker 每轮发布生效风控参数（键后缀 :{strategy}），看板只读
     risk_limits_key: str = "quant:risk:limits"
     risk_limits_ttl_seconds: int = 300
+    # 在线阈值覆盖层（hash，字段 {strategy}:{param}）；worker 每轮心跳重读，
+    # 因此看板调整后不重启即生效（M7-8）
+    risk_overrides_key: str = "quant:risk:overrides"
 
 
 class RiskDefaults(BaseModel):

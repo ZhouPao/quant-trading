@@ -37,6 +37,7 @@ from quant.queue.signal_queue import SignalQueue
 from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
 from quant.risk.config import RiskConfig
 from quant.risk.events import build_event_id
+from quant.risk.overrides import RiskOverrideService
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
@@ -365,6 +366,10 @@ class DashboardService:
                 inflight_key=settings.redis.inflight_key,
                 dead_key=settings.redis.dead_key,
             ),
+        )
+        # 阈值在线调整：覆盖层在 Redis，审计在 SQLite（M7-8 / M7-14）
+        self._overrides = RiskOverrideService(
+            store, redis, key=settings.monitor.risk_overrides_key
         )
 
     @property
@@ -726,6 +731,59 @@ class DashboardService:
             "circuits": circuits,
             "degraded": degraded,
         }
+
+    async def risk_overrides(
+        self,
+        *,
+        strategy_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        include_revoked: bool = True,
+    ) -> dict[str, object]:
+        """在线阈值覆盖与变更审计（M7-8 / M7-14）。"""
+        try:
+            data = await self._overrides.list(
+                strategy_id=strategy_id,
+                limit=limit,
+                offset=offset,
+                include_revoked=include_revoked,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"list risk overrides failed: {e}")
+            return {
+                "ts": int(time.time() * 1000),
+                "strategy_id": strategy_id,
+                "effective": {},
+                "items": [],
+                "total": None,
+                "degraded": ["sqlite"],
+            }
+        data["degraded"] = []
+        return data
+
+    async def set_risk_override(
+        self,
+        strategy_id: str,
+        param: str,
+        value: str | int | float | Decimal,
+        *,
+        reason: str,
+        by: str = "dashboard",
+    ) -> dict[str, object]:
+        """写入一条在线覆盖。
+
+        Raises:
+            OverrideError: 字段名/值/原因不合法，转由 API 层返回 400。
+        """
+        return await self._overrides.set(
+            strategy_id, param, value, reason=reason, by=by
+        )
+
+    async def clear_risk_override(
+        self, strategy_id: str, param: str, *, by: str = "dashboard"
+    ) -> dict[str, object]:
+        """清除覆盖，回落到配置层。"""
+        return await self._overrides.clear(strategy_id, param, by=by)
 
     async def resume_circuit(self, inst_id: str) -> dict[str, object]:
         """人工确认恢复某个品种的熔断（M7-12）。

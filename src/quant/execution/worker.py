@@ -22,6 +22,14 @@ from quant.foundation.schedule import day_start_ms_utc8
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker, RiskDecision
 from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
+from quant.risk.config import RiskConfig
+from quant.risk.limits import (
+    LIMIT_FIELDS,
+    RiskLimits,
+    apply_overrides,
+    limits_payload,
+    parse_override_hash,
+)
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("execution.worker")
@@ -50,6 +58,9 @@ class Worker:
         risk_limits: dict[str, object] | None = None,
         risk_limits_ttl: int = 300,
         circuit: CircuitBreaker | None = None,
+        overrides_key: str | None = None,
+        base_limits: RiskLimits | None = None,
+        paper_mode: bool = False,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -69,6 +80,12 @@ class Worker:
         self.risk_limits_ttl = risk_limits_ttl
         # 熔断状态由引擎按品种置位，worker 只读：webhook 信号也要受限
         self.circuit = circuit
+        # 在线阈值覆盖：base 是「全局+策略+paper-mode」合并后的基线，
+        # 每轮心跳叠上 Redis 覆盖层，调完不重启即生效（M7-8）
+        self.overrides_key = overrides_key
+        self.base_limits = base_limits
+        self._current_limits = base_limits
+        self._paper_mode = paper_mode
         self._running = False
 
     async def run(self) -> None:
@@ -250,14 +267,53 @@ class Worker:
         )
 
     async def _heartbeat_loop(self) -> None:
+        """心跳 + 生效阈值刷新：两者都在同一周期，看板看到的就是生效值。"""
         while self._running:
             await self.redis.set(
                 self.HEARTBEAT_KEY,
                 int(time.time() * 1000),
                 ex=self.HEARTBEAT_TTL,
             )
+            await self._refresh_limits()
             await self._publish_risk_limits()
             await asyncio.sleep(self.heartbeat_interval)
+
+    async def _refresh_limits(self) -> None:
+        """从 Redis 覆盖层重算生效阈值（M7-8）。
+
+        覆盖值是人工在线调整的结果，每轮心跳重读一次：不重启即生效。
+        读取失败时**保留上一轮的生效值**——Redis 抖动时若退回配置值，
+        阈值会突然收紧（或放宽），比继续用上一次的人工决定更危险。
+        """
+        if not self.overrides_key or self.base_limits is None:
+            return
+        try:
+            raw = await self.redis.hgetall(self.overrides_key)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"read risk overrides failed: {e}")
+            return
+
+        overrides = parse_override_hash(raw, self.base_limits.strategy_id)
+        limits = apply_overrides(self.base_limits, overrides)
+        if limits == self._current_limits:
+            return
+
+        changed = [
+            name
+            for name in LIMIT_FIELDS
+            if limits.value(name) != (
+                self._current_limits.value(name)
+                if self._current_limits is not None
+                else None
+            )
+        ]
+        self._current_limits = limits
+        self.risk.config = RiskConfig(
+            strategy_id=limits.strategy_id,
+            **{name: limits.value(name) for name in LIMIT_FIELDS},  # type: ignore[arg-type]
+        )
+        self.risk_limits = limits_payload(limits, paper_mode=self._paper_mode)
+        log.warning(f"risk limits refreshed from overrides fields={changed}")
 
     async def _publish_risk_limits(self) -> None:
         """发布本进程实际生效的风控参数（含 paper-mode 覆盖）。

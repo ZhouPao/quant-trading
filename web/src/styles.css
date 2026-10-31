@@ -704,6 +704,130 @@ code {
   margin-top: 6px;
 }
 
+/* 阈值来源标注：override 高亮，因为它是最容易忘记的一层 */
+.risk-src {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--ink-2);
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.risk-src-override {
+  color: #d64e4e;
+  background: rgba(214, 78, 78, 0.12);
+}
+
+/* 阈值在线调整（M7-8）与变更历史（M7-14） */
+.risk-ov {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(127, 127, 127, 0.25);
+  font-size: 12px;
+}
+
+.risk-ov-head {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.risk-ov-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.risk-ov-form select,
+.risk-ov-form input {
+  padding: 4px 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+
+.risk-ov-form select {
+  min-width: 150px;
+}
+
+.risk-ov-form input {
+  min-width: 130px;
+}
+
+.risk-ov-form input:nth-of-type(2) {
+  min-width: 230px;
+}
+
+.risk-ov-hint {
+  margin: 8px 0 0;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.risk-ov-active {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.risk-ov-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid rgba(214, 78, 78, 0.35);
+  border-radius: 999px;
+  background: rgba(214, 78, 78, 0.08);
+}
+
+.risk-ov-chip button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #d64e4e;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.risk-ov-history {
+  margin-top: 10px;
+  color: var(--ink-2);
+}
+
+.risk-ov-history summary {
+  cursor: pointer;
+}
+
+.risk-ov-history ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.risk-ov-history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.risk-ov-reason {
+  color: var(--ink-2);
+}
+
+.risk-ov-revoked {
+  color: rgba(127, 127, 127, 0.8);
+  text-decoration: line-through;
+}
+
 .risk-item {
   min-width: 0;
   padding-left: 10px;

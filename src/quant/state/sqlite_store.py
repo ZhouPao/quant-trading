@@ -775,6 +775,115 @@ class SQLiteStore:
             for r in rows
         }
 
+    def insert_risk_override(
+        self,
+        strategy_id: str,
+        param: str,
+        new_value: str,
+        *,
+        changed_at: int,
+        changed_by: str,
+        reason: str | None = None,
+        old_value: str | None = None,
+        source: str = "dashboard",
+    ) -> int:
+        """写一条阈值变更审计（M7-14），返回自增 id。
+
+        只追加不更新：同一字段的多次调整是独立的变更记录，
+        不能靠覆盖旧行来「保持整洁」——那就没有审计了。
+        """
+        row = self._query_one(
+            """
+            INSERT INTO risk_overrides (
+                strategy_id, param, old_value, new_value, reason, source,
+                changed_by, changed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                strategy_id,
+                param,
+                old_value,
+                new_value,
+                reason,
+                source,
+                changed_by,
+                changed_at,
+            ),
+        )
+        return int(row["id"]) if row else 0
+
+    def get_active_risk_override(
+        self, strategy_id: str, param: str
+    ) -> dict | None:
+        """某字段当前生效的覆盖（`revoked_at IS NULL` 的最新一条）。"""
+        row = self._query_one(
+            """
+            SELECT id, strategy_id, param, old_value, new_value, reason,
+                   source, changed_by, changed_at
+              FROM risk_overrides
+             WHERE strategy_id = ? AND param = ? AND revoked_at IS NULL
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (strategy_id, param),
+        )
+        return dict(row) if row else None
+
+    def revoke_risk_overrides(
+        self,
+        strategy_id: str,
+        param: str,
+        *,
+        revoked_at: int,
+        revoked_by: str,
+    ) -> int:
+        """撤销某字段的全部生效覆盖，返回撤销条数。
+
+        一次撤销所有未撤销行（而不是只撤最新一条）：历史遗留的多条
+        生效行会让「清除覆盖」看起来没生效。
+        """
+        return self._execute(
+            """
+            UPDATE risk_overrides
+               SET revoked_at = ?, revoked_by = ?
+             WHERE strategy_id = ? AND param = ? AND revoked_at IS NULL
+            """,
+            (revoked_at, revoked_by, strategy_id, param),
+        )
+
+    def list_risk_overrides(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        strategy_id: str | None = None,
+        include_revoked: bool = True,
+    ) -> tuple[list[dict], int]:
+        """阈值变更审计记录，返回 (行, 命中总数)，按时间倒序。"""
+        clauses: list[str] = []
+        params: list[object] = []
+        if strategy_id is not None:
+            clauses.append("strategy_id = ?")
+            params.append(strategy_id)
+        if not include_revoked:
+            clauses.append("revoked_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        total_row = self._query_one(
+            f"SELECT COUNT(*) AS n FROM risk_overrides {where}", tuple(params)
+        )
+        rows = self._query_all(
+            f"""
+            SELECT id, strategy_id, param, old_value, new_value, reason,
+                   source, changed_by, changed_at, revoked_at, revoked_by
+              FROM risk_overrides {where}
+             ORDER BY changed_at DESC, id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows], int(total_row["n"]) if total_row else 0
+
     # ------------------------------------------------------------------
     # alerts / silences
     # ------------------------------------------------------------------

@@ -645,6 +645,50 @@ sqlite3 data/state/quant.db \
 
 ---
 
+## 4.2 阈值在线调整（M7-8 / M7-14）
+
+看板「风控限额」卡片底部有「在线调整阈值」表单：选字段、填新值、填变更原因
+（必填）后保存。也可以直接调接口：
+
+```bash
+# 收紧单笔上限到 5000 USDT
+curl -X POST -H 'Host: 127.0.0.1:8080' -H 'X-Dashboard-Request: 1' \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy_id":"sma_cross","param":"max_order_qty","value":"5000","reason":"行情波动大，先降杠杆"}' \
+  http://127.0.0.1:8080/api/risk/overrides
+
+# 清除覆盖，回落到全局/策略取严结果
+curl -X DELETE -H 'Host: 127.0.0.1:8080' -H 'X-Dashboard-Request: 1' \
+  http://127.0.0.1:8080/api/risk/overrides/sma_cross/max_order_qty
+
+# 查看生效覆盖与变更历史
+curl -s 'http://127.0.0.1:8080/api/risk/overrides?strategy_id=sma_cross'
+```
+
+行为约定：
+
+- **生效延迟**：覆盖值写进 Redis 后由 worker 下一轮心跳重读，最长 60s
+  （`--heartbeat-interval`）。看板上「覆盖」标注出现即表示 worker 已采用；
+  出现标注但数值还是旧的，说明这一轮心跳还没走完。
+- **不写回 toml**：配置文件仍是基线，覆盖只是可随时清除的一层。改完
+  `config.toml` 不会顶掉覆盖，要新值生效请先清除覆盖。
+- **审计不可删**：每次调整都追加一行 `risk_overrides`，清除只置
+  `revoked_at`/`revoked_by`。查询：
+  ```bash
+  sqlite3 data/state/quant.db \
+    "SELECT datetime(changed_at/1000,'unixepoch','localtime'), strategy_id,
+            param, old_value, new_value, reason, changed_by, revoked_at
+       FROM risk_overrides ORDER BY id DESC LIMIT 20;"
+  ```
+- **写失败即回滚**：审计落库失败时覆盖值会被撤销并报错，不会出现
+  「值改了但查不到谁改的」。同理 Redis 写失败不会落审计行。
+- **应急回滚**：`redis-cli DEL quant:risk:overrides` 清空所有覆盖，worker
+  下一轮心跳退回配置值。各字段的取值范围：比例类 (0,1]、连亏笔数 ≥1。
+- **Redis 抖动**：worker 读不到覆盖层时**保留上一轮生效值**，不会静默退回
+  配置值；恢复后自动重新对齐。
+
+---
+
 ## 5. 停止进程
 
 - 手动分进程启动：各终端 `Ctrl+C` 即可优雅退出。
@@ -667,6 +711,8 @@ worker 退出时会把 inflight 信号回滚，下次启动自动恢复。
 | engine 一直 `no signal`、`fills` 为空 | 先确认本地数据里真的有交叉，而不是链路故障。见下方排查步骤 |
 | 下单量比预期小 | 看日志是 `qty adjusted by max_order_qty` 还是 `max_position_pct`，两者原因不同 |
 | 某品种一直不开仓，日志有 `circuit breaker awaiting manual resume` | 该品种熔断冷却已结束但没人确认。看板「风险规则」点「确认恢复」，或按 §4.1 调接口。**熔断键不设 TTL，不确认就一直暂停** |
+| 看板改了阈值但下单行为没变 | 覆盖生效依赖 worker 心跳（最长 60s）。先看日志有无 `risk limits refreshed from overrides`；没有则确认 worker 进程在跑、`quant:risk:overrides` 里有该字段（§4.2） |
+| 阈值明明清除了却还在生效 | `redis-cli HGETALL quant:risk:overrides` 看字段是否真被删；再查 `risk_overrides` 是否有未撤销行（`revoked_at IS NULL`） |
 
 `no signal` 排查步骤：
 
