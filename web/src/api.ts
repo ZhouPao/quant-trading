@@ -802,6 +802,41 @@ export async function fetchFreshness(signal: AbortSignal) {
   return { ...data, items: data.items ?? [] };
 }
 
+/** M1-6 今日事件流：当天信号/下单/成交/告警四表合并后的一条 */
+export type TimelineItem = {
+  ts: number;
+  kind: "alert" | "signal" | "order" | "fill" | string;
+  /** alert→级别；order→订单状态；fill/signal→方向 */
+  severity: string | null;
+  title: string;
+  detail: string;
+  ref_id: string;
+  /** 跳转目标：alerts / strategies / execution（前端再映射到 tab） */
+  module: string;
+};
+
+export type TimelineResponse = {
+  ts: number;
+  /** 当日 UTC+8 零点，与风控日切口径一致 */
+  since: number;
+  items: TimelineItem[];
+  degraded: string[];
+};
+
+export async function fetchTimeline(
+  signal: AbortSignal,
+  kinds: string[] = [],
+  limit = 50,
+) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (kinds.length > 0) query.set("kinds", kinds.join(","));
+  const data = await getJson<TimelineResponse>(
+    `/api/timeline?${query.toString()}`,
+    signal,
+  );
+  return { ...data, items: data.items ?? [] };
+}
+
 export type RiskOverrideItem = {
   id: number;
   strategy_id: string;

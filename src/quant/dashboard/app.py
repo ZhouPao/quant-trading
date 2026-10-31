@@ -413,6 +413,21 @@ def create_app(
     async def freshness() -> JSONResponse:
         return JSONResponse(await service.freshness())
 
+    @app.get("/api/timeline")
+    async def timeline(
+        kinds: str | None = Query(
+            None, description="逗号分隔：alert,signal,order,fill；空为全部"
+        ),
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+    ) -> JSONResponse:
+        parsed = (
+            [part.strip().lower() for part in kinds.split(",") if part.strip()]
+            if kinds
+            else []
+        )
+        return JSONResponse(await service.timeline(parsed, limit, offset))
+
     @app.get("/api/candles")
     async def candles(
         inst: str | None = Query(None, description="默认取 engine.inst"),

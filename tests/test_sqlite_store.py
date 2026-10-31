@@ -698,6 +698,64 @@ class TestAlertSilences:
         assert store.revoke_silence("s1", 3000) is False
 
 
+class TestDailyTimeline:
+    """M1-6：四表 UNION 合成今日事件流（MS4-A §8.1）。"""
+
+    BASE = 1_700_000_000_000
+
+    def _seed(self, store) -> None:
+        signal = _signal("sig-1")
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1",
+                signal=signal,
+                status="pending",
+                created_ts=self.BASE + 1000,
+            )
+        )
+        store.save_fill(_fill(ts=self.BASE + 2000))
+        store.insert_alert(
+            "a-1", "margin_ratio", "ERROR", "m", "fp",
+            created_at=self.BASE + 3000,
+        )
+
+    def test_merges_four_kinds_newest_first(self, store) -> None:
+        self._seed(store)
+
+        rows = store.daily_timeline(self.BASE)
+
+        assert [r["kind"] for r in rows] == ["alert", "fill", "order", "signal"]
+        assert rows[0]["severity"] == "ERROR"
+        assert rows[0]["ref_id"] == "a-1"
+        # signal 用 bar 时间（信号自身 ts），不是落库时间
+        assert rows[3]["ts"] == self.BASE
+        assert rows[3]["title"] == "buy BTC-USDT"
+
+    def test_kinds_filter_and_unknown_falls_back(self, store) -> None:
+        self._seed(store)
+
+        only = store.daily_timeline(self.BASE, kinds=["alert", "fill"])
+
+        assert [r["kind"] for r in only] == ["alert", "fill"]
+        # 拼错参数不应报错，回落为全部（前端筛选不该白屏）
+        assert len(store.daily_timeline(self.BASE, kinds=["bogus"])) == 4
+
+    def test_since_excludes_earlier_events(self, store) -> None:
+        self._seed(store)
+
+        rows = store.daily_timeline(self.BASE + 1500)
+
+        assert [r["kind"] for r in rows] == ["alert", "fill"]
+
+    def test_pagination_keeps_global_order(self, store) -> None:
+        self._seed(store)
+
+        page = store.daily_timeline(self.BASE, limit=2, offset=2)
+
+        assert [r["kind"] for r in page] == ["order", "signal"]
+
+
 class TestStrategyParams:
     def test_set_and_get(self, store) -> None:
         assert store.set_strategy_param("sma_cross", "fast_len", "8", 1000)

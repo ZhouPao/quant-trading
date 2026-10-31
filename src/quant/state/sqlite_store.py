@@ -928,6 +928,75 @@ class SQLiteStore:
         return [dict(r) for r in rows], int(total_row["n"]) if total_row else 0
 
     # ------------------------------------------------------------------
+    # 今日事件流（M1-6，MS4-A §8）
+    # ------------------------------------------------------------------
+
+    #: 事件流支持的四种类型，顺序即 UNION 分支顺序（也用作展示排序偏好）
+    TIMELINE_KINDS: tuple[str, ...] = ("alert", "signal", "order", "fill")
+
+    def daily_timeline(
+        self,
+        since_ms: int,
+        limit: int = 50,
+        offset: int = 0,
+        kinds: list[str] | None = None,
+    ) -> list[dict]:
+        """当日信号/下单/成交/告警四表合并，按事件时间倒序。
+
+        用单条 SQL 而不是分头查再在 Python 里合并：只有 `ORDER BY + LIMIT`
+        才能正确分页，否则跨类型时每路各取 N 条会错位。
+
+        时间一律取「事件发生时间」（`signals.ts` / `orders.created_ts` /
+        `fills.ts` / `alerts.created_at`）。用写入时间会让补评估的历史 bar
+        被排到今天，时间轴失真。
+
+        `kinds` 为空表示全部；非法值忽略并回落为全部，不报错——前端筛选
+        组件拼错参数不该白屏。
+        """
+        wanted = [k for k in (kinds or []) if k in self.TIMELINE_KINDS]
+        # 每个分支都必须显式起列别名：只筛一类时 UNION 只剩一个分支，
+        # 外层 ORDER BY 就找不到 kind/ref_id 这些名字
+        branches = {
+            "alert": """
+                SELECT created_at AS ts, 'alert' AS kind, level AS severity,
+                       rule AS title, message AS detail, alert_id AS ref_id
+                  FROM alerts WHERE created_at >= ?
+            """,
+            "signal": """
+                SELECT ts AS ts, 'signal' AS kind, NULL AS severity,
+                       side || ' ' || inst_id AS title,
+                       strategy_id || ' qty=' || COALESCE(qty, '0') AS detail,
+                       signal_id AS ref_id
+                  FROM signals WHERE ts >= ?
+            """,
+            "order": """
+                SELECT created_ts AS ts, 'order' AS kind, status AS severity,
+                       'order ' || order_id AS title,
+                       'filled=' || COALESCE(filled_qty, '0') AS detail,
+                       order_id AS ref_id
+                  FROM orders WHERE created_ts >= ?
+            """,
+            "fill": """
+                SELECT ts AS ts, 'fill' AS kind, side AS severity,
+                       side || ' ' || inst_id AS title,
+                       'qty=' || qty || ' @' || price AS detail,
+                       order_id AS ref_id
+                  FROM fills WHERE ts >= ?
+            """,
+        }
+        chosen = [k for k in self.TIMELINE_KINDS if not wanted or k in wanted]
+        sql = " UNION ALL ".join(branches[k] for k in chosen)
+        rows = self._query_all(
+            f"""
+            SELECT * FROM ({sql})
+             ORDER BY ts DESC, kind ASC, ref_id ASC
+             LIMIT ? OFFSET ?
+            """,
+            (*(since_ms for _ in chosen), limit, offset),
+        )
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # alerts / silences
     # ------------------------------------------------------------------
 

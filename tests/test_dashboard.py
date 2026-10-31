@@ -723,6 +723,82 @@ class TestAlerts:
         assert [s["silence_id"] for s in data["silences"]] == ["s-1"]
 
 
+class TestTimeline:
+    """M1-6：今日事件流合并与跳转目标（MS4-A §8）。"""
+
+    @staticmethod
+    def _seed(store, base: int) -> None:
+        """四类事件各一条；signal 用 bar 时间，早于其余三条。"""
+        signal = Signal(
+            strategy_id="sma_cross",
+            side="buy",
+            order_type="market",
+            inst_id="BTC-USDT",
+            qty=Decimal("1"),
+            ts=base - 3000,
+            signal_id="sig-1",
+        )
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1",
+                signal=signal,
+                status="pending",
+                created_ts=base - 2000,
+            )
+        )
+        store.save_fill(
+            Fill(
+                order_id="o-1",
+                inst_id="BTC-USDT",
+                side="buy",
+                qty=Decimal("1"),
+                price=Decimal("100"),
+                fee=Decimal("0.1"),
+                ts=base - 1000,
+            )
+        )
+        store.insert_alert(
+            "a-1", "margin_ratio", "ERROR", "m", "fp", created_at=base
+        )
+
+    async def test_merges_and_maps_modules(self, env) -> None:
+        service, store, _redis, _settings = env
+        now = int(time.time() * 1000)
+        self._seed(store, now)
+
+        data = await service.timeline()
+
+        assert [item["kind"] for item in data["items"]] == [
+            "alert", "fill", "order", "signal",
+        ]
+        assert [item["module"] for item in data["items"]] == [
+            "alerts", "execution", "execution", "strategies",
+        ]
+        assert data["degraded"] == []
+        # since 为当日 UTC+8 零点，且不晚于事件时间
+        assert data["since"] <= now
+
+    async def test_kinds_filter_and_pagination(self, env) -> None:
+        service, store, _redis, _settings = env
+        self._seed(store, int(time.time() * 1000))
+
+        only = await service.timeline(["alert"])
+        page = await service.timeline(None, 1, 1)
+
+        assert [item["kind"] for item in only["items"]] == ["alert"]
+        assert [item["kind"] for item in page["items"]] == ["fill"]
+
+    async def test_sqlite_failure_degrades(self, env) -> None:
+        service, store, _redis, _settings = env
+        store.daily_timeline = MagicMock(side_effect=RuntimeError("db locked"))
+
+        data = await service.timeline()
+
+        assert data["items"] == []
+        assert data["degraded"] == ["sqlite"]
+
+
 class TestProcesses:
     def _table(self, names: list[str]) -> str:
         return json.dumps(
@@ -908,6 +984,29 @@ class TestAlertsApi:
             "supervisor", "candles", "webhook", "worker",
             "engine", "monitor", "dashboard",
         }
+
+    async def test_timeline_endpoint_filters_kinds(self, env, tmp_path) -> None:
+        service, store, _redis, _settings = env
+        now = int(time.time() * 1000)
+        store.insert_alert(
+            "a-1", "margin_ratio", "ERROR", "m", "fp", created_at=now
+        )
+        store.save_fill(
+            Fill(order_id="o-1", inst_id="BTC-USDT", side="buy",
+                 qty=Decimal("1"), price=Decimal("100"),
+                 fee=Decimal("0"), ts=now - 1000)
+        )
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            all_kinds = await client.get("/api/timeline?limit=10")
+            only_fill = await client.get("/api/timeline?kinds=FILL&limit=10")
+
+        assert [i["kind"] for i in all_kinds.json()["items"]] == ["alert", "fill"]
+        # 大小写与逗号分隔都在路由层归一
+        assert [i["kind"] for i in only_fill.json()["items"]] == ["fill"]
 
 
 class TestEquity:

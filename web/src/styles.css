@@ -430,6 +430,106 @@ code {
   grid-column: span 12;
 }
 
+/* M1-6 今日事件流 */
+.timeline {
+  grid-column: span 12;
+}
+
+.tl-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tl-chip {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.tl-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.tl-chip-on {
+  border-color: rgba(200, 242, 79, 0.45);
+  background: rgba(200, 242, 79, 0.06);
+  color: var(--accent);
+}
+
+.tl-degraded {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--warn);
+}
+
+.tl-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.tl-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-row:hover {
+  background: rgba(226, 240, 228, 0.04);
+}
+
+.tl-time {
+  flex: none;
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
+.tl-title {
+  flex: none;
+  min-width: 96px;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.tl-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
+.tl-sev {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
 /* M1-7 数据新鲜度 */
 .freshness {
   grid-column: span 12;

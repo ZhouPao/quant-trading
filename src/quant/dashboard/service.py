@@ -1429,6 +1429,58 @@ class DashboardService:
         return {"silence_id": silence_id, "revoked": revoked}
 
     # ------------------------------------------------------------------
+    # 今日事件流（M1-6）
+    # ------------------------------------------------------------------
+
+    #: 事件类型 → 跳转目标（MS4-A §8.2；前端再映射到自己的 tab key）
+    _TIMELINE_MODULES = {
+        "alert": "alerts",
+        "signal": "strategies",
+        "order": "execution",
+        "fill": "execution",
+    }
+
+    async def timeline(
+        self,
+        kinds: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """当日信号/下单/成交/告警合并流（MS4-A §8）。
+
+        `since` 取当日 UTC+8 00:00，与风控日切口径一致；读失败只让这张卡
+        降级为 `degraded=["sqlite"]`，不影响首页其余卡片。
+        """
+        now = int(time.time() * 1000)
+        since = day_start_ms_utc8(now)
+        try:
+            rows = await asyncio.to_thread(
+                self._store.daily_timeline, since, limit, offset, kinds
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"timeline read failed: {e}")
+            return {
+                "ts": now,
+                "since": since,
+                "items": [],
+                "degraded": ["sqlite"],
+            }
+        return {
+            "ts": now,
+            "since": since,
+            "items": [
+                {
+                    **row,
+                    "module": self._TIMELINE_MODULES.get(
+                        str(row.get("kind")), "overview"
+                    ),
+                }
+                for row in rows
+            ],
+            "degraded": [],
+        }
+
+    # ------------------------------------------------------------------
     # 进程健康
     # ------------------------------------------------------------------
 

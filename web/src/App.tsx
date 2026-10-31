@@ -15,6 +15,7 @@ import {
   fetchQualityReport,
   fetchProcesses,
   fetchFreshness,
+  fetchTimeline,
   fetchReports,
   fetchRiskLimits,
   fetchRiskOverrides,
@@ -82,6 +83,8 @@ import {
   type RiskOverridesResponse,
   type StrategyBinding,
   type StrategyInfo,
+  type TimelineItem,
+  type TimelineResponse,
 } from "./api";
 import { CandleChart } from "./chart/CandleChart";
 import { IndicatorBar } from "./chart/IndicatorBar";
@@ -174,6 +177,32 @@ const TABS = [
 type TabKey = (typeof TABS)[number]["key"];
 type PendingTab = "factors" | "portfolio" | "settings";
 
+// M1-6 今日事件流：四类事件与筛选标签
+const TIMELINE_KINDS = [
+  { key: "signal", label: "信号" },
+  { key: "order", label: "下单" },
+  { key: "fill", label: "成交" },
+  { key: "alert", label: "告警" },
+] as const;
+
+// 后端给的 module 是 spec 口径（alerts/strategies/execution），这里换成看板 tab key
+const TIMELINE_TABS: Record<string, TabKey> = {
+  alerts: "logs",
+  strategies: "strategy",
+  execution: "execution",
+};
+
+/** 事件类型 → 行尾强调色：告警看级别，订单看状态，信号/成交看方向。 */
+function timelineTone(item: TimelineItem): string {
+  if (item.kind === "alert") {
+    return item.severity === "ERROR" ? "negative" : "dim";
+  }
+  if (item.kind === "order") {
+    return item.severity === "filled" ? "positive" : "dim";
+  }
+  return item.severity === "buy" ? "positive" : "negative";
+}
+
 const TAB_KEY = "quant.dashboard.tab";
 
 function loadTab(): TabKey {
@@ -259,6 +288,9 @@ export default function App() {
   const [processes, setProcesses] = useState<ProcessesResponse | null>(null);
   // M1-7 数据新鲜度与进程健康同频，都是分钟级信号
   const [freshness, setFreshness] = useState<FreshnessResponse | null>(null);
+  // M1-6 今日事件流：筛选变化立即重拉，其余时间跟行情同频
+  const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
+  const [timelineKinds, setTimelineKinds] = useState<string[]>([]);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -403,6 +435,25 @@ export default function App() {
     };
   }, []);
 
+  // M1-6 今日事件流：后端一次 UNION 查询，前端只负责筛选与跳转
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchTimeline(controller.signal, timelineKinds)
+        .then(setTimeline)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setTimeline(null);
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, [timelineKinds]);
+
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
   const orders = data?.orders.orders ?? [];
@@ -421,8 +472,9 @@ export default function App() {
         ...(reports?.degraded ?? []),
         ...(quality?.degraded ?? []),
         ...(equity?.degraded ?? []),
+        ...(timeline?.degraded ?? []),
       ]),
-    [overview, data, risk, equity, reports, quality],
+    [overview, data, risk, equity, reports, quality, timeline],
   );
   const alertStats = useMemo(() => {
     const byLevel: Record<string, number> = {};
@@ -726,6 +778,25 @@ export default function App() {
               ))}
             </ul>
           )}
+        </section>
+
+        <section className="card timeline reveal" style={{ animationDelay: "118ms" }}>
+          <div className="card-head">
+            <h2>今日事件流</h2>
+            <span className="card-note">
+              {timeline
+                ? `${timeline.items.length} 条 · 当日 UTC+8${
+                    timeline.degraded.length > 0 ? " · 降级" : ""
+                  }`
+                : "接口不可用"}
+            </span>
+          </div>
+          <TimelinePanel
+            data={timeline}
+            kinds={timelineKinds}
+            onKinds={setTimelineKinds}
+            onJump={(module) => selectTab(TIMELINE_TABS[module] ?? "overview")}
+          />
         </section>
 
         <section className="card freshness reveal" style={{ animationDelay: "120ms" }}>
@@ -4370,6 +4441,83 @@ function StatusTag({ status }: { status: string }) {
     rejected: "tag-bad",
   };
   return <span className={`tag ${map[status] ?? "tag-muted"}`}>{status}</span>;
+}
+
+/** M1-6 今日事件流：四表合并倒序，可按类型筛选，点击跳到对应模块。 */
+function TimelinePanel({
+  data,
+  kinds,
+  onKinds,
+  onJump,
+}: {
+  data: TimelineResponse | null;
+  kinds: string[];
+  onKinds: (next: string[]) => void;
+  onJump: (module: string) => void;
+}) {
+  if (!data) {
+    return <div className="empty">/api/timeline 不可用，今日事件流暂时读不到</div>;
+  }
+  const toggle = (key: string) => {
+    onKinds(
+      kinds.includes(key)
+        ? kinds.filter((item) => item !== key)
+        : [...kinds, key],
+    );
+  };
+  return (
+    <>
+      <div className="tl-filter">
+        <button
+          type="button"
+          className={kinds.length === 0 ? "tl-chip tl-chip-on" : "tl-chip"}
+          onClick={() => onKinds([])}
+        >
+          全部
+        </button>
+        {TIMELINE_KINDS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={kinds.includes(item.key) ? "tl-chip tl-chip-on" : "tl-chip"}
+            onClick={() => toggle(item.key)}
+          >
+            {item.label}
+          </button>
+        ))}
+        {data.degraded.length > 0 && (
+          <span className="tl-degraded">降级：{data.degraded.join(" / ")}</span>
+        )}
+      </div>
+      {data.items.length === 0 ? (
+        <div className="empty">
+          {kinds.length === 0
+            ? "当日还没有信号、下单、成交或告警"
+            : "当前筛选下没有事件"}
+        </div>
+      ) : (
+        <ul className="tl-list">
+          {data.items.map((item) => (
+            <li key={`${item.kind}-${item.ref_id}-${item.ts}`}>
+              <button
+                type="button"
+                className="tl-row"
+                onClick={() => onJump(item.module)}
+                title="点击跳到对应模块"
+              >
+                <span className="tl-time mono">{clock(item.ts)}</span>
+                <span className="tl-title">{item.title}</span>
+                <span className="tl-detail mono">{item.detail}</span>
+                <span className={`tl-sev mono ${timelineTone(item)}`}>
+                  {item.severity ?? item.kind}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
 }
 
 /** M1-7 数据新鲜度：区分「引擎落后」与「本地数据本身缺根」。 */
