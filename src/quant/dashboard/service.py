@@ -34,6 +34,7 @@ from quant.foundation.schedule import day_start_ms_utc8
 from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import SignalQueue
+from quant.risk.circuit_breaker import CircuitBreaker
 from quant.risk.config import RiskConfig
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
@@ -523,6 +524,17 @@ class DashboardService:
         day_start = day_start_ms_utc8(now)
         degraded: list[str] = []
 
+        # 熔断状态：与 kill switch 完全独立的按品种键（M7-13）
+        circuits: list[dict[str, object]] = []
+        try:
+            circuits = [
+                state.as_dict()
+                for state in await CircuitBreaker(self._redis).states()
+            ]
+        except Exception as e:  # noqa: BLE001
+            degraded.append("redis")
+            log.warning(f"circuit states read failed: {e}")
+
         payload: dict | None = None
         try:
             payload = await self._read_risk_limits()
@@ -540,6 +552,7 @@ class DashboardService:
                 "equity_source": None,
                 "day_start_ts": day_start,
                 "rules": [],
+                "circuits": circuits,
                 "degraded": degraded,
             }
 
@@ -709,6 +722,7 @@ class DashboardService:
             "equity_source": equity_source,
             "day_start_ts": day_start,
             "rules": rules,
+            "circuits": circuits,
             "degraded": degraded,
         }
 

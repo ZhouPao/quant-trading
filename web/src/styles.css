@@ -671,6 +671,34 @@ code {
   gap: 14px 18px;
 }
 
+/* 极端行情熔断（M7-6）：按品种暂停，与全局 kill switch 区分展示 */
+.risk-circuits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.risk-circuit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid rgba(214, 78, 78, 0.45);
+  border-radius: 8px;
+  background: rgba(214, 78, 78, 0.08);
+  font-size: 12px;
+}
+
+.risk-circuit b {
+  color: #d64e4e;
+}
+
+.risk-circuit-reason {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
 .risk-item {
   min-width: 0;
   padding-left: 10px;

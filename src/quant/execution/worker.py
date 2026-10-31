@@ -20,7 +20,8 @@ from quant.execution.kill_switch import KillSwitch
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.queue.signal_queue import SignalQueue
-from quant.risk.checker import RiskChecker
+from quant.risk.checker import RiskChecker, RiskDecision
+from quant.risk.circuit_breaker import CircuitBreaker
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("execution.worker")
@@ -48,6 +49,7 @@ class Worker:
         risk_limits_key: str | None = None,
         risk_limits: dict[str, object] | None = None,
         risk_limits_ttl: int = 300,
+        circuit: CircuitBreaker | None = None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -65,6 +67,8 @@ class Worker:
         self.risk_limits_key = risk_limits_key
         self.risk_limits = risk_limits
         self.risk_limits_ttl = risk_limits_ttl
+        # 熔断状态由引擎按品种置位，worker 只读：webhook 信号也要受限
+        self.circuit = circuit
         self._running = False
 
     async def run(self) -> None:
@@ -139,6 +143,34 @@ class Worker:
             )
             await self.queue.remove_inflight(signal)
             return
+
+        # 熔断：按品种拒绝（不影响其它品种，也不触发 kill switch）
+        if self.circuit is not None:
+            state = await self.circuit.state(signal.inst_id)
+            if state is not None:
+                decision = RiskDecision(
+                    approved=False,
+                    adjusted_qty=Decimal("0"),
+                    reason=f"circuit breaker active: {state.reason}",
+                    rule="circuit_breaker",
+                    limit_name="circuit_amplitude_pct",
+                )
+                await asyncio.to_thread(
+                    self.risk.record_event,
+                    decision,
+                    signal,
+                    now_ms=int(time.time() * 1000),
+                    equity=None,
+                )
+                await asyncio.to_thread(
+                    self.store.save_signal, signal, "rejected"
+                )
+                log.warning(
+                    f"signal rejected by circuit breaker "
+                    f"inst={signal.inst_id} id={signal.signal_id}"
+                )
+                await self.queue.remove_inflight(signal)
+                return
 
         market_price = (
             self.price_provider(signal.inst_id) if self.price_provider else None

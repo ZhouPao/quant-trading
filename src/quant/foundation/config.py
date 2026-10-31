@@ -304,6 +304,11 @@ class RiskDefaults(BaseModel):
     snapshot_max_age_ms: int = 180_000
     # 风控事件是否落库（灰度期回滚开关）
     event_log: bool = True
+    # 极端行情熔断（M7-6）：单根 (high-low)/open 严格大于阈值即按品种暂停。
+    # 设 circuit_enabled=false 可整体回滚到「无熔断」的旧行为。
+    circuit_enabled: bool = True
+    circuit_amplitude_pct: Decimal = Decimal("0.10")
+    circuit_cooldown_seconds: int = 900
 
 
 class Settings(BaseModel):

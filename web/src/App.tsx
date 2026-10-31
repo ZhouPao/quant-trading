@@ -690,11 +690,27 @@ function RiskLimitsPanel({
     );
   }
   return (
-    <div className="risk-grid">
-      {risk.rules.map((rule) => (
-        <RiskLimitRow key={rule.key} rule={rule} />
-      ))}
-    </div>
+    <>
+      {risk.circuits.length > 0 && (
+        <div className="risk-circuits">
+          {risk.circuits.map((item) => (
+            <div className="risk-circuit" key={item.inst_id}>
+              <b>{item.inst_id} 熔断中</b>
+              <span className="risk-circuit-reason">{item.reason}</span>
+              <span>
+                预计 {clock(item.resume_at)} 自动解除；冷却期内该品种信号会被
+                worker 拒绝，其它品种不受影响
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="risk-grid">
+        {risk.rules.map((rule) => (
+          <RiskLimitRow key={rule.key} rule={rule} />
+        ))}
+      </div>
+    </>
   );
 }
 

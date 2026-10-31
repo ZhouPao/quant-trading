@@ -66,6 +66,9 @@ def _settings(
         storage={"data_dir": tmp_path / "data"},
         state={"db_path": tmp_path / "data" / "state" / "quant.db"},
         backtest={"window_size": 200},
+        # 本文件的合成 K 线用大幅振幅制造金叉/破位（部分 bar 达 24%），
+        # 调高熔断阈值避免干扰引擎行为用例；熔断本身由 test_circuit_breaker 覆盖
+        risk={"circuit_amplitude_pct": "1.0"},
         engine={
             "strategy": "sma_cross",
             "inst": "BTC-USDT",

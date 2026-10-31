@@ -250,6 +250,14 @@ export type RiskLimitRule = {
   detail: string;
 };
 
+export type RiskCircuit = {
+  inst_id: string;
+  triggered_ts: number;
+  resume_at: number;
+  reason: string;
+  status: string;
+};
+
 export type RiskLimitsResponse = {
   ts: number;
   known: boolean;
@@ -259,6 +267,8 @@ export type RiskLimitsResponse = {
   equity_source: "snapshot" | "initial_cash" | null;
   day_start_ts: number;
   rules: RiskLimitRule[];
+  /** 当前处于熔断的品种（M7-6）；空数组表示无熔断 */
+  circuits: RiskCircuit[];
   degraded: string[];
 };
 

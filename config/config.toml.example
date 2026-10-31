@@ -66,6 +66,9 @@ db_path = "./data/state/quant.db"         # SQLite 状态库
 allow_initial_equity_fallback = false     # 权益快照缺失时是否退回 initial_cash 下单（false=拒单）
 snapshot_max_age_ms = 180000              # 快照最大可接受年龄，超龄视为不可用
 event_log = true                          # 拒绝/减量/硬停止是否写入 risk_events
+circuit_enabled = true                    # 极端行情熔断（单品种暂停，与 kill switch 分离）
+circuit_amplitude_pct = 0.10              # 单根振幅 (high-low)/open 超过即熔断
+circuit_cooldown_seconds = 900            # 熔断冷却时长（秒），到期自动解除
 
 [execution]
 reconcile_interval_seconds = 60           # worker 运行期对账间隔（0=仅启动时对账）

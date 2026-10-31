@@ -37,7 +37,11 @@ from quant.foundation.config import Settings
 from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger
 from quant.models import Bar
+from quant.monitor.alert_service import AlertEvent, AlertService
+from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import Deduper, SignalQueue
+from quant.risk.circuit_breaker import CircuitBreaker, CircuitState
+from quant.risk.events import build_event_id
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 from quant.storage.validator import DataValidator
@@ -98,6 +102,14 @@ class LiveSignalEngine:
         )
         self._bars = bars or BarStorage(settings.storage.data_dir)
         self._kill = KillSwitch(redis)
+        # 熔断只作用单个品种，与 kill switch 的全局状态键完全分开（M7-13）
+        self._circuit = (
+            CircuitBreaker(redis) if settings.risk.circuit_enabled else None
+        )
+        # 熔断是引擎侧事件，直接落库 + 推看板 + 邮件，不必等 monitor 轮询
+        self._alerts = AlertService(
+            store, redis, EmailAlerter(settings.smtp), settings.monitor
+        )
         self._heartbeat = Heartbeat(
             redis, "engine", interval=self._cfg.interval_seconds
         )
@@ -225,6 +237,11 @@ class LiveSignalEngine:
             # 跳过的 bar 没有真正评估，不计入补评估数
             return EngineTick("skipped", newest.ts, reason="kill switch active")
 
+        circuit_tick = await self._check_circuit(binding, pending, now)
+        if circuit_tick is not None:
+            await self._mark(binding, newest.ts)
+            return circuit_tick
+
         if await self._has_open_orders(binding):
             await self._mark(binding, newest.ts)
             return EngineTick("skipped", newest.ts, reason="pending orders")
@@ -313,6 +330,81 @@ class LiveSignalEngine:
         )
 
     # internal
+
+    async def _check_circuit(
+        self, binding: Binding, pending: list[Bar], now: int
+    ) -> EngineTick | None:
+        """极端行情熔断（M7-6）。
+
+        已有熔断状态时整轮跳过该品种；否则逐根检查待评估 bar，任一超阈值
+        立即熔断并返回 skipped。熔断期间的 bar 直接推进水位，恢复后不补评估
+        ——那段行情已经过去，补发信号只会用过期价格下单。
+        """
+        if self._circuit is None:
+            return None
+        cfg = self._settings.risk
+        state = await self._circuit.state(binding.inst_id)
+        if state is not None:
+            return EngineTick(
+                "skipped",
+                pending[-1].ts,
+                reason=f"circuit breaker active until {_clock(state.resume_at)}",
+            )
+        for bar in pending:
+            tripped = await self._circuit.evaluate(
+                bar,
+                threshold=cfg.circuit_amplitude_pct,
+                cooldown_seconds=cfg.circuit_cooldown_seconds,
+                now=now,
+            )
+            if tripped is None:
+                continue
+            await self._audit_circuit(binding, bar, tripped)
+            return EngineTick(
+                "skipped", bar.ts, reason=f"circuit breaker: {tripped.reason}"
+            )
+        return None
+
+    async def _audit_circuit(
+        self, binding: Binding, bar: Bar, state: CircuitState
+    ) -> None:
+        """熔断落 `risk_events` + 发告警（M7-17 熔断分支）。失败只记日志。"""
+        cfg = self._settings.risk
+        try:
+            await asyncio.to_thread(
+                self._store.insert_risk_event,
+                event_id=build_event_id(
+                    f"circuit:{binding.inst_id}", bar.ts, "circuit_breaker"
+                ),
+                ts=state.triggered_ts,
+                inst_id=binding.inst_id,
+                signal_id=f"circuit:{bar.ts}",
+                decision="halted",
+                strategy_id=binding.strategy_id,
+                rule="circuit_breaker",
+                limit_name="circuit_amplitude_pct",
+                limit_value=str(cfg.circuit_amplitude_pct),
+                actual_value=str(CircuitBreaker.amplitude(bar)),
+                reason=state.reason,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error(f"record circuit risk event failed: {e}")
+        try:
+            await self._alerts.publish(
+                AlertEvent(
+                    rule="circuit_breaker",
+                    level="ERROR",
+                    message=(
+                        f"{binding.inst_id} {binding.bar} 触发熔断："
+                        f"{state.reason}；暂停至 {_clock(state.resume_at)}"
+                    ),
+                    ts=state.triggered_ts,
+                    inst_id=binding.inst_id,
+                    strategy_id=binding.strategy_id,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"publish circuit alert failed: {e}")
 
     def _pending_bars(
         self, bars: list[Bar], done_ts: int | None, newest: Bar
@@ -525,6 +617,11 @@ class LiveSignalEngine:
             await self._redis.set(key, str(bar_ts))
         except Exception as e:  # noqa: BLE001
             log.warning(f"write engine marker failed: {e}")
+
+
+def _clock(ts_ms: int) -> str:
+    """毫秒时间戳 → 本地 `MM-DD HH:MM`，用于日志与告警文案。"""
+    return time.strftime("%m-%d %H:%M", time.localtime(ts_ms / 1000))
 
 
 __all__ = ["EngineTick", "LiveSignalEngine", "TickStatus"]

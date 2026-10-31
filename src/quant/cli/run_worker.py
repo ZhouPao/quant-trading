@@ -32,6 +32,7 @@ from quant.okx.client import OKXClient
 from quant.okx.ws_client import WSClient
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
+from quant.risk.circuit_breaker import CircuitBreaker
 from quant.risk.config import load_risk_config, load_strategy_risk
 from quant.risk.limits import LIMIT_FIELDS, RiskLimits, resolve_limits
 from quant.state.sqlite_store import SQLiteStore
@@ -227,6 +228,11 @@ async def _run(args, settings: Settings) -> int:
             ),
             risk_limits=risk_limits,
             risk_limits_ttl=settings.monitor.risk_limits_ttl_seconds,
+            circuit=(
+                CircuitBreaker(redis)
+                if settings.risk.circuit_enabled
+                else None
+            ),
         )
 
         log.info(
