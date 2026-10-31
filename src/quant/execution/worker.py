@@ -30,6 +30,7 @@ from quant.risk.limits import (
     limits_payload,
     parse_override_hash,
 )
+from quant.risk.preflight import PreflightChecker
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("execution.worker")
@@ -61,6 +62,7 @@ class Worker:
         overrides_key: str | None = None,
         base_limits: RiskLimits | None = None,
         paper_mode: bool = False,
+        preflight: PreflightChecker | None = None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -86,6 +88,8 @@ class Worker:
         self.base_limits = base_limits
         self._current_limits = base_limits
         self._paper_mode = paper_mode
+        # 下单前预检（M7-7）：只在直连交易所时注入，模拟撮合无需校验精度
+        self.preflight = preflight
         self._running = False
 
     async def run(self) -> None:
@@ -236,9 +240,40 @@ class Worker:
             await self.queue.remove_inflight(signal)
             return
 
-        result = await self.executor.execute(
-            signal, decision.adjusted_qty, market_price
-        )
+        # 预检（M7-7）：风控放行后再过交易所硬约束。被拒说明这一单
+        # 打过去也会被交易所退回，直接拦下并留痕，不下单也不进死信
+        qty = decision.adjusted_qty
+        if self.preflight is not None:
+            pre = await self.preflight.check(signal, qty, market_price)
+            if not pre.ok:
+                rejected = RiskDecision(
+                    approved=False,
+                    adjusted_qty=Decimal("0"),
+                    reason=pre.reason,
+                    rule=pre.rule,
+                    limit_name=pre.rule,
+                    limit_value=pre.limit_value,
+                    actual_value=pre.actual_value,
+                )
+                await asyncio.to_thread(
+                    self.risk.record_event,
+                    rejected,
+                    signal,
+                    now_ms=int(time.time() * 1000),
+                    equity=equity,
+                )
+                await asyncio.to_thread(
+                    self.store.save_signal, signal, "rejected"
+                )
+                log.warning(
+                    f"signal rejected by preflight id={signal.signal_id} "
+                    f"rule={pre.rule} reason={pre.reason}"
+                )
+                await self.queue.remove_inflight(signal)
+                return
+            qty = pre.qty
+
+        result = await self.executor.execute(signal, qty, market_price)
         await asyncio.to_thread(self.store.save_signal, signal, "executed")
         await asyncio.to_thread(self.store.save_order, result.order)
 

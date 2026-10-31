@@ -70,6 +70,10 @@ circuit_enabled = true                    # 极端行情熔断（单品种暂停
 circuit_amplitude_pct = 0.10              # 单根振幅 (high-low)/open 超过即熔断
 circuit_cooldown_seconds = 900            # 熔断冷却时长（秒），到期自动解除
 circuit_resume_requires_confirm = true    # 冷却结束需人工确认才恢复；true 时键永久保留，长期不确认该品种会一直不开仓（false=到期自动恢复）
+preflight_enabled = true                  # 下单前预检（仅直连 OKX 时生效）：产品配置/lotSz/minSz/最小名义金额/现货余额
+preflight_min_notional_usdt = "0"         # 最小名义金额下限（USDT）；0=只按交易所 minSz，不额外加码
+preflight_balance_buffer_pct = "0.02"     # 现货买入需预留 2% 余量（覆盖手续费与价格波动）
+preflight_balance_cache_seconds = 15      # 余额快照缓存秒数；同一轮批量下单只查一次
 
 [execution]
 reconcile_interval_seconds = 60           # worker 运行期对账间隔（0=仅启动时对账）

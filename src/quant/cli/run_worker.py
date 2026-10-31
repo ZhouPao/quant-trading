@@ -40,6 +40,7 @@ from quant.risk.limits import (
     limits_payload,
     resolve_limits,
 )
+from quant.risk.preflight import PreflightChecker
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 
@@ -58,6 +59,26 @@ def _bar_price_provider(data_dir):
         return bars[-1].close
 
     return provider
+
+
+def _build_preflight(
+    args, settings: Settings, client: OKXClient | None
+) -> PreflightChecker | None:
+    """下单前预检（M7-7）只在直连交易所时启用。
+
+    模拟撮合（Executor）没有产品配置与账户余额，预检会变成无意义的
+    拒绝，因此直接返回 None。
+    """
+    if args.broker != "okx" or client is None:
+        return None
+    if not settings.risk.preflight_enabled:
+        return None
+    return PreflightChecker(
+        client,
+        min_notional=settings.risk.preflight_min_notional_usdt,
+        balance_buffer=settings.risk.preflight_balance_buffer_pct,
+        balance_cache_seconds=settings.risk.preflight_balance_cache_seconds,
+    )
 
 
 def _apply_paper_mode(config):
@@ -239,6 +260,7 @@ async def _run(args, settings: Settings) -> int:
             overrides_key=settings.monitor.risk_overrides_key,
             base_limits=base_limits,
             paper_mode=bool(args.paper_mode),
+            preflight=_build_preflight(args, settings, public_client),
         )
 
         log.info(

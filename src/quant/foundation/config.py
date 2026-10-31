@@ -315,6 +315,15 @@ class RiskDefaults(BaseModel):
     # 冷却结束后是否必须人工在看板确认才恢复（M7-12）。
     # 置 false 退回「TTL 到期自动恢复」的旧行为（灰度回滚用）。
     circuit_resume_requires_confirm: bool = True
+    # 下单前预检（M7-7）：精度、最小下单量、最小名义金额、现货余额。
+    # 只对直连交易所（okx broker）生效，模拟撮合不做校验。
+    preflight_enabled: bool = True
+    # 额外的单笔最小名义金额（USDT）；0 表示只按交易所 minSz 判定
+    preflight_min_notional_usdt: Decimal = Decimal("0")
+    # 余额安全垫，给手续费与滑点留余量
+    preflight_balance_buffer_pct: Decimal = Decimal("0.02")
+    # 余额缓存秒数：每单现查会吃满限频
+    preflight_balance_cache_seconds: float = 15.0
 
 
 class Settings(BaseModel):
