@@ -208,17 +208,46 @@ export type FillsResponse = {
 };
 
 export type AlertRow = {
+  alert_id?: string;
   rule: string;
   level: string;
   message: string;
-  ts: number;
+  /** Redis 实时缓存行的时间字段 */
+  ts?: number;
+  /** SQLite 权威行的时间字段 */
+  created_at?: number;
+  /** open / acked / resolved；Redis 缓存行没有该字段 */
+  state?: string;
+  suppressed?: number;
+  inst_id?: string | null;
+  strategy_id?: string | null;
+  acked_at?: number | null;
+  acked_by?: string | null;
+};
+
+/** 生效中的静音：inst_id 为空表示该规则下全部品种。 */
+export type AlertSilence = {
+  silence_id: string;
+  rule: string;
+  inst_id: string | null;
+  until_ts: number;
+  reason: string;
+  created_by: string;
+  created_at: number;
 };
 
 export type AlertsResponse = {
   ts: number;
+  /** SQLite 读失败回落 Redis 时为 null，表示「只有最近 N 条」 */
+  total: number | null;
   alerts: AlertRow[];
+  silences: AlertSilence[];
   degraded: string[];
 };
+
+export type AckResult = { alert_id: string; acked: boolean };
+export type SilenceResult = { silence_id: string };
+export type RevokeSilenceResult = { silence_id: string; revoked: boolean };
 
 export type PnlResponse = {
   ts: number;
@@ -756,6 +785,31 @@ export async function clearRiskOverride(
 ) {
   return deleteGuarded<RiskOverrideClearResult>(
     `/api/risk/overrides/${encodeURIComponent(strategyId)}/${encodeURIComponent(param)}`,
+    token,
+  );
+}
+
+/** 告警标记已读：后端幂等，重复确认不覆盖首次时间与人。 */
+export async function ackAlert(alertId: string, token = "") {
+  return postWrite<AckResult>(
+    `/api/alerts/${encodeURIComponent(alertId)}/ack`,
+    { by: "dashboard" },
+    token,
+  );
+}
+
+/** 创建静音：inst_id 为空表示该规则下全部品种。 */
+export async function silenceAlerts(
+  input: { rule: string; inst_id?: string | null; hours: number; reason: string },
+  token = "",
+) {
+  return postWrite<SilenceResult>("/api/alerts/silence", input, token);
+}
+
+/** 解除静音：只置 revoked_at，不删除历史记录。 */
+export async function revokeSilence(silenceId: string, token = "") {
+  return deleteGuarded<RevokeSilenceResult>(
+    `/api/alerts/silence/${encodeURIComponent(silenceId)}`,
     token,
   );
 }

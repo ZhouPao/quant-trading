@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  ackAlert,
   age,
   clock,
   compactQty,
@@ -19,6 +20,8 @@ import {
   clearRiskOverride,
   setRiskOverride,
   resumeCircuit,
+  revokeSilence,
+  silenceAlerts,
   fetchStrategies,
   discardDeadLetter,
   flattenPositions,
@@ -36,6 +39,7 @@ import {
   updateBinding,
   updateStrategyParams,
   type AlertRow,
+  type AlertSilence,
   type BacktestResponse,
   type CandlesResponse,
   type DeadLetterItem,
@@ -296,6 +300,11 @@ export default function App() {
       setError((err as Error).message);
     }
   }, []);
+
+  // 告警已读/静音是写操作，成功后立刻重取，不等下一轮轮询
+  const refresh = useCallback(async () => {
+    await load(new AbortController().signal);
+  }, [load]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -690,7 +699,7 @@ export default function App() {
         <section className="card alert-summary reveal" style={{ animationDelay: "115ms" }}>
           <div className="card-head">
             <h2>告警摘要</h2>
-            <span className="card-note">最近 {alerts.length} 条 · 已读状态待 M9-7</span>
+            <span className="card-note">最近 {alerts.length} 条 · 已读/静音在日志告警页</span>
             <button
               type="button"
               className="link-btn"
@@ -810,10 +819,17 @@ export default function App() {
           <div className="card-head">
             <h2>告警</h2>
             <span className="card-note">
-              {alerts.length} 条 · 最近在前
+              {data?.alerts.total ?? alerts.length} 条 · 最近在前
+              {data?.alerts.degraded.length
+                ? ` · 降级：${data.alerts.degraded.join(" / ")}`
+                : ""}
             </span>
           </div>
-          <AlertPanel alerts={alerts} />
+          <AlertPanel
+            alerts={alerts}
+            silences={data?.alerts.silences ?? []}
+            onChanged={refresh}
+          />
         </section>
         )}
 
@@ -3579,10 +3595,40 @@ function DeadLettersPanel() {
 }
 
 /** 按规则聚合的告警面板：级别筛选 + 规则筛选 + 展开查看明细。 */
-function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
+/** 告警时间：SQLite 权威行用 created_at，Redis 实时缓存行用 ts。 */
+function alertTs(alert: AlertRow): number {
+  return alert.created_at ?? alert.ts ?? 0;
+}
+
+const ALERT_STATE_TEXT: Record<string, string> = {
+  open: "未读",
+  acked: "已读",
+  resolved: "已解决",
+  silenced: "静音中",
+};
+
+function AlertPanel({
+  alerts,
+  silences,
+  onChanged,
+}: {
+  alerts: AlertRow[];
+  silences: AlertSilence[];
+  onChanged: () => Promise<void>;
+}) {
   const [level, setLevel] = useState("ALL");
   const [rule, setRule] = useState("ALL");
+  const [stateFilter, setStateFilter] = useState("ALL");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // 静音表单：rule 为空表示还没选，避免误把全部规则静音
+  const [silenceRule, setSilenceRule] = useState("");
+  const [silenceInst, setSilenceInst] = useState("");
+  const [silenceHours, setSilenceHours] = useState("4");
+  const [silenceReason, setSilenceReason] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ bad: boolean; text: string } | null>(null);
+
+  const token = window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "";
 
   const counts = useMemo<Record<string, number>>(() => {
     const byLevel: Record<string, number> = { ERROR: 0, WARNING: 0, INFO: 0 };
@@ -3606,6 +3652,8 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
     for (const alert of alerts) {
       if (level !== "ALL" && alert.level.toUpperCase() !== level) continue;
       if (rule !== "ALL" && alert.rule !== rule) continue;
+      // Redis 回落行没有 state 字段，按未读展示
+      if (stateFilter !== "ALL" && (alert.state ?? "open") !== stateFilter) continue;
       const bucket = buckets.get(alert.rule);
       if (bucket) bucket.push(alert);
       else buckets.set(alert.rule, [alert]);
@@ -3625,8 +3673,8 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
         latest: items[0],
         items,
       }))
-      .sort((a, b) => b.latest.ts - a.latest.ts);
-  }, [alerts, level, rule]);
+      .sort((a, b) => alertTs(b.latest) - alertTs(a.latest));
+  }, [alerts, level, rule, stateFilter]);
 
   const toggle = (name: string) => {
     setExpanded((prev) => {
@@ -3637,9 +3685,61 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
     });
   };
 
-  if (alerts.length === 0) {
-    return <div className="empty">暂无告警。monitor 命中规则后会在此累积。</div>;
-  }
+  const run = async (key: string, action: () => Promise<void>) => {
+    setBusy(key);
+    setMsg(null);
+    try {
+      await action();
+      await onChanged();
+    } catch (err) {
+      setMsg({ bad: true, text: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleAck = (alert: AlertRow) => {
+    if (!alert.alert_id) {
+      setMsg({ bad: true, text: "该行来自 Redis 缓存，缺少 alert_id，无法标记已读" });
+      return;
+    }
+    void run(`ack:${alert.alert_id}`, async () => {
+      const result = await ackAlert(alert.alert_id as string, token);
+      if (!result.acked) throw new Error("告警不存在或已被清理");
+    });
+  };
+
+  const handleSilence = () => {
+    if (!silenceRule) {
+      setMsg({ bad: true, text: "请先选择要静音的规则" });
+      return;
+    }
+    const hours = Number(silenceHours);
+    if (!Number.isFinite(hours) || hours <= 0) {
+      setMsg({ bad: true, text: "静音时长必须是正数小时" });
+      return;
+    }
+    void run("silence", async () => {
+      await silenceAlerts(
+        {
+          rule: silenceRule,
+          inst_id: silenceInst.trim() || null,
+          hours,
+          reason: silenceReason.trim(),
+        },
+        token,
+      );
+      setSilenceReason("");
+      setSilenceInst("");
+    });
+  };
+
+  const handleRevoke = (silenceId: string) => {
+    void run(`revoke:${silenceId}`, async () => {
+      const result = await revokeSilence(silenceId, token);
+      if (!result.revoked) throw new Error("静音记录不存在或已解除");
+    });
+  };
 
   return (
     <>
@@ -3670,10 +3770,106 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
             </option>
           ))}
         </select>
+        <select
+          className="alert-rule-select"
+          value={stateFilter}
+          onChange={(event) => setStateFilter(event.target.value)}
+          aria-label="按状态筛选告警"
+        >
+          <option value="ALL">全部状态</option>
+          <option value="open">未读</option>
+          <option value="acked">已读</option>
+          <option value="resolved">已解决</option>
+        </select>
+      </div>
+
+      {msg && (
+        <p className={`form-msg ${msg.bad ? "form-bad" : "form-good"}`}>
+          {msg.text}
+        </p>
+      )}
+
+      <div className="alert-silence">
+        <div className="alert-silence-head">
+          <h3>静音</h3>
+          <span className="card-note">
+            {silences.length > 0
+              ? `${silences.length} 条生效中 · 命中期间仍入库，只是不发邮件`
+              : "当前无静音"}
+          </span>
+        </div>
+        {silences.length > 0 && (
+          <ul className="silence-list">
+            {silences.map((item) => (
+              <li key={item.silence_id} className="silence-item">
+                <span className="mono strong">{item.rule}</span>
+                <span className="mono">{item.inst_id ?? "全部品种"}</span>
+                <span className="mono">至 {clock(item.until_ts)}</span>
+                {item.reason && <span className="silence-reason">{item.reason}</span>}
+                <button
+                  type="button"
+                  className="link-btn"
+                  disabled={busy === `revoke:${item.silence_id}`}
+                  onClick={() => handleRevoke(item.silence_id)}
+                >
+                  {busy === `revoke:${item.silence_id}` ? "解除中…" : "解除"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="silence-form">
+          <select
+            className="alert-rule-select"
+            value={silenceRule}
+            onChange={(event) => setSilenceRule(event.target.value)}
+            aria-label="选择要静音的规则"
+          >
+            <option value="">选择规则…</option>
+            {ruleOptions.map(([name]) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <input
+            className="text-input"
+            value={silenceInst}
+            onChange={(event) => setSilenceInst(event.target.value)}
+            placeholder="品种（留空=全部）"
+            aria-label="静音品种"
+          />
+          <input
+            className="text-input narrow"
+            value={silenceHours}
+            onChange={(event) => setSilenceHours(event.target.value)}
+            placeholder="小时"
+            aria-label="静音时长小时"
+          />
+          <input
+            className="text-input"
+            value={silenceReason}
+            onChange={(event) => setSilenceReason(event.target.value)}
+            placeholder="原因（可选）"
+            aria-label="静音原因"
+          />
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={busy === "silence"}
+            onClick={handleSilence}
+          >
+            {busy === "silence" ? "提交中…" : "静音"}
+          </button>
+        </div>
       </div>
 
       {groups.length === 0 ? (
-        <div className="empty">当前筛选条件下没有告警。</div>
+        <div className="empty">
+          {alerts.length === 0
+            ? "暂无告警。monitor 命中规则后会在此累积。"
+            : "当前筛选条件下没有告警。"}
+        </div>
       ) : (
         <ul className="alert-list">
           {groups.map((group) => {
@@ -3694,13 +3890,18 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
                   <span className="alert-rule">{group.rule}</span>
                   <span className="alert-count">×{group.count}</span>
                   <span className="alert-msg">{group.latest.message}</span>
-                  <span className="alert-time">{clock(group.latest.ts)}</span>
+                  <span className="alert-time">{clock(alertTs(group.latest))}</span>
                   <span className="alert-caret">{open ? "−" : "+"}</span>
                 </button>
                 {open && (
                   <ul className="alert-items">
                     {group.items.map((alert, index) => (
-                      <AlertItem key={`${alert.ts}-${index}`} alert={alert} />
+                      <AlertItem
+                        key={`${alert.alert_id ?? alertTs(alert)}-${index}`}
+                        alert={alert}
+                        busy={busy === `ack:${alert.alert_id ?? ""}`}
+                        onAck={handleAck}
+                      />
                     ))}
                   </ul>
                 )}
@@ -3713,16 +3914,48 @@ function AlertPanel({ alerts }: { alerts: AlertRow[] }) {
   );
 }
 
-function AlertItem({ alert }: { alert: AlertRow }) {
+function AlertItem({
+  alert,
+  busy,
+  onAck,
+}: {
+  alert: AlertRow;
+  busy: boolean;
+  onAck: (alert: AlertRow) => void;
+}) {
   const level = alert.level.toLowerCase();
   const tone = level === "error" ? "bad" : level === "info" ? "ok" : "warn";
+  const state = alert.state ?? "open";
+  const ackable = state === "open" && Boolean(alert.alert_id);
   return (
     <li className={`alert alert-${tone}`}>
       <div className="alert-top">
         <span className="alert-rule">{alert.rule}</span>
-        <span className="alert-time">{clock(alert.ts)}</span>
+        {alert.inst_id && <span className="alert-obj mono">{alert.inst_id}</span>}
+        {alert.strategy_id && (
+          <span className="alert-obj mono">{alert.strategy_id}</span>
+        )}
+        <span className={`alert-state alert-state-${state}`}>
+          {ALERT_STATE_TEXT[state] ?? state}
+        </span>
+        <span className="alert-time">{clock(alertTs(alert))}</span>
+        {ackable && (
+          <button
+            type="button"
+            className="link-btn"
+            disabled={busy}
+            onClick={() => onAck(alert)}
+          >
+            {busy ? "标记中…" : "标记已读"}
+          </button>
+        )}
       </div>
       <p className="alert-msg">{alert.message}</p>
+      {alert.acked_at && (
+        <p className="alert-ack-note mono">
+          {alert.acked_by ?? "owner"} 于 {clock(alert.acked_at)} 确认
+        </p>
+      )}
     </li>
   );
 }
