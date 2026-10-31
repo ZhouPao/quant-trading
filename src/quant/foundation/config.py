@@ -20,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ${VAR} 或 ${VAR:-default}
 _ENV_PATTERN = re.compile(r"^\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}$")
@@ -133,6 +133,19 @@ class ExecutionSettings(BaseModel):
     order_timeout_seconds: int = 300
     # 手动减仓的交易模式（看板直连 OKX 时使用）：cash=现货，cross=全仓合约
     td_mode: str = "cash"
+    # 服务端仓位计算（M8-14）：信号未带 qty 时由 worker 按
+    # 「权益 × 单笔比例 ÷ 价格」算量。关掉即回滚到「qty 必填」。
+    server_side_sizing: bool = True
+    # 信号既没给 qty 也没给 size_pct 时使用的单笔目标占比（10%）
+    default_size_pct: Decimal = Decimal("0.1")
+
+    @field_validator("default_size_pct")
+    @classmethod
+    def _check_default_size_pct(cls, value: Decimal) -> Decimal:
+        """0 或负数会让每一单算量都失败，属于配置错误，加载时就拒绝。"""
+        if value <= 0:
+            raise ValueError("default_size_pct must be positive")
+        return value
 
 
 class CandleSyncSettings(BaseModel):

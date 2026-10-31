@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
 from redis.asyncio import Redis
@@ -25,6 +26,7 @@ from quant.execution.kill_switch import KillSwitch
 from quant.execution.okx_broker import OkxBroker
 from quant.execution.price import LivePriceBook, RestPriceProvider
 from quant.execution.reconciler import Reconciler
+from quant.execution.sizing import InstrumentSpec, PositionSizer
 from quant.execution.worker import Worker
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger, setup_logger
@@ -79,6 +81,32 @@ def _build_preflight(
         balance_buffer=settings.risk.preflight_balance_buffer_pct,
         balance_cache_seconds=settings.risk.preflight_balance_cache_seconds,
     )
+
+
+def _build_sizer(
+    args, settings: Settings, client: OKXClient | None
+) -> tuple[
+    PositionSizer | None,
+    Callable[[str], Awaitable[InstrumentSpec | None]] | None,
+]:
+    """服务端仓位计算（M8-14）：信号不带 qty 时按权益比例补量。
+
+    `server_side_sizing=false` 是灰度回滚开关，关掉后无 qty 的信号会被拒。
+    只有直连 OKX 才能拿到真实 lotSz/minSz/ctVal；模拟撮合退回宽松规格。
+    """
+    if not settings.execution.server_side_sizing:
+        return None, None
+    sizer = PositionSizer(settings.execution.default_size_pct)
+    if args.broker != "okx" or client is None:
+        return sizer, None
+
+    async def spec_provider(inst_id: str) -> InstrumentSpec | None:
+        instrument = await asyncio.to_thread(client.get_instrument, inst_id)
+        if instrument is None:
+            return None
+        return InstrumentSpec.from_instrument(instrument)
+
+    return sizer, spec_provider
 
 
 def _apply_paper_mode(config):
@@ -235,6 +263,8 @@ async def _run(args, settings: Settings) -> int:
                 return rest
             return bar_provider(inst_id)
 
+        sizer, spec_provider = _build_sizer(args, settings, public_client)
+
         worker = Worker(
             queue=queue,
             risk=risk,
@@ -261,6 +291,8 @@ async def _run(args, settings: Settings) -> int:
             base_limits=base_limits,
             paper_mode=bool(args.paper_mode),
             preflight=_build_preflight(args, settings, public_client),
+            sizer=sizer,
+            spec_provider=spec_provider,
         )
 
         log.info(

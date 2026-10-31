@@ -4,6 +4,9 @@
     {"strategy_id": "sma_cross", "side": "buy", "order_type": "market",
      "inst_id": "BTC-USDT", "qty": "0.001", "price": null}
 
+`qty` 可省略（省略时由 worker 按服务端仓位计算 M8-14 补量）；也可只给
+`size_pct` 指定单笔目标占比。给了 `qty` 就必须 > 0。
+
 解析失败一律抛 ParseError；不做静默容错。
 """
 from __future__ import annotations
@@ -16,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 from quant.backtest.signal import Signal
 from quant.foundation.errors import ParseError
 
-_REQUIRED = ("strategy_id", "side", "order_type", "inst_id", "qty")
+_REQUIRED = ("strategy_id", "side", "order_type", "inst_id")
 
 
 class AlertParser:
@@ -44,10 +47,21 @@ class AlertParser:
             if key not in data or data[key] in (None, ""):
                 raise ParseError(f"missing field: {key}")
 
-        try:
-            qty = Decimal(str(data["qty"]))
-        except (InvalidOperation, ValueError) as e:
-            raise ParseError(f"invalid qty: {data['qty']!r}") from e
+        qty: Decimal | None = None
+        if data.get("qty") not in (None, ""):
+            try:
+                qty = Decimal(str(data["qty"]))
+            except (InvalidOperation, ValueError) as e:
+                raise ParseError(f"invalid qty: {data['qty']!r}") from e
+
+        size_pct: Decimal | None = None
+        if data.get("size_pct") not in (None, ""):
+            try:
+                size_pct = Decimal(str(data["size_pct"]))
+            except (InvalidOperation, ValueError) as e:
+                raise ParseError(
+                    f"invalid size_pct: {data['size_pct']!r}"
+                ) from e
 
         price: Decimal | None = None
         if data.get("price") is not None:
@@ -73,6 +87,7 @@ class AlertParser:
                 ts=ts,
                 price=price,
                 signal_id=str(uuid.uuid4()),
+                size_pct=size_pct,
             )
         except ValueError as e:
             raise ParseError(str(e)) from e

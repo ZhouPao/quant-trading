@@ -78,6 +78,8 @@ preflight_balance_cache_seconds = 15      # 余额快照缓存秒数；同一轮
 [execution]
 reconcile_interval_seconds = 60           # worker 运行期对账间隔（0=仅启动时对账）
 order_timeout_seconds = 300               # 挂单超时自动撤单（秒，0=关闭）
+server_side_sizing = true                 # 服务端仓位计算：信号可省略 qty，按权益比例补量（false=回到 qty 必填）
+default_size_pct = "0.1"                  # 信号既没给 qty 也没给 size_pct 时的单笔目标占比
 
 [candles]
 insts = ["BTC-USDT"]                      # 定时增量同步的品种

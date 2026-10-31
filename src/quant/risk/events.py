@@ -19,6 +19,8 @@ if TYPE_CHECKING:  # 避免与 checker 循环导入：运行时只用到属性
 DECISION_ADJUSTED = "adjusted"
 DECISION_REJECTED = "rejected"
 DECISION_HALTED = "halted"
+#: 服务端算量留痕（M8-14）：回答「这一单的数量从哪来」
+DECISION_SIZED = "sized"
 
 
 def build_event_id(signal_id: str, ts: int, rule: str | None) -> str:
@@ -111,12 +113,43 @@ def event_from_decision(
     )
 
 
+def sized_event(
+    signal: Signal,
+    *,
+    now_ms: int,
+    equity: Decimal | None,
+    raw_qty: Decimal,
+    qty: Decimal,
+    capped_by: str | None,
+    size_pct: Decimal | None = None,
+) -> RiskEvent:
+    """服务端算量留痕：`qty_before` 记取整前，`qty_after` 记实际下单量。"""
+    reason = f"server-side sizing pct={size_pct} raw={raw_qty} qty={qty}"
+    if capped_by:
+        reason += f" capped_by={capped_by}"
+    return RiskEvent(
+        event_id=build_event_id(signal.signal_id or "", now_ms, DECISION_SIZED),
+        ts=now_ms,
+        inst_id=signal.inst_id,
+        signal_id=signal.signal_id or "",
+        decision=DECISION_SIZED,
+        strategy_id=signal.strategy_id,
+        rule=capped_by or DECISION_SIZED,
+        qty_before=raw_qty,
+        qty_after=qty,
+        equity=equity,
+        reason=reason,
+    )
+
+
 __all__ = [
     "DECISION_ADJUSTED",
     "DECISION_HALTED",
     "DECISION_REJECTED",
+    "DECISION_SIZED",
     "RiskEvent",
     "build_event_id",
     "event_from_decision",
     "should_log",
+    "sized_event",
 ]

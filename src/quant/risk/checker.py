@@ -94,6 +94,16 @@ class RiskChecker:
             equity: 账户权益；None 或非正时按 allow_initial_equity_fallback
                 决定是退回 initial_equity 还是拒绝开仓
         """
+        if signal.qty is None:
+            # 服务端算量（M8-14）未开启或算量失败时不应走到这里；
+            # 显式拒单，避免把 None 带进后面的乘除。
+            return RiskDecision(
+                approved=False,
+                adjusted_qty=Decimal("0"),
+                reason="signal qty not provided",
+                rule="qty_missing",
+            )
+
         if equity is None or not equity.is_finite() or equity <= 0:
             if not self.allow_initial_equity_fallback:
                 # 权益缺失是数据链路问题而非账户风险：拒绝开仓 + 告警即可，
@@ -292,6 +302,42 @@ class RiskChecker:
             self.store.insert_risk_event(**event.as_row())  # type: ignore[arg-type]
         except Exception as e:  # noqa: BLE001
             log.error(f"record risk event failed: {e}")
+            return False
+        return True
+
+    def record_sized(
+        self,
+        signal: Signal,
+        *,
+        now_ms: int,
+        equity: Decimal | None,
+        raw_qty: Decimal,
+        qty: Decimal,
+        capped_by: str | None,
+        size_pct: Decimal | None = None,
+    ) -> bool:
+        """记录一次服务端算量（M8-14）。
+
+        每次算量都写：回答「这单数量从哪来、被谁截断」。写库失败只记
+        ERROR，不阻断下单主流程。
+        """
+        from quant.risk.events import sized_event
+
+        if not self.event_log:
+            return False
+        event = sized_event(
+            signal,
+            now_ms=now_ms,
+            equity=equity,
+            raw_qty=raw_qty,
+            qty=qty,
+            capped_by=capped_by,
+            size_pct=size_pct,
+        )
+        try:
+            self.store.insert_risk_event(**event.as_row())  # type: ignore[arg-type]
+        except Exception as e:  # noqa: BLE001
+            log.error(f"record sized event failed: {e}")
             return False
         return True
 

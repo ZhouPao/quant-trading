@@ -12,11 +12,13 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from decimal import Decimal
 
 from quant.backtest.signal import Signal
 from quant.execution.broker import Broker
 from quant.execution.kill_switch import KillSwitch
+from quant.execution.sizing import InstrumentSpec, PositionSizer, SizingResult
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.queue.signal_queue import SignalQueue
@@ -63,6 +65,10 @@ class Worker:
         base_limits: RiskLimits | None = None,
         paper_mode: bool = False,
         preflight: PreflightChecker | None = None,
+        sizer: PositionSizer | None = None,
+        spec_provider: (
+            Callable[[str], Awaitable[InstrumentSpec | None]] | None
+        ) = None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -90,6 +96,10 @@ class Worker:
         self._paper_mode = paper_mode
         # 下单前预检（M7-7）：只在直连交易所时注入，模拟撮合无需校验精度
         self.preflight = preflight
+        # 服务端仓位计算（M8-14）：信号不带 qty 时按权益比例补量。
+        # None 表示关闭（server_side_sizing=false），此时无 qty 的信号直接拒单。
+        self.sizer = sizer
+        self.spec_provider = spec_provider
         self._running = False
 
     async def run(self) -> None:
@@ -206,6 +216,53 @@ class Worker:
             await self.equity_provider() if self.equity_provider else None
         )
 
+        # 服务端仓位计算（M8-14）：信号没带 qty 时先按权益比例补量。
+        # 补出的量仍要过风控（只会被继续下调）与预检，不绕过任何限制。
+        if signal.qty is None:
+            sized = await self._size_position(signal, equity, market_price)
+            if sized is None:
+                rejected = RiskDecision(
+                    approved=False,
+                    adjusted_qty=Decimal("0"),
+                    reason=self._sizing_failure_reason(equity, market_price),
+                    rule="position_sizing",
+                    limit_name="position_sizing",
+                )
+                await asyncio.to_thread(
+                    self.risk.record_event,
+                    rejected,
+                    signal,
+                    now_ms=int(time.time() * 1000),
+                    equity=equity,
+                )
+                await asyncio.to_thread(
+                    self.store.save_signal, signal, "rejected"
+                )
+                log.warning(
+                    f"signal rejected by sizing id={signal.signal_id} "
+                    f"reason={rejected.reason}"
+                )
+                await self.queue.remove_inflight(signal)
+                return
+
+            # 后续风控、落库、审计统一按服务端算出的量，避免各处口径不一
+            signal = replace(signal, qty=sized.qty)
+            await asyncio.to_thread(
+                self.risk.record_sized,
+                signal,
+                now_ms=int(time.time() * 1000),
+                equity=equity,
+                raw_qty=sized.raw_qty,
+                qty=sized.qty,
+                capped_by=sized.capped_by,
+                size_pct=sized.size_pct,
+            )
+            log.info(
+                f"signal sized server-side id={signal.signal_id} "
+                f"pct={sized.size_pct} raw={sized.raw_qty} qty={sized.qty} "
+                f"capped_by={sized.capped_by}"
+            )
+
         decision = await asyncio.to_thread(
             self.risk.check,
             signal,
@@ -300,6 +357,47 @@ class Worker:
             f"signal executed id={signal.signal_id} "
             f"order={result.order.order_id} status={result.order.status}"
         )
+
+    async def _size_position(
+        self,
+        signal: Signal,
+        equity: Decimal | None,
+        price: Decimal | None,
+    ) -> SizingResult | None:
+        """按权益比例算量；没有 sizer 时返回 None（走拒单分支）。
+
+        产品规格（lotSz/minSz/ctVal）读不到时退回模拟规格：算量本身不能
+        因为一次行情接口失败而整体停摆，交易所精度仍由预检兜底。
+        """
+        if self.sizer is None:
+            return None
+        spec = None
+        if self.spec_provider is not None:
+            try:
+                spec = await self.spec_provider(signal.inst_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    f"load instrument spec failed inst={signal.inst_id}: {e}"
+                )
+        return self.sizer.size(
+            signal,
+            equity,
+            price,
+            self._current_limits or self.base_limits,
+            spec=spec,
+        )
+
+    def _sizing_failure_reason(
+        self, equity: Decimal | None, price: Decimal | None
+    ) -> str:
+        """算量失败的具体原因，便于在 risk_events 里区分「为什么拒」。"""
+        if self.sizer is None:
+            return "server-side sizing disabled and signal has no qty"
+        if equity is None or equity <= 0:
+            return "account snapshot unavailable for sizing"
+        if price is None or price <= 0:
+            return "no market price for sizing"
+        return "sized qty below exchange minimum or zero"
 
     async def _heartbeat_loop(self) -> None:
         """心跳 + 生效阈值刷新：两者都在同一周期，看板看到的就是生效值。"""

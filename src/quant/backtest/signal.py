@@ -34,20 +34,22 @@ class Signal:
         side: 买卖方向 buy/sell
         order_type: 订单类型 market/limit
         inst_id: 产品 ID，如 "BTC-USDT"
-        qty: 下单数量（基础币），必须 > 0
+        qty: 下单数量（基础币）；给了必须 > 0，None 表示由服务端算量（M8-14）
         ts: 信号产生时间戳 UTC ms
         price: 限价单价格；market 单为 None
         signal_id: 信号唯一 ID；回测模式空字符串，webhook 模式 UUID
+        size_pct: 单笔目标占比（如 0.1）；仅在 qty 缺省时参与算量
     """
 
     strategy_id: str
     side: Side
     order_type: OrderType
     inst_id: str
-    qty: Decimal
+    qty: Decimal | None
     ts: int
     price: Decimal | None = None
     signal_id: str = ""
+    size_pct: Decimal | None = None
 
     def __post_init__(self) -> None:
         """构造时校验：必填非空 + side/order_type 枚举 + qty 正数 + price 与 order_type 一致。"""
@@ -59,8 +61,10 @@ class Signal:
             raise ValueError(f"side must be 'buy' or 'sell', got {self.side!r}")
         if self.order_type not in ("market", "limit"):
             raise ValueError(f"order_type must be 'market' or 'limit', got {self.order_type!r}")
-        if self.qty <= 0:
+        if self.qty is not None and self.qty <= 0:
             raise ValueError(f"qty must be positive, got {self.qty}")
+        if self.size_pct is not None and self.size_pct <= 0:
+            raise ValueError(f"size_pct must be positive, got {self.size_pct}")
         if self.ts < 0:
             raise ValueError(f"ts must be non-negative, got {self.ts}")
         if self.order_type == "market" and self.price is not None:
@@ -79,10 +83,13 @@ class Signal:
             "side": self.side,
             "order_type": self.order_type,
             "inst_id": self.inst_id,
-            "qty": str(self.qty),
+            "qty": str(self.qty) if self.qty is not None else None,
             "ts": self.ts,
             "price": str(self.price) if self.price is not None else None,
             "signal_id": self.signal_id,
+            "size_pct": (
+                str(self.size_pct) if self.size_pct is not None else None
+            ),
         }
 
     @classmethod
@@ -93,10 +100,19 @@ class Signal:
             side=data["side"],
             order_type=data["order_type"],
             inst_id=data["inst_id"],
-            qty=Decimal(str(data["qty"])),
+            qty=(
+                Decimal(str(data["qty"]))
+                if data.get("qty") is not None
+                else None
+            ),
             ts=int(data["ts"]),
             price=Decimal(str(data["price"])) if data.get("price") is not None else None,
             signal_id=data.get("signal_id", ""),
+            size_pct=(
+                Decimal(str(data["size_pct"]))
+                if data.get("size_pct") is not None
+                else None
+            ),
         )
 
 

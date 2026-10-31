@@ -589,7 +589,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 | 模型 | 关键字段 | 说明 |
 |---|---|---|
-| `Signal` | `strategy_id` / `side` / `order_type` / `inst_id` / `qty`（**目标为可选；当前实现为必填且必须 > 0**）/ `price` / `ts` / `signal_id` / `source` | `qty` 缺省时由 M8-14 在服务端计算，该能力未落地前 `Signal` 构造、webhook 解析均校验 `qty` 必填；`source` ∈ `webhook` / `manual` / `portfolio` |
+| `Signal` | `strategy_id` / `side` / `order_type` / `inst_id` / `qty`（**已改为可选**）/ `size_pct` / `price` / `ts` / `signal_id` / `source` | `qty` 缺省时由 M8-14 在服务端按「权益 × 单笔比例 ÷ 价格」计算并按 `lotSz` 向下取整；`qty` 给了仍必须 > 0。`size_pct` 可选，缺省回落 `[execution] default_size_pct`。`source` ∈ `webhook` / `manual` / `portfolio` |
 | `Order` | `order_id` / `signal` / `state` / `filled_qty` / `avg_price` / `reduce_only` / `cl_ord_id` / `source` / `created_ts` / `updated_ts` | `state` ∈ `pending` / `live` / `partially_filled` / `filled` / `canceled` / `failed` |
 | `Fill` | `order_id` / `inst_id` / `side` / `qty` / `price` / `fee` / `fee_ccy` / `ts` | 现货手续费扣基础币，合约扣 USDT，`fee_ccy` 明确标注 |
 | `PositionSnapshot` | `ts` / `inst_id` / `qty` / `avg_price` / `upl` / `source` | `source` ∈ `local` / `remote`，对账时两侧对比 |
@@ -630,14 +630,14 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M8-11 | 多进程编排 | 托管 server/worker/engine/monitor 等进程；崩溃自动重启；重启先对账再启动 | F4.8 | 🟡 |
 | M8-12 | 执行页展示 | 订单列表、成交列表、持仓列表；支持按品种/策略/状态/来源筛选 | 新增 | ✅ |
 | M8-13 | 减仓与平仓 | 手动减仓（按比例或指定数量）、一键平仓；`reduce_only=true` 防止反向开仓；二次确认 | 新增 | ✅ |
-| M8-14 | 服务端仓位计算 | 信号可省略 `qty`；worker 按「权益 × 单笔比例」算量并按 `lotSz` 向下取整；实际量与上限均记入审计。**当前 `Signal.qty` 与 webhook 均为必填，无 `PositionSizer`** | 新增 | ⬜ |
-| M8-15 | 订单状态机 | `pending→live→partially_filled→filled/canceled` 单向推进；部分成交累加并重算均价；禁止状态回退 | 新增 | ⬜ |
+| M8-14 | 服务端仓位计算 | 信号可省略 `qty`；worker 按「权益 × 单笔比例」算量并按 `lotSz` 向下取整；实际量与上限均记入审计。**已落地**：`PositionSizer`（`src/quant/execution/sizing.py`）在风控前补量，比例三级回落（`qty` → `size_pct` → `[execution] default_size_pct`，默认 0.1）。算量链为 `raw = 权益 × 比例 ÷ 价格` → `max_order_qty` 截断 → 按 `lotSz` 向下取整，`minSz` 不足或算量为 0 直接拒单；合约按 `ctVal` 折张数后再取整（`minSz` 比张数）。补出的量会写一条 `decision="sized"` 的 `risk_events`（`qty_before`=取整前、`qty_after`=实际下单量、`rule`=截断来源），随后仍过风控与预检。webhook 的 `qty` 已改为可选，也可只给 `size_pct`；`[execution] server_side_sizing=false` 是回滚开关，关掉后无 `qty` 的信号直接拒单。产品规格读不到时退回模拟精度，交易所精度由预检兜底 | 新增 | ✅ |
+| M8-15 | 订单状态机 | `pending→live→partially_filled→filled/canceled` 单向推进；部分成交累加并重算均价；禁止状态回退。**已落地**：`order_state.can_transition` 定义合法迁移与终态，`update_order_fill` 累加成交量并按加权重算均价、非法迁移只记 WARNING 保持原状态；`save_order` 由「整行覆盖」改为「插入或忽略 + 状态机推进」，重复落库（重放/崩溃恢复）不会把 `filled` 打回 `pending`。`pending → filled` 直连保留，因为市价单可能一次回包即成交 | 新增 | ✅ |
 | M8-16 | 死信查看与重放 | 看板列出死信（原始信号 + 原因 + 时间）；支持单条/批量重放回 pending，或标记丢弃；重放前做幂等检查 | 新增 | ✅ |
 | M8-17 | 手工下单与撤改 | 看板可下市价/限价单，可撤单、改价改量；与自动单共用风控、审计与状态机 | 新增 | 🟡 |
 | M8-18 | 三项对账 | 订单 + 持仓 + 余额三类对象对账；差异写 `reconciliations` 并区分「可自动修复」与「需人工确认」 | 新增 | 🟡 |
 | M8-19 | 下单幂等与重试边界 | `clOrdId` 由 `signal_id` 派生保证交易所侧幂等；超时状态不明时先查询再决定，禁止直接重发；重试上限 3 次 | 新增 | 🟡 |
 
-**下单流程**：`webhook → 去重 → pending → worker BRPOPLPUSH → 幂等检查 → 风控(M7) → 仓位计算(M8-14) → 下单 → 状态机推进(M8-15) → 写 signals/orders/fills/positions → 移出 inflight`。
+**下单流程**：`webhook → 去重 → pending → worker BRPOPLPUSH → 幂等检查 → 仓位计算(M8-14，仅 qty 缺省时) → 风控(M7) → 预检(M7-7) → 下单 → 状态机推进(M8-15) → 写 signals/orders/fills/positions → 移出 inflight`。
 
 **不做**：算法单（TWAP/冰山）、跨交易所路由、网格/马丁自动挂单、保证金模式动态切换。
 
@@ -990,7 +990,7 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 旧编号处理 | 保留 F 编号作为「来源」列 | 可与旧 spec、旧进度记录对照 |
 | 因子库/组合管理 | 写清需求但排 MS7+ | 不阻塞实盘 |
 | 双回测 | Pine 为主，Python 交叉验证 | 偏离 > 5% 禁止上实盘 |
-| Webhook | 信号型，`side/inst_id/order_type/strategy_id` 必填，`qty` 目标为可选（缺省由服务端算仓位）。**该目标尚未落地：当前 `qty` 必填** | Python 端负责风控与仓位（M8-14） |
+| Webhook | 信号型，`side/inst_id/order_type/strategy_id` 必填，`qty` 可选（缺省由服务端算仓位，已落地 M8-14；也可只给 `size_pct`） | Python 端负责风控与仓位（M8-14） |
 | 架构 | FastAPI + Redis + worker | 多进程，先队列后执行 |
 
 ---
@@ -1023,3 +1023,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 21，告警确认与静音看板入口） | M9-7 由 🟡 改 ✅：日志告警页每条未读告警可「标记已读」（后端幂等，保留首次确认人与时间）；面板顶部列出生效静音（规则/品种/到期/原因）并可一键解除；静音表单可选规则、填品种（留空=该规则全部品种）、时长与原因。M9-5 补状态筛选（未读/已读/已解决）并显示命中总数与降级项，时间区间筛选仍未做，保持 🟡。M9-10 仍为 🟡（按规则、按规则+品种已可用，全局临时静音受后端 `rule` 必填约束未做）。同时修复告警时间显示：SQLite 权威行字段是 `created_at`，此前前端只读 Redis 行的 `ts`，导致列表时间为空 |
 | 2026-10-31 | v0.6（补充 22，数据新鲜度） | M1-7 由 ⬜ 改 ✅：新增 `GET /api/freshness` 与看板首页「数据新鲜度」卡。`lag_bars` 直接复用 `/api/engine` 口径（本地最新已收盘 bar vs 引擎水位）；额外计算 `missing_bars` = 本地最新 bar 相对「此刻应有已收盘 bar」的缺口，因为断网时 candles 与 engine 会一起卡在同一根 bar 上、`lag_bars` 恒为 0，只看 `lag_bars` 会误判为「完全同步」。阈值为 1 根（PRD 验收要求落后超过 1 根必须标红，取 1 可提前一根预警），`stale = lag_bars ≥ 1 或 missing_bars ≥ 1`。卡片分别提示「engine 落后 N 根」与「本地缺 N 根」，并展示最新已收盘 bar 时间、距今多久、engine 水位与降级来源。本期只返回 engine 主组合（engine 目前只发布该组合的水位与状态键），多绑定逐组合需 engine 另行发布各组合水位。RUNBOOK 新增 §4.3 排障表 |
 | 2026-10-31 | v0.6（补充 23，下单前预检下沉 worker） | M7-7 由 🟡 改 ✅：新增 `PreflightChecker` 并在 worker 调用 `executor.execute` 前执行。风控回答「该不该下这么多」（可调、按策略），预检回答「这一单交易所收不收」（硬约束、不随策略变），失败直接拒单并落 `risk_events`，不进 broker、不进死信。校验四项：产品配置存在性、`lotSz` 精度、`minSz` 最小量、最小名义金额；现货额外校验可用余额（预留 2% 余量、快照缓存 15s），合约跳过余额校验（杠杆下可用保证金需由交易所 51008 判定）。**关键取舍**：预检返回的 `qty` 是 `lotSz` 归一化后的基础币数量，worker 必须用它下单，否则 broker 静默取整会导致本地记录与成交不符；合约按 `contracts = floor(qty / ct_val, lotSz)` 折算，`minSz` 比的是张数而非基础币。余额读失败放行（`ok=true` 且 `balance_checked=false`），预检是保护而非闸门，不能因行情接口抖动阻断正常下单。仅 `--broker okx` 且直连客户端可用时装配，仿真 broker 与 `--broker none` 不受影响；配置项见 `config.toml.example` 的 `[risk] preflight_*`。`tests/test_preflight.py` 20 项覆盖四类校验 + worker 集成（归一化数量生效、拒单无成交、无预检时行为不变） |
+| 2026-10-31 | v0.6（补充 24，服务端仓位与状态机收口） | M8-14 由 ⬜ 改 ✅：新增 `PositionSizer`（`src/quant/execution/sizing.py`），`Signal.qty` 改为可选并新增 `size_pct`，webhook `qty` 同步放宽为可选。比例三级回落（`qty` → `size_pct` → `[execution] default_size_pct`，默认 0.1，非正值在配置加载期即报错），算量 `权益 × 比例 ÷ 价格` → `max_order_qty` 截断 → 按 `lotSz` 向下取整；合约先除 `ctVal` 折张再取整且 `minSz` 比张数；算量为 0 或低于 `minSz` 直接拒单，不进 broker、不进死信。**执行顺序按依赖调整为「先补量、再风控」**：风控规则本身需要数量才能算名义价值，补出的量仍会被风控继续下调并再过预检，因此不构成绕过。每次补量写一条 `decision="sized"` 的 `risk_events`（`qty_before` 取整前、`qty_after` 实际下单量、`rule` 截断来源），回答「这单数量从哪来」；`[execution] server_side_sizing=false` 为回滚开关，关掉后无 `qty` 的信号直接拒单。产品规格读取失败退回模拟精度，交易所精度由 M7-7 预检兜底。M8-15 由 ⬜ 改 ✅：状态机与成交累加此前已落地，本次补上最后一个缺口——`save_order` 由「整行覆盖」改为「插入或忽略 + 状态机推进」，重复落库（死信重放、崩溃恢复）不会把 `filled` 回退成 `pending`；补 `save_order` 回退与部分成交累加测试 |

@@ -349,7 +349,9 @@ class SQLiteStore:
                 signal.side,
                 signal.order_type,
                 signal.inst_id,
-                str(signal.qty),
+                # qty 可为空（服务端算量前的信号）；落库统一用 "0"，
+                # 避免把 None 写成字符串 "None" 污染看板展示
+                str(signal.qty) if signal.qty is not None else "0",
                 str(signal.price) if signal.price is not None else None,
                 signal.ts,
                 status,
@@ -374,13 +376,17 @@ class SQLiteStore:
     # ------------------------------------------------------------------
 
     def save_order(self, order: Order) -> None:
-        sql = """
-        INSERT INTO orders (order_id, signal_id, status, created_ts)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(order_id) DO UPDATE SET status=excluded.status
+        """写入订单；已存在时按状态机推进，禁止回退。
+
+        同一 `order_id` 可能被重复落库（重放、崩溃恢复、对账后重申）。
+        直接覆盖状态会把 `filled` 打回 `pending`，成交量与持仓随之失真，
+        因此走后与 `update_order_status` 相同的迁移校验。
         """
         self._execute(
-            sql,
+            """
+            INSERT OR IGNORE INTO orders (order_id, signal_id, status, created_ts)
+            VALUES (?, ?, ?, ?)
+            """,
             (
                 order.order_id,
                 order.signal.signal_id,
@@ -388,6 +394,7 @@ class SQLiteStore:
                 order.created_ts,
             ),
         )
+        self.update_order_status(order.order_id, order.status)
 
     def update_order_fill(
         self, order_id: str, fill: Fill, status: str = "filled"

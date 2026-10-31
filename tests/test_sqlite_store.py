@@ -204,6 +204,28 @@ class TestOrderPersistence:
 
         assert store.update_order_status("o-1", "pending") is False
 
+    def test_save_order_does_not_regress_status(self, store) -> None:
+        """重复落库同一订单不能把终态打回早期状态（M8-15）。"""
+        signal = _signal()
+        store.save_signal(signal, "executed")
+        store.save_order(
+            Order(
+                order_id="o-1", signal=signal, status="pending",
+                created_ts=1_700_000_000_000,
+            )
+        )
+        assert store.update_order_status("o-1", "filled") is True
+
+        # 重放/恢复时又用旧的 pending 订单对象落库
+        store.save_order(
+            Order(
+                order_id="o-1", signal=signal, status="pending",
+                created_ts=1_700_000_000_000,
+            )
+        )
+
+        assert store.get_order_fill_state("o-1")["status"] == "filled"
+
     def test_update_status_missing_order(self, store) -> None:
         assert store.update_order_status("nope", "canceled") is False
 

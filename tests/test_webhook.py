@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from decimal import Decimal
 
 import fakeredis.aioredis
 import httpx
@@ -54,9 +55,23 @@ class TestAlertParser:
         assert signal.price is not None
         assert str(signal.price) == "60000"
 
-    def test_missing_field_raises(self) -> None:
+    def test_qty_omitted_is_allowed(self) -> None:
+        """qty 可省略：由 worker 按服务端仓位计算补量（M8-14）。"""
         payload = {k: v for k, v in VALID.items() if k != "qty"}
-        with pytest.raises(ParseError, match="missing field: qty"):
+        signal = AlertParser().parse(json.dumps(payload))
+        assert signal.qty is None
+        assert signal.size_pct is None
+
+    def test_size_pct_parsed(self) -> None:
+        payload = {k: v for k, v in VALID.items() if k != "qty"}
+        payload["size_pct"] = "0.2"
+        signal = AlertParser().parse(json.dumps(payload))
+        assert signal.qty is None
+        assert signal.size_pct == Decimal("0.2")
+
+    def test_missing_field_raises(self) -> None:
+        payload = {k: v for k, v in VALID.items() if k != "strategy_id"}
+        with pytest.raises(ParseError, match="missing field: strategy_id"):
             AlertParser().parse(json.dumps(payload))
 
     def test_empty_field_raises(self) -> None:
