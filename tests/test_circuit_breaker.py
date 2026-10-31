@@ -13,9 +13,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import fakeredis.aioredis
+import httpx
 import pytest
 
 from quant.backtest.signal import Signal
+from quant.dashboard.app import create_app
 from quant.dashboard.service import DashboardService
 from quant.engine.live import LiveSignalEngine
 from quant.execution.executor import Executor
@@ -25,7 +27,11 @@ from quant.foundation.config import OKXSettings, Settings
 from quant.models import Bar
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
-from quant.risk.circuit_breaker import CircuitBreaker
+from quant.risk.circuit_breaker import (
+    STATUS_AWAITING_RESUME,
+    STATUS_TRIPPED,
+    CircuitBreaker,
+)
 from quant.risk.config import RiskConfig
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
@@ -111,9 +117,43 @@ class TestTrip:
         assert "40.00%" in state.reason
         current = await breaker.state("BTC-USDT")
         assert current is not None and current.triggered_ts == NOW
-        # 冷却期靠 TTL 自动到期
+        # 需要人工确认时键不设 TTL：冷却到期后仍要留着等确认
+        ttl = await redis.ttl(breaker.key_for("BTC-USDT"))
+        assert ttl == -1
+
+    async def test_auto_resume_mode_keeps_ttl(self) -> None:
+        redis = _redis()
+        breaker = CircuitBreaker(redis)
+        bar = _bar(open_="100", high="130", low="90")
+
+        state = await breaker.evaluate(
+            bar,
+            threshold=THRESHOLD,
+            cooldown_seconds=COOLDOWN,
+            now=NOW,
+            requires_confirm=False,
+        )
+
+        assert state is not None
         ttl = await redis.ttl(breaker.key_for("BTC-USDT"))
         assert 0 < ttl <= COOLDOWN
+
+    async def test_state_becomes_awaiting_resume_after_cooldown(self) -> None:
+        redis = _redis()
+        breaker = CircuitBreaker(redis)
+        await breaker.trip("BTC-USDT", "test", cooldown_seconds=COOLDOWN, now=NOW)
+
+        during = await breaker.state("BTC-USDT", now=NOW + 1000)
+        after = await breaker.state(
+            "BTC-USDT", now=NOW + COOLDOWN * 1000 + 1
+        )
+
+        assert during is not None and during.status == STATUS_TRIPPED
+        assert after is not None and after.status == STATUS_AWAITING_RESUME
+        # 即使冷却结束，只要没人工确认就仍然算熔断
+        assert await breaker.is_tripped(
+            "BTC-USDT", now=NOW + COOLDOWN * 1000 + 1
+        )
 
     async def test_trip_is_per_inst(self) -> None:
         redis = _redis()
@@ -143,9 +183,9 @@ class TestTrip:
         breaker = CircuitBreaker(redis)
         await breaker.trip("BTC-USDT", "test", cooldown_seconds=COOLDOWN)
 
-        assert await breaker.resume("BTC-USDT") is True
+        assert await breaker.resume("BTC-USDT") is not None
         assert await breaker.is_tripped("BTC-USDT") is False
-        assert await breaker.resume("BTC-USDT") is False
+        assert await breaker.resume("BTC-USDT") is None
 
     async def test_expired_key_means_armed(self) -> None:
         redis = _redis()
@@ -284,7 +324,24 @@ class TestEngineTrip:
         tick = await _engine(settings, store, redis).run_once(now_ms=NOW + HOUR)
 
         assert tick.status == "skipped"
-        assert tick.reason.startswith("circuit breaker active until")
+        # 一小时 > 15 分钟冷却：已转入待人工确认，仍不放行（M7-12）
+        assert tick.reason.startswith("circuit breaker awaiting manual resume")
+
+    async def test_manual_resume_restores_trading(self, env) -> None:
+        settings, store, redis = env
+        await _engine(settings, store, redis).run_once(now_ms=NOW)
+        breaker = CircuitBreaker(redis)
+        assert await breaker.is_tripped("BTC-USDT", now=NOW + HOUR) is True
+
+        await breaker.resume("BTC-USDT")
+        BarStorage(settings.storage.data_dir).save_bars(
+            [_bar(LAST_TS + HOUR)]
+        )
+
+        tick = await _engine(settings, store, redis).run_once(now_ms=NOW + HOUR)
+
+        # 恢复后正常评估（合成 bar 无交叉，因此是 no_signal 而非 skipped）
+        assert tick.status == "no_signal"
 
     async def test_disabled_circuit_does_not_block(self, tmp_path) -> None:
         settings = _settings(tmp_path, circuit_enabled=False)
@@ -360,6 +417,20 @@ class TestWorkerReject:
 
         assert store.get_signal_status("sig-1") == "executed"
 
+    async def test_awaiting_resume_still_rejects(self, worker_env) -> None:
+        worker, queue, store, redis = worker_env
+        # now=0 且冷却 1ms：读取时早已过期，处于 awaiting_resume
+        await CircuitBreaker(redis).trip(
+            "BTC-USDT", "test crash", cooldown_seconds=1, now=0
+        )
+        await queue.push(_signal())
+
+        await worker.run_once(timeout=0)
+
+        assert store.get_signal_status("sig-1") == "rejected"
+        events = store.list_risk_events(rule="circuit_breaker")
+        assert "awaiting manual resume" in str(events[0]["reason"])
+
     async def test_circuit_does_not_touch_kill_switch(self, worker_env) -> None:
         _, _, store, redis = worker_env
         await CircuitBreaker(redis).trip(
@@ -383,5 +454,96 @@ class TestDashboard:
 
             assert [c["inst_id"] for c in data["circuits"]] == ["BTC-USDT"]
             assert data["circuits"][0]["resume_at"] == NOW + COOLDOWN * 1000
+            # now 是真实时间，早已越过 15 分钟冷却
+            assert data["circuits"][0]["status"] == STATUS_AWAITING_RESUME
+        finally:
+            store.close()
+
+
+class TestManualResume:
+    LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
+
+    async def test_rejected_during_cooldown(self, tmp_path) -> None:
+        redis = _redis()
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            await CircuitBreaker(redis).trip(
+                "BTC-USDT", "test", cooldown_seconds=COOLDOWN
+            )
+            service = DashboardService(store, redis, _settings(tmp_path))
+
+            result = await service.resume_circuit("BTC-USDT")
+
+            assert result["resumed"] is False
+            assert result["reason"] == "cooldown not finished"
+            assert await CircuitBreaker(redis).is_tripped("BTC-USDT") is True
+        finally:
+            store.close()
+
+    async def test_resume_clears_state_and_audits(self, tmp_path) -> None:
+        redis = _redis()
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            # 冷却 1ms 且触发时间为 0：读的时候已经进入 awaiting_resume
+            await CircuitBreaker(redis).trip(
+                "BTC-USDT", "test crash", cooldown_seconds=1, now=0
+            )
+            service = DashboardService(store, redis, _settings(tmp_path))
+
+            result = await service.resume_circuit("BTC-USDT")
+
+            assert result["resumed"] is True
+            assert await CircuitBreaker(redis).is_tripped("BTC-USDT") is False
+            events = store.list_risk_events(rule="circuit_breaker")
+            assert len(events) == 1
+            assert events[0]["decision"] == "resumed"
+            assert events[0]["inst_id"] == "BTC-USDT"
+
+            raw = await redis.lrange(
+                _settings(tmp_path).monitor.dashboard_alerts_key, 0, -1
+            )
+            assert len(raw) == 1
+            alert = json.loads(raw[0])
+            assert alert["level"] == "INFO"
+            assert "人工确认恢复" in alert["message"]
+        finally:
+            store.close()
+
+    async def test_not_tripped_is_noop(self, tmp_path) -> None:
+        redis = _redis()
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            service = DashboardService(store, redis, _settings(tmp_path))
+
+            result = await service.resume_circuit("BTC-USDT")
+
+            assert result["resumed"] is False
+            assert result["reason"] == "not tripped"
+        finally:
+            store.close()
+
+    async def test_api_requires_guard(self, tmp_path) -> None:
+        redis = _redis()
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            service = DashboardService(store, redis, _settings(tmp_path))
+            app = create_app(service, tmp_path / "missing-dist")
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                denied = await client.post(
+                    "/api/risk/circuits/BTC-USDT/resume",
+                    headers={"host": "127.0.0.1:8080"},
+                )
+                assert denied.status_code == 400
+
+                await CircuitBreaker(redis).trip(
+                    "BTC-USDT", "test", cooldown_seconds=1, now=0
+                )
+                ok = await client.post(
+                    "/api/risk/circuits/BTC-USDT/resume", headers=self.LOCAL
+                )
+                assert ok.status_code == 200
+                assert ok.json()["resumed"] is True
         finally:
             store.close()

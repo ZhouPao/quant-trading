@@ -9,8 +9,11 @@
 与 `quant:kill-switch`。
 
 判定口径：单根已收盘 K 线的振幅 `(high - low) / open` 严格大于阈值即
-熔断该品种，状态带 TTL（`cooldown_seconds`）自动到期。冷却期结束后
-不补评估熔断期间的 bar——那段时间的行情已经不具参考价值，引擎会把
+熔断该品种。冷却期结束后**不自动放行**（M7-12）：状态转为
+`awaiting_resume`，必须由人工在看板确认恢复。把决定权交回给人，是因为
+极端行情往往伴随跳空，冷却一到就自动恢复很容易踩进第二波。
+
+熔断期间的 bar 不补评估——那段时间的行情已经不具参考价值，引擎会把
 水位推进到最新一根，从下一根重新开始。
 """
 from __future__ import annotations
@@ -30,7 +33,8 @@ log = get_logger("risk.circuit")
 DEFAULT_KEY_PREFIX = "quant:risk:circuit:"
 
 STATUS_TRIPPED = "tripped"
-STATUS_RESUMED = "resumed"
+#: 冷却期已结束，等待人工确认恢复
+STATUS_AWAITING_RESUME = "awaiting_resume"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +46,8 @@ class CircuitState:
     resume_at: int
     reason: str
     status: str = STATUS_TRIPPED
+    #: 冷却结束是否必须人工确认（False 时由 TTL 自动到期）
+    requires_confirm: bool = True
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +56,7 @@ class CircuitState:
             "resume_at": self.resume_at,
             "reason": self.reason,
             "status": self.status,
+            "requires_confirm": self.requires_confirm,
         }
 
 
@@ -77,6 +84,7 @@ class CircuitBreaker:
         threshold: Decimal,
         cooldown_seconds: int,
         now: int | None = None,
+        requires_confirm: bool = True,
     ) -> CircuitState | None:
         """振幅超阈值则熔断并返回状态；未超返回 None。
 
@@ -94,6 +102,7 @@ class CircuitBreaker:
             reason,
             cooldown_seconds=cooldown_seconds,
             now=now,
+            requires_confirm=requires_confirm,
         )
 
     async def trip(
@@ -103,8 +112,14 @@ class CircuitBreaker:
         *,
         cooldown_seconds: int,
         now: int | None = None,
+        requires_confirm: bool = True,
     ) -> CircuitState:
-        """置熔断标志，TTL 到期自动失效。"""
+        """置熔断标志。
+
+        `requires_confirm=True` 时**不设 TTL**：冷却到期只是把状态变成
+        `awaiting_resume`，键必须留着等人工确认；设为 False 才退回旧的
+        「TTL 到期自动恢复」行为（灰度回滚用）。
+        """
         ts = int(time.time() * 1000) if now is None else now
         cooldown = max(int(cooldown_seconds), 0)
         state = CircuitState(
@@ -112,28 +127,38 @@ class CircuitBreaker:
             triggered_ts=ts,
             resume_at=ts + cooldown * 1000,
             reason=reason,
+            requires_confirm=requires_confirm,
         )
         await self._redis.set(
             self.key_for(inst_id),
             json.dumps(state.as_dict(), ensure_ascii=False),
-            ex=cooldown or None,
+            ex=None if requires_confirm else max(cooldown, 1),
         )
         log.warning(
-            f"circuit breaker tripped inst={inst_id} "
-            f"cooldown={cooldown}s reason={reason}"
+            f"circuit breaker tripped inst={inst_id} cooldown={cooldown}s "
+            f"confirm={'required' if requires_confirm else 'auto'} "
+            f"reason={reason}"
         )
         return state
 
-    async def state(self, inst_id: str) -> CircuitState | None:
-        """当前熔断状态；键不存在（已到期/未触发）返回 None。"""
+    async def state(
+        self, inst_id: str, *, now: int | None = None
+    ) -> CircuitState | None:
+        """当前熔断状态；键不存在（未触发或已自动恢复）返回 None。
+
+        冷却到期且需要人工确认时，返回的 `status` 是 `awaiting_resume`——
+        状态仍是「熔断中」，引擎与 worker 继续拦截该品种。
+        """
         raw = await self._redis.get(self.key_for(inst_id))
-        return _parse(raw, inst_id)
+        return _parse(raw, inst_id, now=_now_ms(now))
 
-    async def is_tripped(self, inst_id: str) -> bool:
-        return await self.state(inst_id) is not None
+    async def is_tripped(self, inst_id: str, *, now: int | None = None) -> bool:
+        """是否处于熔断（含 `awaiting_resume`）。"""
+        return await self.state(inst_id, now=now) is not None
 
-    async def states(self) -> list[CircuitState]:
+    async def states(self, *, now: int | None = None) -> list[CircuitState]:
         """全部处于熔断状态的品种（供看板展示）。"""
+        ts = _now_ms(now)
         result: list[CircuitState] = []
         async for key in self._redis.scan_iter(
             match=f"{self._prefix}*", count=100
@@ -141,21 +166,27 @@ class CircuitBreaker:
             raw = await self._redis.get(key)
             name = key.decode() if isinstance(key, bytes) else str(key)
             inst_id = name[len(self._prefix) :]
-            parsed = _parse(raw, inst_id)
+            parsed = _parse(raw, inst_id, now=ts)
             if parsed is not None:
                 result.append(parsed)
         result.sort(key=lambda item: item.triggered_ts, reverse=True)
         return result
 
-    async def resume(self, inst_id: str) -> bool:
-        """人工解除熔断；返回是否真的删掉了状态键。"""
-        deleted = await self._redis.delete(self.key_for(inst_id))
-        if deleted:
-            log.warning(f"circuit breaker resumed manually inst={inst_id}")
-        return bool(deleted)
+    async def resume(self, inst_id: str) -> CircuitState | None:
+        """人工解除熔断，返回解除前的状态（供审计）；未熔断返回 None。"""
+        state = await self.state(inst_id)
+        if state is None:
+            return None
+        await self._redis.delete(self.key_for(inst_id))
+        log.warning(f"circuit breaker resumed manually inst={inst_id}")
+        return state
 
 
-def _parse(raw: object, inst_id: str) -> CircuitState | None:
+def _now_ms(now: int | None) -> int:
+    return int(time.time() * 1000) if now is None else now
+
+
+def _parse(raw: object, inst_id: str, *, now: int) -> CircuitState | None:
     if raw is None:
         return None
     if isinstance(raw, bytes):
@@ -177,12 +208,20 @@ def _parse(raw: object, inst_id: str) -> CircuitState | None:
             resume_at=0,
             reason="circuit state unreadable",
         )
+    resume_at = int(data.get("resume_at") or 0)
+    requires_confirm = bool(data.get("requires_confirm", True))
+    # 冷却到期但需要人工确认时状态跃迁为 awaiting_resume；键仍在，
+    # 引擎与 worker 继续拦截该品种，直到调用 resume()
+    status = str(data.get("status") or STATUS_TRIPPED)
+    if requires_confirm and resume_at and now >= resume_at:
+        status = STATUS_AWAITING_RESUME
     return CircuitState(
         inst_id=str(data.get("inst_id") or inst_id),
         triggered_ts=int(data.get("triggered_ts") or 0),
-        resume_at=int(data.get("resume_at") or 0),
+        resume_at=resume_at,
         reason=str(data.get("reason") or ""),
-        status=str(data.get("status") or STATUS_TRIPPED),
+        status=status,
+        requires_confirm=requires_confirm,
     )
 
 
@@ -190,5 +229,6 @@ __all__ = [
     "CircuitBreaker",
     "CircuitState",
     "DEFAULT_KEY_PREFIX",
+    "STATUS_AWAITING_RESUME",
     "STATUS_TRIPPED",
 ]

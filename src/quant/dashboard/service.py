@@ -31,11 +31,12 @@ from quant.foundation.heartbeat import (
 )
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
-from quant.monitor.alert_service import AlertService
+from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import SignalQueue
-from quant.risk.circuit_breaker import CircuitBreaker
+from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
 from quant.risk.config import RiskConfig
+from quant.risk.events import build_event_id
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
@@ -529,7 +530,7 @@ class DashboardService:
         try:
             circuits = [
                 state.as_dict()
-                for state in await CircuitBreaker(self._redis).states()
+                for state in await CircuitBreaker(self._redis).states(now=now)
             ]
         except Exception as e:  # noqa: BLE001
             degraded.append("redis")
@@ -724,6 +725,75 @@ class DashboardService:
             "rules": rules,
             "circuits": circuits,
             "degraded": degraded,
+        }
+
+    async def resume_circuit(self, inst_id: str) -> dict[str, object]:
+        """人工确认恢复某个品种的熔断（M7-12）。
+
+        只允许在冷却期结束后操作：冷却还没走完就放行，等于把熔断阈值
+        变成摆设。恢复动作写 `risk_events` 并发一条 INFO 告警，保证
+        「谁在什么时候解除了熔断」可追溯。
+        """
+        now = int(time.time() * 1000)
+        breaker = CircuitBreaker(self._redis)
+        state = await breaker.state(inst_id, now=now)
+        if state is None:
+            return {
+                "inst_id": inst_id,
+                "resumed": False,
+                "reason": "not tripped",
+            }
+        if state.status != STATUS_AWAITING_RESUME:
+            return {
+                "inst_id": inst_id,
+                "resumed": False,
+                "reason": "cooldown not finished",
+                "resume_at": state.resume_at,
+            }
+        resumed = await breaker.resume(inst_id)
+        if resumed is None:
+            # 竞态：读取与删除之间别的进程已经恢复
+            return {
+                "inst_id": inst_id,
+                "resumed": False,
+                "reason": "not tripped",
+            }
+
+        try:
+            await asyncio.to_thread(
+                self._store.insert_risk_event,
+                event_id=build_event_id(
+                    f"circuit-resume:{inst_id}", now, "circuit_breaker"
+                ),
+                ts=now,
+                inst_id=inst_id,
+                signal_id=f"circuit-resume:{inst_id}",
+                decision="resumed",
+                rule="circuit_breaker",
+                limit_name="circuit_amplitude_pct",
+                reason=f"manual resume: {resumed.reason}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error(f"record circuit resume event failed: {e}")
+
+        try:
+            await self._alerts.publish(
+                AlertEvent(
+                    rule="circuit_breaker",
+                    level="INFO",
+                    message=f"{inst_id} 熔断已人工确认恢复，恢复交易",
+                    ts=now,
+                    inst_id=inst_id,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"publish circuit resume alert failed: {e}")
+
+        return {
+            "inst_id": inst_id,
+            "resumed": True,
+            "triggered_ts": resumed.triggered_ts,
+            "reason": resumed.reason,
         }
 
     # ------------------------------------------------------------------

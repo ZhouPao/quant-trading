@@ -309,6 +309,9 @@ class RiskDefaults(BaseModel):
     circuit_enabled: bool = True
     circuit_amplitude_pct: Decimal = Decimal("0.10")
     circuit_cooldown_seconds: int = 900
+    # 冷却结束后是否必须人工在看板确认才恢复（M7-12）。
+    # 置 false 退回「TTL 到期自动恢复」的旧行为（灰度回滚用）。
+    circuit_resume_requires_confirm: bool = True
 
 
 class Settings(BaseModel):

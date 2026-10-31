@@ -699,6 +699,11 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+.risk-circuit .dl-btn {
+  align-self: flex-start;
+  margin-top: 6px;
+}
+
 .risk-item {
   min-width: 0;
   padding-left: 10px;

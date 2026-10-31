@@ -527,7 +527,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | `RuleHit` | `rule_id` / `limit` / `actual` / `qty_before` / `qty_after` | 单条规则的命中详情；未触发则不产生 |
 | `RiskDecision` | `approved` / `adjusted_qty` / `reason` / `halt` / `hits: list[RuleHit]` | 在现有结构上增加 `hits`，便于解释「为什么被拒/被减量」 |
 | `RiskEvent` | `ts` / `signal_id` / `strategy_id` / `inst_id` / `approved` / `halt` / `reason` / `hits`(JSON) / `equity` | 每次判定落一条，供风控页与告警查询 |
-| `CircuitBreakerState` | `inst_id` / `triggered_ts` / `reason` / `resume_at` / `status` | `status` ∈ `armed` / `tripped` / `resumed`；按品种独立 |
+| `CircuitBreakerState` | `inst_id` / `triggered_ts` / `reason` / `resume_at` / `status` / `requires_confirm` | `status` ∈ `tripped`（冷却中）/ `awaiting_resume`（冷却结束、待人工确认）；按品种独立 |
 
 #### 4.7.3 存储
 
@@ -542,7 +542,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | 参数合并 | `resolve_limits(strategy_id) -> RiskLimits` | 全局默认 + 策略覆盖取严；每字段标注来源 |
 | 规则判定 | `RiskChecker.check(signal, market_price, today_start_ms, equity) -> RiskDecision` | 签名不变，返回值增加 `hits`；规则顺序固定：halt 类（日亏损 → 连亏 → 熔断）→ 名义价值类 → 比例类 |
 | 阈值覆盖 | `RiskOverrideService.set(field, value, reason)` / `list()` / `clear(field)` | 写 Redis 覆盖值 + 落 `risk_overrides`；与 toml 分离，重载后仍生效 |
-| 熔断 | `CircuitBreaker.evaluate(bar) -> bool` / `trip(reason)` / `resume()` | 单根 `(high−low)/open` 超阈值即按品种熔断；冷却期结束需人工确认才恢复 |
+| 熔断 | `CircuitBreaker.evaluate(bar) -> CircuitState \\| None` / `trip(reason)` / `state()` / `resume()` | 单根 `(high−low)/open` 严格大于阈值即按品种熔断；冷却结束转 `awaiting_resume`，需人工确认才恢复 |
 | 事件查询 | `RiskEventService.list(strategy_id, inst_id, rule_id, halt_only, start_ts, end_ts)` | 供风控页与 M9 告警共用 |
 
 #### 4.7.5 需求条目
@@ -554,13 +554,13 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M7-3 | 日亏损与连亏保护 | 日内已实现亏损触及 `daily_loss_limit` 停止开仓；连续 N 笔亏损同样停止；两者均置 `halt=true`。**「日内」按 UTC+8 切日**（`day_start_ms_utc8`），与 §5.6 的 UTC 日口径不同，见下方口径说明 | F3.4 | ✅ |
 | M7-4 | 紧急停止 | kill switch：停止所有策略、撤销全部挂单；看板一键触发并二次确认。激活时默认同时撤销交易所全部挂单并同步本地订单状态，可勾选「仅停止不撤单」；撤单失败不回滚停止标志，页面单独提示需人工核对 | F4.5 | ✅ |
 | M7-5 | 实时风险指标 | 保证金率、实时回撤、强平距离、撤单率；与首页 M1-3 同源 | F5.3 | ✅ |
-| M7-6 | 极端行情熔断 | 单根振幅 `(high−low)/open` 超阈值（默认 10%）按品种暂停 N 分钟并告警。已落地：`CircuitBreaker.evaluate()` 在引擎每轮评估已收盘 bar 时判定，触发后该品种跳过并推进水位（恢复后不补评估过期 bar），落 `risk_events` 并产生 `circuit_breaker` 告警；worker 同步拒绝该品种信号，其它品种不受影响；冷却期由 Redis TTL 自动到期 | 4.7（v0.5） | ✅ |
+| M7-6 | 极端行情熔断 | 单根振幅 `(high−low)/open` 超阈值（默认 10%）按品种暂停 N 分钟并告警。已落地：`CircuitBreaker.evaluate()` 在引擎每轮评估已收盘 bar 时判定，触发后该品种跳过并推进水位（恢复后不补评估过期 bar），落 `risk_events` 并产生 `circuit_breaker` 告警；worker 同步拒绝该品种信号，其它品种不受影响；冷却期结束后转 `awaiting_resume`，需人工确认恢复 | 4.7（v0.5） | ✅ |
 | M7-7 | 下单前预检 | 余额、价格/数量精度、最小下单量、最小名义金额；当前仅手工交易校验 `minSz`，需下沉到 worker 使自动路径同样生效 | F4.4 | 🟡 |
 | M7-8 | 阈值在线调整 | 看板改阈值 → 写 Redis 覆盖层 + 落 `risk_overrides`；不重启即生效，变更可追溯 | 新增 | ⬜ |
 | M7-9 | 风控规则页 | 展示生效规则、阈值及来源（全局/策略/覆盖）、今日触发次数与最近一次详情。**阈值与来源已展示**；`risk_events` 只写不读，触发次数与最近详情缺查询接口 | 新增 | 🟡 |
 | M7-10 | 两层参数合并 | 全局默认 + 策略覆盖取严；`RiskLimits.applied` 标注每字段来源，页面可解释「这个值从哪来」。看板「风险规则」面板已显示 global/strategy/override 来源 | 新增 | ✅ |
 | M7-11 | 风控事件落库 | 每次判定写 `risk_events`，含命中规则、限值、实际值、调整前后数量、当时权益；拒绝与减量都记 | 新增 | ✅ |
-| M7-12 | 熔断恢复策略 | 冷却期结束不自动放行，需人工在风控页确认恢复；恢复动作写 `risk_events` | 新增 | ⬜ |
+| M7-12 | 熔断恢复策略 | 冷却期结束不自动放行，需人工在风控页确认恢复；恢复动作写 `risk_events`。已落地：冷却到期状态转 `awaiting_resume`（键不设 TTL，引擎与 worker 继续拦截），`POST /api/risk/circuits/{inst_id}/resume` 仅在冷却结束后可用，恢复时写一条 `decision=resumed` 的 `risk_events` 并发 INFO 告警；`[risk] circuit_resume_requires_confirm=false` 可回滚到自动恢复 | 新增 | ✅ |
 | M7-13 | 熔断与 kill switch 职责分离 | 熔断只作用于单个品种、有自动冷却；kill switch 作用于全局、只能人工解除。两者互不复用状态键。状态键分别为 `quant:risk:circuit:{inst_id}` 与 `quant:kill-switch`，单测覆盖「熔断不激活 kill switch」「其它品种照常交易」 | 新增 | ✅ |
 | M7-14 | 阈值变更审计 | `risk_overrides` 记录字段、改前、改后、时间、原因、来源；覆盖值可从页面一键清除回落到配置值 | 新增 | ⬜ |
 | M7-15 | 权益口径统一 | 一律使用 monitor 账户快照的 `total_equity`；未拿到快照时不得退回 `initial_equity` 做真实下单判定，应拒绝并记原因。`[risk] allow_initial_equity_fallback` 默认 `false`，worker 已按配置传入 | 新增 | ✅ |
@@ -1017,3 +1017,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 14，数据质量报告落地） | M2-15 由 ⬜ 改 ✅：新增 `storage/quality.py`，candles 每轮校验后把结果并入 `data/quality/{inst}/{bar}/latest.json`，跨次累计缺口 `open`/`repaired`（窗口外旧缺口保持 open，不误判修复）；`quant check-data` 支持手动全量校验；`GET /api/quality` 返回摘要或单份完整报告，看板「数据质量」面板可按缺口展开；monitor 对有未修复缺口的品种产生 `data_quality` WARNING，按 `(inst, bar)` 分别冷却（默认 1 小时），新增 `[quality]` 三项配置 |
 | 2026-10-31 | v0.6（补充 15，死信查看与重放落地） | M8-16 由 ⬜ 改 ✅：迁移 v7 建 `dead_letters`，`SignalQueue` 双写（Redis 保留计数告警、SQLite 为权威记录），`stage` 收敛为 `parse`/`submit`/`reconcile`；新增 `DeadLetterService` 与 `GET /api/dead-letters`、`POST /api/dead-letters/{id}/replay`、`POST /api/dead-letters/replay`、`POST /api/dead-letters/{id}/discard`；重放前查 `signals.status`，已 `executed`/`rejected` 返回 `already_processed` 不重复下单，并用 `replayed_at IS NULL` 条件更新防并发双击；看板新增「死信」面板（阶段筛选、payload 展开、单条/批量重放、丢弃）；`[storage] dead_letter_persist` 作为灰度回滚开关 |
 | 2026-10-31 | v0.6（补充 16，极端行情熔断落地） | M7-6 由 ⬜ 改 ✅：新增 `risk/circuit_breaker.py`，按 `(high−low)/open` 严格大于阈值判定，状态存 `quant:risk:circuit:{inst_id}` 并带 TTL 自动到期；引擎每轮检查待评估 bar，触发后跳过该品种、推进水位（恢复后不补评估过期 bar）、落 `risk_events` 并产生 `circuit_breaker` 告警；worker 对熔断品种的信号直接拒绝（不触发 kill switch）；看板「风险规则」显示熔断中的品种与预计解除时间；`[risk] circuit_enabled`/`circuit_amplitude_pct`/`circuit_cooldown_seconds` 三项配置，前两项默认 10% 与 900 秒。M7-13 由 ⬜ 改 ✅（状态键与 kill switch 完全分离，单测覆盖）；M7-17 由 ⬜ 改 🟡（熔断告警分支已接，`halt` 告警未接）。M7-12 仍 ⬜：当前冷却结束后自动恢复，人工确认恢复待后续实现 |
+| 2026-10-31 | v0.6（补充 17，熔断人工确认恢复落地） | M7-12 由 ⬜ 改 ✅：熔断键改为不设 TTL，冷却到期后 `status` 跃迁为 `awaiting_resume`，引擎与 worker 继续拦截该品种；新增 `DashboardService.resume_circuit()` 与 `POST /api/risk/circuits/{inst_id}/resume`（写操作守卫），只允许冷却结束后调用，恢复时写 `decision=resumed` 的 `risk_events` 并发 INFO 告警；看板「风险规则」对 `awaiting_resume` 显示「确认恢复」按钮，恢复后立即重取；`[risk] circuit_resume_requires_confirm=false` 可回滚到 TTL 自动恢复。同步修正 M7-6 描述与 `CircuitBreakerState` 字段表（`status` 实际为 `tripped`/`awaiting_resume`，新增 `requires_confirm`） |

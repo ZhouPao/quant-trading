@@ -14,6 +14,7 @@ import {
   fetchQualityReport,
   fetchReports,
   fetchRiskLimits,
+  resumeCircuit,
   fetchStrategies,
   discardDeadLetter,
   flattenPositions,
@@ -212,6 +213,8 @@ export default function App() {
   const [quality, setQuality] = useState<QualityListResponse | null>(null);
   const [risk, setRisk] = useState<RiskLimitsResponse | null>(null);
   const [riskError, setRiskError] = useState<string | null>(null);
+  // 人工恢复熔断后立即重取，不必等下一次轮询
+  const [riskRefresh, setRiskRefresh] = useState(0);
   const timer = useRef<number | null>(null);
 
   const load = useCallback(async (signal: AbortSignal) => {
@@ -315,7 +318,7 @@ export default function App() {
       controller.abort();
       window.clearInterval(id);
     };
-  }, []);
+  }, [riskRefresh]);
 
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
@@ -555,7 +558,11 @@ export default function App() {
                   : "等待 worker 发布生效值"}
             </span>
           </div>
-          <RiskLimitsPanel risk={risk} error={riskError} />
+          <RiskLimitsPanel
+            risk={risk}
+            error={riskError}
+            onResumed={() => setRiskRefresh((n) => n + 1)}
+          />
         </section>
 
         <section className="card kill reveal" style={{ animationDelay: "120ms" }}>
@@ -669,10 +676,15 @@ export default function App() {
 function RiskLimitsPanel({
   risk,
   error,
+  onResumed,
 }: {
   risk: RiskLimitsResponse | null;
   error: string | null;
+  onResumed: () => void;
 }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ bad: boolean; text: string } | null>(null);
+
   if (error) {
     return (
       <p className="risk-unknown">
@@ -689,21 +701,66 @@ function RiskLimitsPanel({
       </p>
     );
   }
+
+  const resume = async (instId: string) => {
+    setBusy(instId);
+    setMsg(null);
+    try {
+      const result = await resumeCircuit(
+        instId,
+        window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "",
+      );
+      if (result.resumed) {
+        setMsg({ bad: false, text: `${instId} 已恢复交易` });
+        onResumed();
+      } else if (result.reason === "cooldown not finished") {
+        setMsg({ bad: true, text: `${instId} 冷却期未结束，暂不能恢复` });
+      } else {
+        setMsg({ bad: true, text: `${instId} 已不处于熔断状态` });
+      }
+    } catch (err) {
+      setMsg({ bad: true, text: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <>
       {risk.circuits.length > 0 && (
         <div className="risk-circuits">
-          {risk.circuits.map((item) => (
-            <div className="risk-circuit" key={item.inst_id}>
-              <b>{item.inst_id} 熔断中</b>
-              <span className="risk-circuit-reason">{item.reason}</span>
-              <span>
-                预计 {clock(item.resume_at)} 自动解除；冷却期内该品种信号会被
-                worker 拒绝，其它品种不受影响
-              </span>
-            </div>
-          ))}
+          {risk.circuits.map((item) => {
+            const awaiting = item.status === "awaiting_resume";
+            return (
+              <div className="risk-circuit" key={item.inst_id}>
+                <b>
+                  {item.inst_id}{" "}
+                  {awaiting ? "冷却结束 · 待确认恢复" : "熔断中"}
+                </b>
+                <span className="risk-circuit-reason">{item.reason}</span>
+                <span>
+                  {awaiting
+                    ? `冷却已于 ${clock(item.resume_at)} 结束，需人工确认后才恢复交易`
+                    : `预计 ${clock(item.resume_at)} 进入待确认`}
+                  ；熔断期间该品种信号会被 worker 拒绝，其它品种不受影响
+                </span>
+                {awaiting && (
+                  <button
+                    type="button"
+                    className="dl-btn"
+                    disabled={busy === item.inst_id}
+                    onClick={() => resume(item.inst_id)}
+                  >
+                    {busy === item.inst_id ? "恢复中…" : "确认恢复"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
+      )}
+      {msg && (
+        <p className={msg.bad ? "dl-msg dl-bad" : "dl-msg"}>{msg.text}</p>
       )}
       <div className="risk-grid">
         {risk.rules.map((rule) => (

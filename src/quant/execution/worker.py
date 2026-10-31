@@ -21,7 +21,7 @@ from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker, RiskDecision
-from quant.risk.circuit_breaker import CircuitBreaker
+from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("execution.worker")
@@ -148,10 +148,16 @@ class Worker:
         if self.circuit is not None:
             state = await self.circuit.state(signal.inst_id)
             if state is not None:
+                if state.status == STATUS_AWAITING_RESUME:
+                    detail = (
+                        f"circuit breaker awaiting manual resume: {state.reason}"
+                    )
+                else:
+                    detail = f"circuit breaker active: {state.reason}"
                 decision = RiskDecision(
                     approved=False,
                     adjusted_qty=Decimal("0"),
-                    reason=f"circuit breaker active: {state.reason}",
+                    reason=detail,
                     rule="circuit_breaker",
                     limit_name="circuit_amplitude_pct",
                 )

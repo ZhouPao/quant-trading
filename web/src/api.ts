@@ -255,7 +255,17 @@ export type RiskCircuit = {
   triggered_ts: number;
   resume_at: number;
   reason: string;
-  status: string;
+  /** tripped=冷却中；awaiting_resume=冷却已结束，等待人工确认恢复 */
+  status: "tripped" | "awaiting_resume";
+  requires_confirm: boolean;
+};
+
+export type CircuitResumeResult = {
+  inst_id: string;
+  resumed: boolean;
+  reason?: string;
+  resume_at?: number;
+  triggered_ts?: number;
 };
 
 export type RiskLimitsResponse = {
@@ -692,6 +702,15 @@ export async function replayDeadLetters(ids: string[], token = "") {
 export async function discardDeadLetter(deadId: string, token = "") {
   return postGuarded<DeadLetterResult>(
     `/api/dead-letters/${encodeURIComponent(deadId)}/discard`,
+    {},
+    token,
+  );
+}
+
+/** 人工确认恢复熔断中的品种（M7-12）。 */
+export async function resumeCircuit(instId: string, token = "") {
+  return postGuarded<CircuitResumeResult>(
+    `/api/risk/circuits/${encodeURIComponent(instId)}/resume`,
     {},
     token,
   );

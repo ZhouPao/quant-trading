@@ -40,6 +40,7 @@
 - POST /api/optimize  参数网格寻优（只返回排名，不落盘）
 - POST /api/walkforward 滚动 IS/OOS 验证任务，立即返回 run_id（?sync=1 同步）
 - POST /api/kill-switch 切换紧急停止标志，激活时默认同时撤销交易所挂单（写操作）
+- POST /api/risk/circuits/{inst_id}/resume 人工确认恢复熔断中的品种（写操作）
 - POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
 - POST /api/positions/flatten 一键全平（写操作，直连 OKX）
 
@@ -562,6 +563,20 @@ def create_app(
         # 先置标志再撤单：撤单失败也要保持「停止」状态，绝不因撤单失败而恢复交易
         if req.action == "on" and req.cancel_orders:
             result["cancel"] = await _cancel_open_orders()
+        return JSONResponse(result)
+
+    @app.post("/api/risk/circuits/{inst_id}/resume")
+    async def resume_circuit(request: Request, inst_id: str) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            result = await service.resume_circuit(inst_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"circuit resume failed inst={inst_id}: {e}")
+            raise HTTPException(
+                status_code=503, detail="redis unavailable"
+            ) from e
+        if result.get("resumed"):
+            log.warning(f"circuit breaker resumed by operator inst={inst_id}")
         return JSONResponse(result)
 
     @app.post("/api/positions/reduce")

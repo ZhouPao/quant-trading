@@ -40,7 +40,11 @@ from quant.models import Bar
 from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import Deduper, SignalQueue
-from quant.risk.circuit_breaker import CircuitBreaker, CircuitState
+from quant.risk.circuit_breaker import (
+    STATUS_AWAITING_RESUME,
+    CircuitBreaker,
+    CircuitState,
+)
 from quant.risk.events import build_event_id
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
@@ -336,26 +340,33 @@ class LiveSignalEngine:
     ) -> EngineTick | None:
         """极端行情熔断（M7-6）。
 
-        已有熔断状态时整轮跳过该品种；否则逐根检查待评估 bar，任一超阈值
-        立即熔断并返回 skipped。熔断期间的 bar 直接推进水位，恢复后不补评估
-        ——那段行情已经过去，补发信号只会用过期价格下单。
+        已有熔断状态时整轮跳过该品种；冷却到期后状态变为 `awaiting_resume`，
+        仍继续跳过，直到人工在看板确认（M7-12）。否则逐根检查待评估 bar，
+        任一超阈值立即熔断并返回 skipped。熔断期间的 bar 直接推进水位，
+        恢复后不补评估——那段行情已经过去，补发信号只会用过期价格下单。
         """
         if self._circuit is None:
             return None
         cfg = self._settings.risk
-        state = await self._circuit.state(binding.inst_id)
+        state = await self._circuit.state(binding.inst_id, now=now)
         if state is not None:
-            return EngineTick(
-                "skipped",
-                pending[-1].ts,
-                reason=f"circuit breaker active until {_clock(state.resume_at)}",
-            )
+            if state.status == STATUS_AWAITING_RESUME:
+                reason = (
+                    f"circuit breaker awaiting manual resume "
+                    f"(cooldown ended {_clock(state.resume_at)})"
+                )
+            else:
+                reason = (
+                    f"circuit breaker active until {_clock(state.resume_at)}"
+                )
+            return EngineTick("skipped", pending[-1].ts, reason=reason)
         for bar in pending:
             tripped = await self._circuit.evaluate(
                 bar,
                 threshold=cfg.circuit_amplitude_pct,
                 cooldown_seconds=cfg.circuit_cooldown_seconds,
                 now=now,
+                requires_confirm=cfg.circuit_resume_requires_confirm,
             )
             if tripped is None:
                 continue
