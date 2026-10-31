@@ -845,6 +845,21 @@ tbody tr.row-active td:first-child {
   outline: none;
 }
 
+.kill-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.kill-check input {
+  accent-color: var(--bad);
+}
+
 .kill-msg {
   grid-column: 1 / -1;
   color: var(--ok);

@@ -944,11 +944,12 @@ class DashboardService:
     async def set_kill_switch(
         self, active: bool, reason: str = ""
     ) -> dict[str, object]:
-        """切换紧急停止标志（唯一的写操作）。
+        """切换紧急停止标志。
 
-        只写 Redis 标志，不撤挂单、不停进程：worker 消费信号前、
+        只写 Redis 标志，不直接撤挂单、不停进程：worker 消费信号前、
         engine 每轮评估前都会重新读取该键，所以改完立即生效。
-        撤单仍需 `quant kill-switch --on`（会调交易所批量撤单接口）。
+        看板路由在激活后会另行调用 `ManualTrader.cancel_open_orders`；
+        CLI 用 `quant kill-switch --on` 走同样的交易所批量撤单。
         """
         if active:
             await self._kill_switch.enable(reason)

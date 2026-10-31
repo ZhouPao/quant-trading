@@ -530,7 +530,7 @@ export default function App() {
         <section className="card kill reveal" style={{ animationDelay: "120ms" }}>
           <div className="card-head">
             <h2>紧急停止</h2>
-            <span className="card-note">只拦新信号 · 不撤挂单 · 不停进程</span>
+            <span className="card-note">停止开新仓 · 撤销挂单 · 不停进程</span>
           </div>
           <KillSwitchPanel state={overview?.kill_switch} />
         </section>
@@ -968,10 +968,13 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [cancelOrders, setCancelOrders] = useState(true);
+  const [cancelError, setCancelError] = useState("");
 
   // 服务端状态一变就丢弃本地结果，避免遮住风控的自动激活
   useEffect(() => {
     setLocal(null);
+    setCancelError("");
   }, [state?.active, state?.reason]);
 
   const active = local?.active ?? state?.active ?? false;
@@ -980,17 +983,35 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
   const submit = async (action: "on" | "off") => {
     setBusy(true);
     setError("");
+    setCancelError("");
     try {
+      const withCancel = action === "on" && cancelOrders;
       const result = await setKillSwitch(
         action,
         action === "on" ? reason.trim() : "",
-        token
+        token,
+        withCancel
       );
       setLocal(result);
       if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
-      setNotice(action === "on" ? "已停止开新仓" : "已恢复开仓");
       setPending(null);
       setReason("");
+      const cancel = result.cancel;
+      if (withCancel && cancel) {
+        if (cancel.ok) {
+          setNotice(
+            `已停止开新仓，撤销挂单 ${cancel.exchange_canceled ?? 0} 张` +
+              ((cancel.local_marked ?? 0) > 0
+                ? `，本地标记 ${cancel.local_marked} 条`
+                : "")
+          );
+        } else {
+          setNotice("已停止开新仓");
+          setCancelError(cancel.error || "撤单失败，请到交易所手动确认挂单");
+        }
+      } else {
+        setNotice(action === "on" ? "已停止开新仓（未撤挂单）" : "已恢复开仓");
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1036,6 +1057,16 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
               onChange={(e) => setReason(e.target.value)}
             />
           )}
+          {pending === "on" && (
+            <label className="kill-check">
+              <input
+                type="checkbox"
+                checked={cancelOrders}
+                onChange={(e) => setCancelOrders(e.target.checked)}
+              />
+              同时撤销全部挂单
+            </label>
+          )}
           {authRequired && (
             <input
               className="kill-input"
@@ -1065,10 +1096,16 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
       )}
 
       {error && <div className="kill-msg kill-msg-bad">操作失败：{error}</div>}
+      {!error && cancelError && (
+        <div className="kill-msg kill-msg-bad">
+          撤单失败：{cancelError}（停止标志已生效，请到交易所核对挂单）
+        </div>
+      )}
       {!error && notice && <div className="kill-msg">{notice}</div>}
       <p className="kill-note">
-        网页按钮只写停止标志，不会撤挂单；需要同时撤单请执行
-        <code>quant kill-switch --on</code>。
+        激活时默认撤销交易所全部挂单（等价
+        <code>quant kill-switch --on</code>
+        ）；撤单失败不影响停止标志，需人工到交易所确认。
       </p>
     </div>
   );

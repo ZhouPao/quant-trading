@@ -34,7 +34,7 @@
 - POST /api/backtest/{run_id}/rerun  复制参数重跑（写操作）
 - POST /api/optimize  参数网格寻优（只返回排名，不落盘）
 - POST /api/walkforward 滚动 IS/OOS 验证任务，立即返回 run_id（?sync=1 同步）
-- POST /api/kill-switch 切换紧急停止标志（写操作）
+- POST /api/kill-switch 切换紧急停止标志，激活时默认同时撤销交易所挂单（写操作）
 - POST /api/positions/reduce  手动减仓（写操作，直连 OKX，只减不开）
 - POST /api/positions/flatten 一键全平（写操作，直连 OKX）
 
@@ -80,6 +80,8 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 class KillSwitchRequest(BaseModel):
     action: Literal["on", "off"]
     reason: str = ""
+    # 激活时默认同时撤掉交易所挂单；置 false 只拦新开仓（M7-4）
+    cancel_orders: bool = True
 
 
 class ReduceRequest(BaseModel):
@@ -173,6 +175,17 @@ def create_app(
                 status_code=503, detail="手动交易未启用（缺少 OKX 客户端）"
             )
         return manual
+
+    async def _cancel_open_orders() -> dict[str, object]:
+        """急停时撤掉全部挂单；失败只回报，不改变已置的停止标志。"""
+        if manual is None:
+            return {"ok": False, "error": "手动交易未启用（缺少 OKX 客户端）"}
+        try:
+            detail = await manual.cancel_open_orders()
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"kill switch cancel failed: {e}")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **detail}
 
     @app.get("/api/health")
     async def health() -> dict:
@@ -488,6 +501,10 @@ def create_app(
             ) from e
         # 写操作留痕：谁在什么时候因为什么停了策略
         log.warning(f"kill switch -> {req.action} (reason={reason!r})")
+
+        # 先置标志再撤单：撤单失败也要保持「停止」状态，绝不因撤单失败而恢复交易
+        if req.action == "on" and req.cancel_orders:
+            result["cancel"] = await _cancel_open_orders()
         return JSONResponse(result)
 
     @app.post("/api/positions/reduce")

@@ -271,6 +271,36 @@ class ManualTrader:
             "failed": len(results) - succeeded,
         }
 
+    async def cancel_open_orders(self) -> dict[str, object]:
+        """撤销交易所侧全部挂单，并同步本地未终结订单（M7-4）。
+
+        以**交易所的挂单列表**为准：本地漏记或状态漂移时，只撤本地记录
+        会留下真正裸露在交易所的挂单。撤单失败时不动本地状态，避免页面
+        显示「已撤」而实际还挂着。
+        """
+        _client, broker = self._ensure_client()
+        try:
+            canceled = await broker.cancel_all_open_orders()
+        except Exception as e:  # noqa: BLE001
+            raise ManualTradeError(f"撤销挂单失败：{e}", status=502) from e
+
+        local_marked = 0
+        for order in await asyncio.to_thread(self._store.get_open_orders):
+            order_id = str(order.get("order_id") or "")
+            if not order_id:
+                continue
+            await asyncio.to_thread(
+                self._store.update_order_status, order_id, "canceled"
+            )
+            local_marked += 1
+        log.warning(
+            f"kill-switch canceled exchange={canceled} local_marked={local_marked}"
+        )
+        return {
+            "exchange_canceled": canceled,
+            "local_marked": local_marked,
+        }
+
     async def _flatten_targets(self) -> list[str]:
         """待平品种：本地持仓 ∪ 快照合约多头。
 

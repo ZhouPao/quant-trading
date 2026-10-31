@@ -531,17 +531,27 @@ export async function fetchReports(signal: AbortSignal, limit = 20) {
   return getJson<ReportsResponse>(`/api/reports?limit=${limit}`, signal);
 }
 
+export type KillSwitchCancel = {
+  ok: boolean;
+  exchange_canceled?: number;
+  local_marked?: number;
+  error?: string;
+};
+
 export type KillSwitchState = {
   active: boolean;
   reason: string | null;
   auth_required: boolean;
+  // 激活且勾选撤单时返回；未撤单则不出现该字段
+  cancel?: KillSwitchCancel;
 };
 
-/** 切换紧急停止标志（唯一的写操作）。自定义头用于挡跨站请求。 */
+/** 切换紧急停止标志；激活时默认同时撤掉交易所挂单。自定义头用于挡跨站请求。 */
 export async function setKillSwitch(
   action: "on" | "off",
   reason: string,
-  token = ""
+  token = "",
+  cancelOrders = true
 ): Promise<KillSwitchState> {
   const response = await fetch("/api/kill-switch", {
     method: "POST",
@@ -550,7 +560,7 @@ export async function setKillSwitch(
       "X-Dashboard-Request": "1",
       ...(token ? { "X-Dashboard-Token": token } : {}),
     },
-    body: JSON.stringify({ action, reason }),
+    body: JSON.stringify({ action, reason, cancel_orders: cancelOrders }),
   });
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;

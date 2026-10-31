@@ -11,6 +11,7 @@ import pytest
 
 from quant.backtest.order import Fill, Order
 from quant.backtest.position import Position
+from quant.backtest.signal import Signal
 from quant.dashboard.app import create_app
 from quant.dashboard.manual import ManualTradeError, ManualTrader, floor_to
 from quant.dashboard.service import DashboardService
@@ -89,9 +90,21 @@ class FakeClient:
 
 
 class FakeBroker:
-    def __init__(self, price: str = "100") -> None:
+    def __init__(
+        self,
+        price: str = "100",
+        canceled: int = 0,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self.price = Decimal(price)
         self.calls: list[dict] = []
+        self.canceled = canceled
+        self.cancel_error = cancel_error
+
+    async def cancel_all_open_orders(self) -> int:
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        return self.canceled
 
     async def execute(self, signal, qty, market_price=None, reduce_only=False):
         self.calls.append(
@@ -135,6 +148,60 @@ def env(tmp_path):
 
 def test_floor_to_truncates() -> None:
     assert floor_to(Decimal("0.123456"), Decimal("0.001")) == Decimal("0.123")
+
+
+def _save_live_order(store: SQLiteStore, order_id: str = "o-live") -> None:
+    """造一条仍在挂单簿的本地订单（急停撤单的同步对象）。"""
+    signal = Signal(
+        strategy_id="sma_cross",
+        side="buy",
+        order_type="market",
+        inst_id="BTC-USDT",
+        qty=Decimal("1"),
+        ts=NOW,
+        signal_id=f"sig-{order_id}",
+    )
+    store.save_signal(signal, "executed")
+    store.save_order(
+        Order(order_id=order_id, signal=signal, status="live", created_ts=NOW)
+    )
+
+
+class TestCancelOpenOrders:
+    async def test_cancels_exchange_and_marks_local(self, env) -> None:
+        trader, store, _redis, _settings, broker = env
+        broker.canceled = 2
+        _save_live_order(store)
+
+        result = await trader.cancel_open_orders()
+
+        assert result == {"exchange_canceled": 2, "local_marked": 1}
+        assert store.get_open_orders() == []
+
+    async def test_exchange_failure_keeps_local_status(self, env) -> None:
+        trader, store, _redis, _settings, broker = env
+        broker.cancel_error = RuntimeError("api down")
+        _save_live_order(store)
+
+        with pytest.raises(ManualTradeError) as exc:
+            await trader.cancel_open_orders()
+
+        assert exc.value.status == 502
+        # 交易所没撤成功就不能谎报本地已撤，否则页面会留下真实挂单
+        assert len(store.get_open_orders()) == 1
+
+    async def test_missing_credentials_rejected(self, tmp_path) -> None:
+        settings = Settings(
+            okx=OKXSettings(api_key="", secret="", passphrase="")
+        )
+        store = SQLiteStore(tmp_path / "quant.db")
+        trader = ManualTrader(settings, store)
+        try:
+            with pytest.raises(ManualTradeError) as exc:
+                await trader.cancel_open_orders()
+            assert exc.value.status == 503
+        finally:
+            store.close()
 
 
 class TestReduce:
@@ -492,6 +559,137 @@ class TestRoutes:
             )
 
         assert response.status_code == 503
+        store.close()
+
+
+class TestKillSwitchCancel:
+    """M7-4：看板急停默认同时撤销交易所挂单。"""
+
+    LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
+
+    def _app(self, tmp_path, *, manual=True, canceled=2, cancel_error=None):
+        store = SQLiteStore(tmp_path / "quant.db")
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        settings = _settings()
+        service = DashboardService(store, redis, settings)
+        trader = None
+        broker = None
+        if manual:
+            trader = ManualTrader(settings, store, redis)
+            trader._client = FakeClient(
+                [_spot()], balances=[{"ccy": "BTC", "availBal": "1"}]
+            )
+            broker = FakeBroker(canceled=canceled, cancel_error=cancel_error)
+            trader._broker = broker
+        app = create_app(service, tmp_path / "missing", manual=trader)
+        return app, store, redis, broker
+
+    async def test_on_cancels_by_default(self, tmp_path) -> None:
+        app, store, redis, _broker = self._app(tmp_path)
+        _save_live_order(store)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.post(
+                "/api/kill-switch",
+                json={"action": "on", "reason": "panic"},
+                headers=self.LOCAL,
+            )
+
+        body = response.json()
+        assert response.status_code == 200
+        assert body["active"] is True
+        assert body["cancel"] == {
+            "ok": True,
+            "exchange_canceled": 2,
+            "local_marked": 1,
+        }
+        assert store.get_open_orders() == []
+        assert await redis.exists("quant:kill-switch") == 1
+        store.close()
+
+    async def test_can_skip_cancel(self, tmp_path) -> None:
+        app, store, _redis, _broker = self._app(tmp_path)
+        _save_live_order(store)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.post(
+                "/api/kill-switch",
+                json={"action": "on", "cancel_orders": False},
+                headers=self.LOCAL,
+            )
+
+        body = response.json()
+        assert body["active"] is True
+        assert "cancel" not in body
+        assert len(store.get_open_orders()) == 1
+        store.close()
+
+    async def test_cancel_failure_keeps_stop_flag(self, tmp_path) -> None:
+        app, store, redis, _broker = self._app(
+            tmp_path, cancel_error=RuntimeError("api down")
+        )
+        _save_live_order(store)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.post(
+                "/api/kill-switch",
+                json={"action": "on", "reason": "panic"},
+                headers=self.LOCAL,
+            )
+            overview = await client.get("/api/overview")
+
+        body = response.json()
+        # 撤单失败绝不能回滚停止标志，否则等于「以为停了其实没停」
+        assert body["active"] is True
+        assert body["cancel"]["ok"] is False
+        assert "api down" in body["cancel"]["error"]
+        assert overview.json()["kill_switch"]["active"] is True
+        assert len(store.get_open_orders()) == 1
+        assert await redis.exists("quant:kill-switch") == 1
+        store.close()
+
+    async def test_without_trader_still_stops(self, tmp_path) -> None:
+        app, store, _redis, _broker = self._app(tmp_path, manual=False)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.post(
+                "/api/kill-switch",
+                json={"action": "on"},
+                headers=self.LOCAL,
+            )
+
+        body = response.json()
+        assert body["active"] is True
+        assert body["cancel"]["ok"] is False
+        assert "手动交易未启用" in body["cancel"]["error"]
+        store.close()
+
+    async def test_off_does_not_cancel(self, tmp_path) -> None:
+        app, store, _redis, _broker = self._app(tmp_path)
+        _save_live_order(store)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.post(
+                "/api/kill-switch", json={"action": "off"}, headers=self.LOCAL
+            )
+
+        assert "cancel" not in response.json()
+        assert len(store.get_open_orders()) == 1
         store.close()
 
 
