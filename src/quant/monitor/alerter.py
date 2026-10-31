@@ -29,6 +29,9 @@ class Alert:
     message: str
     ts: int
     inst_id: str | None = None
+    # 冷却分组键；默认按 inst_id 去重。`data_quality` 需要按 (inst, bar)
+    # 分别冷却，否则同一品种的 1H 缺口会把 4H 的告警吞掉。
+    cooldown_key: str | None = None
 
 
 class EmailAlerter:

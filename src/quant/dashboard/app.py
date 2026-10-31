@@ -9,6 +9,7 @@
 - GET /api/pnl       成交盈亏汇总（FIFO 回合，含手续费）
 - GET /api/risk-limits 生效风控限额与当前已用额度（worker 发布 + 本地现算）
 - GET /api/reports   模拟盘偏离日报（读取 reports/daily/*.csv）
+- GET /api/quality   数据质量报告（可选 inst_id/bar_size，不传返回全部摘要）
 - GET /api/alerts    告警列表（SQLite 为准，支持级别/规则/状态/时间区间与分页）
 - POST /api/alerts/{id}/ack 确认告警（写操作）
 - POST /api/alerts/silence  创建静音（写操作）
@@ -214,6 +215,13 @@ def create_app(
     @app.get("/api/reports")
     async def reports(limit: int = 20) -> JSONResponse:
         return JSONResponse(await service.reports(min(max(limit, 1), MAX_LIMIT)))
+
+    @app.get("/api/quality")
+    async def quality(
+        inst_id: str | None = Query(None),
+        bar_size: str | None = Query(None),
+    ) -> JSONResponse:
+        return JSONResponse(await service.quality(inst_id, bar_size))
 
     @app.get("/api/pnl")
     async def pnl() -> JSONResponse:

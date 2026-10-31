@@ -22,6 +22,7 @@ from quant.foundation.config import Settings
 from quant.foundation.heartbeat import HEARTBEAT_PREFIX, default_ttl
 from quant.foundation.logger import get_logger, setup_logger
 from quant.okx.client import OKXClient
+from quant.storage.quality import QualityReporter
 
 
 def _beat(redis_client, interval: int, log) -> None:
@@ -54,11 +55,19 @@ def _connect_redis(settings: Settings, log):
         return None
 
 
-def _sync_once(fetcher: CandleFetcher, insts: list[str], bars: list[str],
-               lookback_bars: int, log) -> int:
+def _sync_once(
+    fetcher: CandleFetcher,
+    insts: list[str],
+    bars: list[str],
+    lookback_bars: int,
+    log,
+    reporter=None,
+    window_bars: int = 5000,
+) -> int:
     """同步一轮（insts × bars），返回净增根数合计。
 
     单个品种/周期失败只记日志，不影响其余组合继续同步。
+    同步成功后顺带刷新数据质量报告（失败不影响同步结果）。
     """
     total = 0
     for bar in bars:
@@ -67,6 +76,19 @@ def _sync_once(fetcher: CandleFetcher, insts: list[str], bars: list[str],
                 total += fetcher.sync(inst, bar, lookback_bars=lookback_bars)
             except Exception as e:  # noqa: BLE001
                 log.error(f"sync failed inst={inst} bar={bar}: {e}")
+                continue
+            if reporter is None:
+                continue
+            try:
+                report = reporter.check(inst, bar, window_bars=window_bars)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"quality report failed inst={inst} bar={bar}: {e}")
+                continue
+            if report is not None and report["summary"].get("gaps_open"):
+                log.warning(
+                    f"quality gaps inst={inst} bar={bar} "
+                    f"open={report['summary']['gaps_open']}"
+                )
     return total
 
 
@@ -108,8 +130,16 @@ def main(args) -> int:
     redis_client = None
     try:
         fetcher = CandleFetcher(client, settings.storage.data_dir)
+        reporter = (
+            QualityReporter(settings.storage.data_dir)
+            if settings.quality.enabled
+            else None
+        )
+        window_bars = settings.quality.window_bars
         if not args.loop:
-            total = _sync_once(fetcher, insts, bars, lookback, log)
+            total = _sync_once(
+                fetcher, insts, bars, lookback, log, reporter, window_bars
+            )
             log.info(f"sync done insts={insts} bars={bars} new={total}")
             return 0
 
@@ -123,7 +153,9 @@ def main(args) -> int:
         )
         while True:
             started = time.monotonic()
-            total = _sync_once(fetcher, insts, bars, lookback, log)
+            total = _sync_once(
+                fetcher, insts, bars, lookback, log, reporter, window_bars
+            )
             _beat(redis_client, interval, log)
             log.info(f"sync round done insts={insts} bars={bars} new={total}")
             # 扣除本轮耗时，避免慢网络下间隔不断被拉长

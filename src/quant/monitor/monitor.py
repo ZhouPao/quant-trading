@@ -35,6 +35,7 @@ from quant.okx.client import OKXClient
 from quant.report.daily import DailyReporter
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
+from quant.storage.quality import QualityReporter
 from quant.storage.retention import RetentionPurger
 
 log = get_logger("monitor")
@@ -51,6 +52,7 @@ _STATEFUL_RULES = frozenset(
         "api_error_rate",
         "kill_switch",
         "position_drift",
+        "data_quality",
     }
 )
 
@@ -107,6 +109,8 @@ class Monitor:
         daily: DailyReporter | None = None,
         retention: RetentionPurger | None = None,
         alert_service: AlertService | None = None,
+        quality: QualityReporter | None = None,
+        quality_cooldown_seconds: int = 3600,
     ) -> None:
         self._client = client
         self._redis = redis
@@ -118,6 +122,8 @@ class Monitor:
         self._daily = daily
         self._retention = retention
         self._alert_service = alert_service
+        self._quality = quality
+        self._quality_cooldown = quality_cooldown_seconds
         self._kill_switch = KillSwitch(redis)
         self._last_equity: Decimal | None = None
         self._last_dead_length: int | None = None
@@ -274,6 +280,12 @@ class Monitor:
         except Exception as e:  # noqa: BLE001
             log.warning(f"publish dashboard snapshot failed: {e}")
 
+    def _cooldown_window(self, rule: str) -> int:
+        """各规则的冷却窗口（秒）：数据缺口不像心跳那样分钟级自愈。"""
+        if rule == "data_quality":
+            return self._quality_cooldown
+        return self._settings.dashboard_alert_cooldown_seconds
+
     async def _in_cooldown(self, rule: str, inst_id: str | None, ts: int) -> bool:
         """同一规则（+品种）在冷却窗口内只产生一次告警。
 
@@ -283,7 +295,7 @@ class Monitor:
         """
         if rule in _NO_COOLDOWN_RULES:
             return False
-        window = self._settings.dashboard_alert_cooldown_seconds
+        window = self._cooldown_window(rule)
         if window <= 0:
             return False
         key = f"quant:dashboard:alert-cooldown:{rule}:{inst_id or '-'}"
@@ -308,7 +320,9 @@ class Monitor:
 
         for alert in alerts:
             if alert.level != "INFO" and alert.rule not in _NO_COOLDOWN_RULES:
-                if await self._in_cooldown(alert.rule, alert.inst_id, alert.ts):
+                if await self._in_cooldown(
+                    alert.rule, alert.cooldown_key or alert.inst_id, alert.ts
+                ):
                     continue
 
             if self._alert_service is None:
@@ -626,6 +640,7 @@ class Monitor:
         alerts.extend(self._check_consecutive_losses(ts))
         alerts.extend(self._check_api_error_rate(ts))
         alerts.extend(await self._check_kill_switch(ts))
+        alerts.extend(await self._check_quality(ts))
         return alerts
 
     def _with_recovery(self, alerts: list[Alert], ts: int) -> list[Alert]:
@@ -945,6 +960,51 @@ class Monitor:
                 )
             ]
         return []
+
+    async def _check_quality(self, ts: int) -> list[Alert]:
+        """数据质量报告里有未修复缺口时告警（MS4-C §9.3）。
+
+        读取 `data/quality/**/latest.json`，缺口语义由 candles 同步侧维护；
+        这里只负责「要不要发」——冷却按 (inst, bar) 各算，见 `_in_cooldown`。
+        """
+        if self._quality is None:
+            return []
+        try:
+            reports = await asyncio.to_thread(self._quality.summaries)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"read quality reports failed: {e}")
+            return []
+
+        alerts: list[Alert] = []
+        for report in reports:
+            summary = report.get("summary") or {}
+            open_n = int(summary.get("gaps_open") or 0)
+            if open_n <= 0:
+                continue
+            inst_id = str(report.get("inst_id") or "")
+            bar_size = str(report.get("bar_size") or "")
+            expected = summary.get("expected")
+            present = summary.get("present")
+            missing = (
+                int(expected) - int(present)
+                if expected is not None and present is not None
+                else None
+            )
+            detail = f"，缺失约 {missing} 根" if missing else ""
+            alerts.append(
+                Alert(
+                    rule="data_quality",
+                    level="WARNING",
+                    message=(
+                        f"{inst_id} {bar_size} 有 {open_n} 处未修复缺口{detail}，"
+                        "回测与日报结果可能失真"
+                    ),
+                    ts=ts,
+                    inst_id=inst_id,
+                    cooldown_key=f"{inst_id}:{bar_size}",
+                )
+            )
+        return alerts
 
     async def _maybe_send_alive(self, ts: int) -> None:
         """每 alive_email_hours 发一封存活邮件。

@@ -36,6 +36,7 @@ from quant.risk.config import RiskConfig
 from quant.risk.pnl import round_trip_pnls
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
+from quant.storage.quality import QualityReporter
 from quant.storage.validator import DataValidator
 
 log = get_logger("dashboard.service")
@@ -961,6 +962,40 @@ class DashboardService:
             "auth_required": bool(self._settings.dashboard.token),
             "degraded": [],
         }
+
+    async def quality(
+        self, inst_id: str | None = None, bar_size: str | None = None
+    ) -> dict[str, object]:
+        """数据质量报告（MS4-C §9.4）。
+
+        传 `inst_id`+`bar_size` 返回单份完整报告（含 gaps/invalid_ohlc）；
+        不传参返回全部 `latest.json` 的摘要列表。
+        """
+        now = int(time.time() * 1000)
+        if bool(inst_id) != bool(bar_size):
+            return {
+                "ts": now,
+                "error": "inst_id 与 bar_size 需要同时提供",
+                "degraded": ["quality"],
+            }
+        reporter = QualityReporter(self._settings.storage.data_dir)
+        try:
+            if inst_id and bar_size:
+                report = await asyncio.to_thread(
+                    reporter.load, inst_id, bar_size
+                )
+                return {
+                    "ts": now,
+                    "inst_id": inst_id,
+                    "bar_size": bar_size,
+                    "report": report,
+                    "degraded": [],
+                }
+            reports = await asyncio.to_thread(reporter.summaries)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"quality read failed: {e}")
+            return {"ts": now, "reports": [], "degraded": ["quality"]}
+        return {"ts": now, "reports": reports, "degraded": []}
 
     async def reports(self, limit: int = 20) -> dict[str, object]:
         """日报列表：读取 monitor 落盘的偏离报告 CSV。

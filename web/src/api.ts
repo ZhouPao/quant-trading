@@ -502,6 +502,53 @@ export type ReportsResponse = {
   degraded: string[];
 };
 
+export type QualitySummary = {
+  expected: number;
+  present: number;
+  gaps_open: number;
+  gaps_repaired: number;
+};
+
+export type QualityItem = {
+  inst_id: string;
+  bar_size: string;
+  generated_at: number | null;
+  checked_range: number[];
+  summary: Partial<QualitySummary>;
+};
+
+export type QualityListResponse = {
+  ts: number;
+  reports: QualityItem[];
+  degraded: string[];
+};
+
+export type QualityGap = {
+  from: number;
+  to: number;
+  bars: number;
+  status: "open" | "repaired";
+  repaired_at?: number;
+};
+
+export type QualityReport = {
+  inst_id: string;
+  bar_size: string;
+  generated_at: number;
+  checked_range: number[];
+  summary: QualitySummary;
+  gaps: QualityGap[];
+  invalid_ohlc: { ts: number; reason: string }[];
+};
+
+export type QualityDetailResponse = {
+  ts: number;
+  inst_id: string;
+  bar_size: string;
+  report: QualityReport | null;
+  degraded: string[];
+};
+
 export async function fetchAll(signal: AbortSignal) {
   const [overview, positions, orders, fills, pnl, alerts, engine] =
     await Promise.all([
@@ -529,6 +576,21 @@ export async function fetchEquity(signal: AbortSignal, hours: number) {
 /** 日报变化很慢（每天一份），单独低频拉取。 */
 export async function fetchReports(signal: AbortSignal, limit = 20) {
   return getJson<ReportsResponse>(`/api/reports?limit=${limit}`, signal);
+}
+
+/** 数据质量报告摘要列表；candles 每轮同步后刷新。 */
+export async function fetchQuality(signal: AbortSignal) {
+  return getJson<QualityListResponse>("/api/quality", signal);
+}
+
+/** 单个品种/周期的完整报告（点开摘要行时才拉）。 */
+export async function fetchQualityReport(
+  signal: AbortSignal,
+  instId: string,
+  barSize: string,
+) {
+  const query = new URLSearchParams({ inst_id: instId, bar_size: barSize });
+  return getJson<QualityDetailResponse>(`/api/quality?${query}`, signal);
 }
 
 export type KillSwitchCancel = {

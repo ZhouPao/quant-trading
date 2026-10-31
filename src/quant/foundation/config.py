@@ -151,6 +151,21 @@ class CandleSyncSettings(BaseModel):
         return list(self.bars) if self.bars else [self.bar]
 
 
+class QualitySettings(BaseModel):
+    """数据质量报告（MS4-C §9）。
+
+    candles 每轮同步后把校验结果并入 `data/quality/{inst}/{bar}/latest.json`，
+    monitor 读这些文件判断是否有未修复缺口。
+    """
+
+    enabled: bool = True
+    # 每轮回看多少根 K 线。窗口太小会看不到窗口外的旧缺口（旧缺口保持
+    # 原状态，不会被误标为已修复），太大则每轮都要重读一批 parquet。
+    window_bars: int = 5000
+    # 未修复缺口告警冷却：数据缺口不会分钟级自愈，1 小时内只提醒一次
+    alert_cooldown_seconds: int = 3600
+
+
 class EngineSettings(BaseModel):
     """本地策略实时信号引擎（不依赖 TradingView）。
 
@@ -306,6 +321,7 @@ class Settings(BaseModel):
     state: StateSettings = Field(default_factory=StateSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     candles: CandleSyncSettings = Field(default_factory=CandleSyncSettings)
+    quality: QualitySettings = Field(default_factory=QualitySettings)
     engine: EngineSettings = Field(default_factory=EngineSettings)
     smtp: SmtpSettings = Field(default_factory=SmtpSettings)
     monitor: MonitorSettings = Field(default_factory=MonitorSettings)

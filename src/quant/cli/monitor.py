@@ -21,6 +21,7 @@ from quant.monitor.monitor import Monitor
 from quant.okx.client import OKXClient
 from quant.report.daily import DailyReporter
 from quant.state.sqlite_store import SQLiteStore
+from quant.storage.quality import QualityReporter
 from quant.storage.retention import RetentionPurger
 
 
@@ -60,6 +61,12 @@ async def _run(args, settings: Settings) -> int:
         daily=daily,
         retention=RetentionPurger(settings, store, redis),
         alert_service=AlertService(store, redis, alerter, monitor_settings),
+        quality=(
+            QualityReporter(settings.storage.data_dir)
+            if settings.quality.enabled
+            else None
+        ),
+        quality_cooldown_seconds=settings.quality.alert_cooldown_seconds,
     )
 
     log.info(

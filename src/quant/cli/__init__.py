@@ -15,6 +15,7 @@ import sys
 
 from quant.cli.align_data import main as align_data_main
 from quant.cli.backtest import main as backtest_main
+from quant.cli.check_data import main as check_data_main
 from quant.cli.dashboard import main as dashboard_main
 from quant.cli.fetch_candles import main as fetch_candles_main
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
@@ -144,6 +145,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--end", default=None, help="结束日期 YYYY-MM-DD（可选，不传则全量）"
     )
     p_validate.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
+    # check-data
+    p_check = sub.add_parser(
+        "check-data",
+        help="校验本地 K线并生成数据质量报告（MS4-C §9）",
+    )
+    p_check.add_argument("--inst", required=True, help="instId, 如 BTC-USDT")
+    p_check.add_argument("--bar", required=True, help="K线周期, 如 1H/1D")
+    p_check.add_argument(
+        "--start", default=None, help="开始日期 YYYY-MM-DD（可选，不传则全量）"
+    )
+    p_check.add_argument(
+        "--end", default=None, help="结束日期 YYYY-MM-DD（可选，不传则全量）"
+    )
+    p_check.add_argument(
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
@@ -564,6 +582,8 @@ def main(argv: list[str] | None = None) -> int:
         return fetch_funding_rates_main(args)
     elif args.command == "validate-data":
         return validate_data_main(args)
+    elif args.command == "check-data":
+        return check_data_main(args)
     elif args.command == "align-data":
         return align_data_main(args)
     elif args.command == "serve-webhook":

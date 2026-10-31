@@ -415,6 +415,76 @@ code {
   letter-spacing: 0.04em;
 }
 
+/* ---------------- 数据质量 ---------------- */
+
+.quality {
+  grid-column: span 12;
+}
+
+.quality-detail {
+  padding: 4px 10px 10px;
+}
+
+.quality-range {
+  margin-bottom: 8px;
+  font-size: 10px;
+  color: var(--dimmer);
+  letter-spacing: 0.04em;
+}
+
+.quality-sub {
+  margin: 10px 0 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+  letter-spacing: 0.08em;
+}
+
+.quality-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: auto;
+}
+
+.quality-gap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 6px;
+  border-left: 2px solid var(--line);
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.quality-open {
+  border-left-color: var(--bad);
+  color: var(--bad);
+}
+
+.quality-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.quality-fixed {
+  margin-left: auto;
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.quality-error {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--bad);
+}
+
 /* ---------------- 风控限额 ---------------- */
 
 .risk-limits {

@@ -9,6 +9,8 @@ import {
   fetchEquity,
   fetchBindings,
   fetchParamChanges,
+  fetchQuality,
+  fetchQualityReport,
   fetchReports,
   fetchRiskLimits,
   fetchStrategies,
@@ -39,6 +41,9 @@ import {
   type ParamChange,
   type ParamSpec,
   type PnlResponse,
+  type QualityItem,
+  type QualityListResponse,
+  type QualityReport,
   type ReportItem,
   type ReportsResponse,
   type PositionRow,
@@ -198,6 +203,7 @@ export default function App() {
   const [equityHours, setEquityHours] = useState(24);
   const [equity, setEquity] = useState<EquityResponse | null>(null);
   const [reports, setReports] = useState<ReportsResponse | null>(null);
+  const [quality, setQuality] = useState<QualityListResponse | null>(null);
   const [risk, setRisk] = useState<RiskLimitsResponse | null>(null);
   const [riskError, setRiskError] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
@@ -263,6 +269,24 @@ export default function App() {
     };
   }, []);
 
+  // 数据质量报告跟着 candles 每轮刷新，页面每分钟拉一次摘要即可
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchQuality(controller.signal)
+        .then(setQuality)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, []);
+
   // 风控限额单独轮询：接口不存在（后端未重启）时只让这张卡降级，
   // 不能因为一个 404 让 fetchAll 的 Promise.all 整体失败、整页失联
   useEffect(() => {
@@ -303,9 +327,10 @@ export default function App() {
         ...(data?.pnl.degraded ?? []),
         ...(risk?.degraded ?? []),
         ...(reports?.degraded ?? []),
+        ...(quality?.degraded ?? []),
         ...(equity?.degraded ?? []),
       ]),
-    [overview, data, risk, equity, reports],
+    [overview, data, risk, equity, reports, quality],
   );
   const alertStats = useMemo(() => {
     let error = 0;
@@ -577,6 +602,18 @@ export default function App() {
             </span>
           </div>
           <ReportsPanel reports={reports} />
+        </section>
+
+        <section className="card quality reveal" style={{ animationDelay: "300ms" }}>
+          <div className="card-head">
+            <h2>数据质量</h2>
+            <span className="card-note">
+              {quality
+                ? `${quality.reports.length} 个品种 · 缺口不会自动消失`
+                : "等待数据"}
+            </span>
+          </div>
+          <QualityPanel quality={quality} />
         </section>
 
         <section className="card orders reveal" style={{ animationDelay: "280ms" }}>
@@ -2600,6 +2637,169 @@ function ReportTable({
     <div className="rpt-table">
       <Table head={head} rows={rows} empty={false} emptyHint="" />
     </div>
+  );
+}
+
+function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Record<string, QualityReport | null>>({});
+  const [error, setError] = useState<string | null>(null);
+  const controller = useRef<AbortController | null>(null);
+
+  useEffect(() => () => controller.current?.abort(), []);
+
+  if (!quality) {
+    return <div className="empty">读取质量报告中…</div>;
+  }
+  const items = quality.reports;
+  if (items.length === 0) {
+    return (
+      <div className="empty">
+        暂无质量报告。candles 每轮同步后自动生成，也可手动跑 quant check-data
+      </div>
+    );
+  }
+
+  const toggle = (item: QualityItem) => {
+    const key = `${item.inst_id}:${item.bar_size}`;
+    if (open === key) {
+      setOpen(null);
+      return;
+    }
+    setOpen(key);
+    if (key in detail) return;
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
+    fetchQualityReport(next.signal, item.inst_id, item.bar_size)
+      .then((res) => {
+        setDetail((prev) => ({ ...prev, [key]: res.report }));
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      });
+  };
+
+  return (
+    <>
+      <ul className="rpt-list">
+        {items.map((item) => {
+          const key = `${item.inst_id}:${item.bar_size}`;
+          const expanded = open === key;
+          const gapsOpen = item.summary.gaps_open ?? 0;
+          const gapsFixed = item.summary.gaps_repaired ?? 0;
+          const expected = item.summary.expected;
+          const present = item.summary.present;
+          return (
+            <li key={key} className={expanded ? "rpt-item rpt-on" : "rpt-item"}>
+              <button
+                type="button"
+                className="rpt-head"
+                onClick={() => toggle(item)}
+              >
+                <span
+                  className={
+                    gapsOpen > 0 ? "rpt-badge rpt-fail" : "rpt-badge rpt-pass"
+                  }
+                >
+                  {gapsOpen > 0 ? "GAP" : "OK"}
+                </span>
+                <span className="rpt-date mono">
+                  {item.inst_id} · {item.bar_size}
+                </span>
+                <span className="rpt-config mono">
+                  {gapsOpen > 0 ? `${gapsOpen} 处未修复` : "无未修复缺口"}
+                  {gapsFixed > 0 ? ` · ${gapsFixed} 处已补齐` : ""}
+                </span>
+                <span className="rpt-dev mono">
+                  {expected !== undefined && present !== undefined
+                    ? `${present}/${expected} 根`
+                    : "—"}
+                </span>
+                <span className="rpt-time mono">{stamp(item.generated_at)}</span>
+                <span className="rpt-caret">{expanded ? "−" : "+"}</span>
+              </button>
+              {expanded && (
+                <div className="quality-detail">
+                  {key in detail ? (
+                    detail[key] === null ? (
+                      <div className="empty">报告不存在或已被清理</div>
+                    ) : (
+                      <QualityDetail report={detail[key] as QualityReport} />
+                    )
+                  ) : (
+                    <div className="empty">读取明细中…</div>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {error && <div className="quality-error">明细读取失败：{error}</div>}
+      <div className="rpt-foot">
+        <span>{items.length} 个品种 · 缺口不会自动消失</span>
+        <span>OPEN 红色 = 至今未补齐</span>
+        <span>数据来自 data/quality 下的 latest.json</span>
+      </div>
+    </>
+  );
+}
+
+function QualityDetail({ report }: { report: QualityReport }) {
+  const gaps = report.gaps ?? [];
+  const invalid = report.invalid_ohlc ?? [];
+  const missing = Math.max(0, report.summary.expected - report.summary.present);
+  return (
+    <>
+      <div className="quality-range mono">
+        校验区间 {stamp(report.checked_range?.[0])} →{" "}
+        {stamp(report.checked_range?.[1])} · 缺失 {missing} 根
+      </div>
+      {gaps.length === 0 ? (
+        <div className="empty">窗口内没有缺口</div>
+      ) : (
+        <ul className="quality-list">
+          {gaps.map((gap) => (
+            <li
+              key={gap.from}
+              className={
+                gap.status === "open"
+                  ? "quality-gap quality-open"
+                  : "quality-gap"
+              }
+            >
+              <span className="quality-tag">
+                {gap.status === "open" ? "OPEN" : "FIXED"}
+              </span>
+              <span className="mono">
+                {stamp(gap.from)} → {stamp(gap.to)}
+              </span>
+              <span className="mono">{gap.bars} 根</span>
+              {gap.repaired_at ? (
+                <span className="quality-fixed mono">
+                  {stamp(gap.repaired_at)} 补齐
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {invalid.length > 0 && (
+        <>
+          <div className="quality-sub">异常 OHLC</div>
+          <ul className="quality-list">
+            {invalid.map((item) => (
+              <li key={item.ts} className="quality-gap quality-open">
+                <span className="mono">{stamp(item.ts)}</span>
+                <span>{item.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
   );
 }
 

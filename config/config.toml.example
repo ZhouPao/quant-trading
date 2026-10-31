@@ -76,6 +76,11 @@ bar = "1H"
 interval_seconds = 300                    # 轮询间隔；0=只跑一次
 lookback_bars = 3                         # 每次回看几根，顺带补断点附近的洞
 
+[quality]
+enabled = true                            # candles 每轮校验后写 data/quality/**/latest.json
+window_bars = 5000                        # 每轮校验回看多少根已收盘 K 线
+alert_cooldown_seconds = 3600             # 未修复缺口告警冷却，按 (inst, bar) 分别计时
+
 [engine]
 enabled = true                            # 本地策略实时信号引擎（不依赖 TradingView）
 strategy = "sma_cross"                    # 与 config/strategies/{id}.toml 对应
