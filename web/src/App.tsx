@@ -7,6 +7,7 @@ import {
   fetchAll,
   fetchCandles,
   fetchEquity,
+  fetchParamChanges,
   fetchReports,
   fetchRiskLimits,
   fetchStrategies,
@@ -20,6 +21,7 @@ import {
   runOptimize,
   setKillSwitch,
   stamp,
+  updateStrategyParams,
   type AlertRow,
   type BacktestResponse,
   type CandlesResponse,
@@ -32,6 +34,8 @@ import {
   type OptimizeResponse,
   type OrderRow,
   type Overview,
+  type ParamChange,
+  type ParamSpec,
   type PnlResponse,
   type ReportItem,
   type ReportsResponse,
@@ -1054,23 +1058,89 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
 }
 
 function EnginePanel({ engine }: { engine?: EngineResponse }) {
-  const [params, setParams] = useState<Record<string, unknown> | null>(null);
+  const [info, setInfo] = useState<StrategyInfo | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [reason, setReason] = useState("");
+  const [token, setToken] = useState(
+    () => window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? ""
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [changes, setChanges] = useState<ParamChange[]>([]);
   const strategyId = engine?.strategy;
 
-  useEffect(() => {
-    if (!strategyId) return;
-    const controller = new AbortController();
-    fetchStrategies(controller.signal)
-      .then((res) => {
-        const hit = res.strategies.find((item) => item.id === strategyId);
-        setParams(hit?.params ?? null);
-      })
-      .catch(() => setParams(null));
-    return () => controller.abort();
-  }, [strategyId]);
+  const loadInfo = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!strategyId) return;
+      const res = await fetchStrategies(signal ?? new AbortController().signal);
+      const hit = res.strategies.find((item) => item.id === strategyId);
+      setInfo(hit ?? null);
+    },
+    [strategyId]
+  );
 
-  const paramsText = params
-    ? Object.entries(params)
+  useEffect(() => {
+    const controller = new AbortController();
+    loadInfo(controller.signal).catch(() => setInfo(null));
+    return () => controller.abort();
+  }, [loadInfo]);
+
+  // 展开编辑时拉最近变更；保存后 notice 变化会触发重新拉取
+  useEffect(() => {
+    if (!editing || !strategyId) return;
+    const controller = new AbortController();
+    fetchParamChanges(controller.signal, strategyId)
+      .then((res) => setChanges(res.changes))
+      .catch(() => setChanges([]));
+    return () => controller.abort();
+  }, [editing, strategyId, notice]);
+
+  const specs: ParamSpec[] = info?.param_spec ?? [];
+  const sources = info?.sources ?? {};
+
+  const startEdit = () => {
+    const next: Record<string, string> = {};
+    for (const spec of specs) {
+      next[spec.name] = String(info?.params[spec.name] ?? spec.default);
+    }
+    setDraft(next);
+    setReason("");
+    setError("");
+    setNotice("");
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (!strategyId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const values: Record<string, unknown> = {};
+      for (const spec of specs) {
+        const raw = draft[spec.name] ?? "";
+        // 非 bool 一律传字符串，后端按 PARAM_SPEC 做类型转换与范围校验
+        values[spec.name] = spec.type === "bool" ? raw === "true" : raw.trim();
+      }
+      const res = await updateStrategyParams(strategyId, values, reason.trim(), token);
+      if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+      setInfo(res);
+      setNotice(
+        res.changed.length > 0
+          ? `已更新：${res.changed.join(", ")}（下一轮 tick 生效）`
+          : "没有变化，未写入"
+      );
+      setReason("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const paramsText = info
+    ? Object.entries(info.params)
         .map(([key, value]) => `${key}=${String(value)}`)
         .join(" · ")
     : "—";
@@ -1137,7 +1207,133 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
           <dt>策略参数</dt>
           <dd className="engine-params">{paramsText}</dd>
         </div>
+        <div>
+          <dt>参数来源</dt>
+          <dd className="engine-params">
+            {Object.keys(sources).length === 0
+              ? "—"
+              : Object.entries(sources)
+                  .map(([key, source]) =>
+                    source === "db" ? `${key}(覆盖)` : key
+                  )
+                  .join(" · ")}
+          </dd>
+        </div>
       </dl>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            {specs.length > 0
+              ? `${specs.length} 个可在线调整的参数，其余只读`
+              : "该策略未声明 PARAM_SPEC，参数只读"}
+          </span>
+          <button
+            type="button"
+            className="kill-btn"
+            disabled={specs.length === 0}
+            onClick={() => (editing ? setEditing(false) : startEdit())}
+          >
+            {editing ? "收起" : "调整参数"}
+          </button>
+        </div>
+        {editing && (
+          <div className="param-editor">
+            {specs.map((spec) => (
+              <label className="param-row" key={spec.name}>
+                <span className="param-name">
+                  {spec.name}
+                  {spec.unit ? ` (${spec.unit})` : ""}
+                </span>
+                {spec.type === "bool" ? (
+                  <input
+                    type="checkbox"
+                    checked={(draft[spec.name] ?? "false") === "true"}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        [spec.name]: e.target.checked ? "true" : "false",
+                      })
+                    }
+                  />
+                ) : spec.choices ? (
+                  <select
+                    className="kill-input"
+                    value={draft[spec.name] ?? ""}
+                    onChange={(e) =>
+                      setDraft({ ...draft, [spec.name]: e.target.value })
+                    }
+                  >
+                    {spec.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="kill-input"
+                    inputMode={
+                      spec.type === "str" ? "text" : "decimal"
+                    }
+                    value={draft[spec.name] ?? ""}
+                    onChange={(e) =>
+                      setDraft({ ...draft, [spec.name]: e.target.value })
+                    }
+                  />
+                )}
+                <span className="param-hint">
+                  {spec.description}
+                  {spec.min !== null || spec.max !== null
+                    ? `（${spec.min ?? "-∞"} ~ ${spec.max ?? "+∞"}）`
+                    : ""}
+                </span>
+              </label>
+            ))}
+            <input
+              className="kill-input"
+              placeholder="变更原因（写入审计）"
+              maxLength={60}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+            <input
+              className="kill-input"
+              type="password"
+              placeholder="DASHBOARD_TOKEN（如已配置）"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <button
+              type="button"
+              className="kill-btn kill-btn-danger"
+              disabled={busy}
+              onClick={() => void save()}
+            >
+              {busy ? "保存中…" : "保存覆盖"}
+            </button>
+            {error && <div className="kill-msg kill-msg-bad">保存失败：{error}</div>}
+            {!error && notice && <div className="kill-msg">{notice}</div>}
+            <p className="kill-note">
+              保存后写入 strategy_params 并记变更历史，下一轮引擎 tick 生效，
+              无需重启。
+            </p>
+            {changes.length > 0 && (
+              <ul className="param-history">
+                {changes.map((row) => (
+                  <li key={row.id}>
+                    <span>{clock(row.changed_at)}</span>
+                    <span>
+                      {row.param}：{row.old_value ?? "—"} → {row.new_value}
+                    </span>
+                    <span>{row.changed_by}</span>
+                    {row.reason && <span className="param-reason">{row.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
       <div className="orders-line">
         <span className="orders-pill">
           <em>本轮补评估</em>

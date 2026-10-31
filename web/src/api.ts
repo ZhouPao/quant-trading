@@ -113,9 +113,14 @@ export type FlattenResult = {
   failed: number;
 };
 
-async function postWrite<T>(path: string, body: unknown, token = ""): Promise<T> {
+async function postWrite<T>(
+  path: string,
+  body: unknown,
+  token = "",
+  method: "POST" | "PUT" = "POST"
+): Promise<T> {
   const response = await fetch(path, {
-    method: "POST",
+    method,
     headers: {
       "Content-Type": "application/json",
       "X-Dashboard-Request": "1",
@@ -300,13 +305,49 @@ export type CandlesResponse = {
   degraded: string[];
 };
 
+export type ParamSpec = {
+  name: string;
+  type: "int" | "float" | "decimal" | "bool" | "str" | "choice";
+  default: string | number;
+  min: string | null;
+  max: string | null;
+  choices: string[] | null;
+  description: string;
+  unit: string | null;
+};
+
 export type StrategyInfo = {
   id: string;
   params: Record<string, unknown>;
+  // 参数覆盖面板依赖这三项；旧缓存数据可能缺失，故为可选
+  param_spec?: ParamSpec[];
+  sources?: Record<string, string>;
+  editable?: string[];
 };
 
 export type StrategiesResponse = {
   strategies: StrategyInfo[];
+};
+
+export type StrategyParamDetail = StrategyInfo & {
+  changed: string[];
+};
+
+export type ParamChange = {
+  id: number;
+  strategy_id: string;
+  param: string;
+  old_value: string | null;
+  new_value: string;
+  reason: string | null;
+  changed_by: string;
+  changed_at: number;
+  git_commit: string | null;
+};
+
+export type ParamChangesResponse = {
+  changes: ParamChange[];
+  total: number;
 };
 
 export type MetricMap = Record<string, number | null>;
@@ -535,8 +576,33 @@ export async function fetchStrategies(signal: AbortSignal) {
   return getJson<StrategiesResponse>("/api/strategies", signal);
 }
 
+export async function updateStrategyParams(
+  strategyId: string,
+  values: Record<string, unknown>,
+  reason: string,
+  token = ""
+) {
+  return postWrite<StrategyParamDetail>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/params`,
+    { values, reason, by: "owner" },
+    token,
+    "PUT"
+  );
+}
+
+export async function fetchParamChanges(
+  signal: AbortSignal,
+  strategyId: string
+) {
+  return getJson<ParamChangesResponse>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/param-changes?limit=5`,
+    signal
+  );
+}
+
 export async function runBacktest(signal: AbortSignal, body: BacktestBody) {
-  return postJson<BacktestResponse>("/api/backtest", body, signal);
+  // 后端默认已改异步，页面切换前先走兼容路径，避免拿到 {run_id} 解析失败
+  return postJson<BacktestResponse>("/api/backtest?sync=1", body, signal);
 }
 
 export async function runOptimize(signal: AbortSignal, body: OptimizeBody) {

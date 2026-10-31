@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import subprocess
 import time
 from collections.abc import Callable
 from decimal import Decimal
@@ -36,7 +37,14 @@ from quant.foundation.logger import get_logger
 from quant.models.bar import Bar
 from quant.state.sqlite_store import SQLiteStore
 from quant.strategies.loader import StrategyConfigError
-from quant.strategies.params import ParamError, param_spec_payload, resolve_strategy
+from quant.strategies.params import (
+    ParamError,
+    coerce_value,
+    format_value,
+    param_spec_payload,
+    resolve_params,
+    resolve_strategy,
+)
 
 log = get_logger("dashboard.backtest")
 
@@ -61,6 +69,18 @@ METRIC_KEYS = (
 
 class BacktestRequestError(Exception):
     """入参或数据不满足回测条件，消息可直接展示给页面。"""
+
+
+class StrategyParamError(Exception):
+    """参数覆盖写入失败（未知字段、类型/越界、无 store），消息可直接展示。"""
+
+
+class ParamUpdateRequest(BaseModel):
+    """参数覆盖入参：只提交要改的键，未提交的保持原样。"""
+
+    values: dict[str, object] = Field(default_factory=dict)
+    reason: str = ""
+    by: str = "owner"
 
 
 class BacktestRequest(BaseModel):
@@ -99,6 +119,27 @@ class BacktestService:
     async def strategies(self) -> list[dict[str, object]]:
         """扫描策略配置目录，返回 [{id, params}]。非法配置跳过并记日志。"""
         return await asyncio.to_thread(self._scan_strategies)
+
+    async def params(self, strategy_id: str) -> dict[str, object]:
+        """单个策略的生效参数、来源与可编辑字段（MS4-C §11.1）。"""
+        return await asyncio.to_thread(self._strategy_detail, strategy_id)
+
+    async def set_params(
+        self,
+        strategy_id: str,
+        req: ParamUpdateRequest,
+    ) -> dict[str, object]:
+        """保存参数覆盖并写审计（MS4-C §3.3）。"""
+        return await asyncio.to_thread(
+            self._set_params, strategy_id, req
+        )
+
+    async def param_changes(
+        self, strategy_id: str, limit: int = 50, offset: int = 0
+    ) -> dict[str, object]:
+        return await asyncio.to_thread(
+            self._param_changes, strategy_id, limit, offset
+        )
 
     async def run(self, req: BacktestRequest) -> dict[str, object]:
         async with self._lock:
@@ -152,6 +193,77 @@ class BacktestService:
                 }
             )
         return out
+
+    def _strategy_detail(self, strategy_id: str) -> dict[str, object]:
+        """从策略清单里挑出单个；不存在时报错而不是返回空对象。"""
+        for item in self._scan_strategies():
+            if item["id"] == strategy_id:
+                return item
+        raise StrategyParamError(f"strategy {strategy_id} not found")
+
+    def _set_params(
+        self, strategy_id: str, req: ParamUpdateRequest
+    ) -> dict[str, object]:
+        if self._store is None:
+            raise StrategyParamError("store not configured, cannot persist params")
+        if not req.values:
+            raise StrategyParamError("values is empty")
+
+        try:
+            strategy_cls, _params, _sources = resolve_strategy(
+                strategy_id, self._config_dir
+            )
+        except (StrategyConfigError, ParamError) as e:
+            raise StrategyParamError(str(e)) from e
+
+        spec_map = strategy_cls.PARAM_SPEC
+        unknown = sorted(name for name in req.values if name not in spec_map)
+        if unknown:
+            raise StrategyParamError(
+                f"参数不可在线修改（未在 PARAM_SPEC 声明）：{', '.join(unknown)}"
+            )
+
+        parsed: dict[str, object] = {}
+        for name, raw in req.values.items():
+            try:
+                parsed[name] = coerce_value(spec_map[name], raw)
+            except ParamError as e:
+                raise StrategyParamError(f"{name}: {e}") from e
+
+        current, _ = resolve_params(
+            strategy_id,
+            self._config_dir,
+            self._store,
+            resolve_from_db=self._settings.params.resolve_from_db,
+        )
+        commit = _git_commit()
+        now = _now_ms()
+        changed: list[str] = []
+        for name, value in parsed.items():
+            if name in current and current[name] == value:
+                continue  # 与当前生效值一致：不写库，也不产生审计噪音
+            if self._store.set_strategy_param(
+                strategy_id,
+                name,
+                format_value(spec_map[name], value),
+                now,
+                reason=req.reason,
+                changed_by=req.by.strip() or "owner",
+                git_commit=commit,
+            ):
+                changed.append(name)
+
+        detail = self._strategy_detail(strategy_id)
+        detail["changed"] = changed
+        return detail
+
+    def _param_changes(
+        self, strategy_id: str, limit: int, offset: int
+    ) -> dict[str, object]:
+        if self._store is None:
+            raise StrategyParamError("store not configured")
+        rows, total = self._store.list_param_changes(strategy_id, limit, offset)
+        return {"changes": rows, "total": total}
 
     def check(self, req: BacktestRequest) -> dict:
         """提交任务前的廉价校验（配置存在、日期合法），返回合并后的参数。"""
@@ -315,6 +427,27 @@ def _jsonable_params(params: dict) -> dict:
         key: (str(value) if isinstance(value, Decimal) else value)
         for key, value in params.items()
     }
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _git_commit() -> str | None:
+    """当前代码版本，供参数审计追溯（MS4-C §3.3）；取不到就留空。"""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            cwd=Path(__file__).resolve().parents[3],
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = out.stdout.strip()
+    return commit or None
 
 
 def _clean_metrics(metrics: dict[str, float]) -> dict[str, float | None]:

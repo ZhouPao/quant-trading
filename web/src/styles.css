@@ -1070,6 +1070,72 @@ tbody tr.row-active td:first-child {
   word-break: break-word;
 }
 
+.param-panel {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.param-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.param-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.param-row {
+  display: grid;
+  grid-template-columns: 140px minmax(120px, 200px) 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.param-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+}
+
+.param-hint {
+  font-size: 11px;
+  color: var(--dimmer);
+}
+
+.param-history {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.param-history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.param-reason {
+  color: var(--dimmer);
+}
+
+@media (max-width: 720px) {
+  .param-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .bt-form {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));

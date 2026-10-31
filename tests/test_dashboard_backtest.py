@@ -22,6 +22,8 @@ from quant.dashboard.backtest import (
     BacktestRequestError,
     BacktestService,
     OptimizeRequest,
+    ParamUpdateRequest,
+    StrategyParamError,
 )
 from quant.dashboard.service import DashboardService
 from quant.foundation.config import OKXSettings, Settings
@@ -32,6 +34,7 @@ from quant.storage.bar_storage import BarStorage
 HOUR = 3_600_000
 START = int(datetime(2026, 9, 1, tzinfo=UTC).timestamp() * 1000)
 INST = "BTC-USDT"
+LOCAL_WRITE = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
 STRATEGY_TOML = (
     "[strategy]\n"
     'strategy_id = "sma_cross"\n'
@@ -84,6 +87,16 @@ def service(tmp_path):
     _write_strategy(tmp_path)
     _write_bars(settings)
     return BacktestService(settings)
+
+
+@pytest.fixture
+def param_service(tmp_path):
+    """带 store 的服务：参数覆盖必须落库才算数。"""
+    settings = _settings(tmp_path)
+    _write_strategy(tmp_path)
+    store = SQLiteStore(settings.state.db_path)
+    yield BacktestService(settings, store), store
+    store.close()
 
 
 async def _wait_done(client, run_id: str, timeout: float = 5.0) -> dict:
@@ -250,6 +263,101 @@ class TestOptimize:
             )
 
 
+class TestStrategyParamWrites:
+    async def test_get_reports_toml_sources(self, param_service) -> None:
+        service, _store = param_service
+
+        detail = await service.params("sma_cross")
+
+        assert detail["params"]["fast_len"] == 5
+        assert detail["sources"]["fast_len"] == "toml"
+        assert "fast_len" in detail["editable"]
+
+    async def test_unknown_strategy(self, param_service) -> None:
+        service, _store = param_service
+
+        with pytest.raises(StrategyParamError, match="not found"):
+            await service.params("nope")
+
+    async def test_write_persists_and_audits(self, param_service) -> None:
+        service, store = param_service
+
+        detail = await service.set_params(
+            "sma_cross",
+            ParamUpdateRequest(
+                values={"slow_len": 30, "ema_filter": True},
+                reason="过滤震荡",
+                by="alice",
+            ),
+        )
+
+        assert detail["changed"] == ["slow_len", "ema_filter"]
+        assert detail["sources"]["slow_len"] == "db"
+        assert detail["params"]["ema_filter"] is True
+
+        changes, total = store.list_param_changes("sma_cross")
+        assert total == 2
+        by_param = {row["param"]: row for row in changes}
+        assert by_param["slow_len"]["new_value"] == "30"
+        assert by_param["ema_filter"]["new_value"] == "true"
+        assert by_param["slow_len"]["reason"] == "过滤震荡"
+        assert by_param["slow_len"]["changed_by"] == "alice"
+
+    async def test_same_value_writes_nothing(self, param_service) -> None:
+        service, store = param_service
+
+        detail = await service.set_params(
+            "sma_cross", ParamUpdateRequest(values={"fast_len": 5})
+        )
+
+        assert detail["changed"] == []
+        assert store.list_param_changes("sma_cross")[1] == 0
+        assert store.get_strategy_params("sma_cross") == []
+
+    async def test_rejects_uneditable_param(self, param_service) -> None:
+        service, _store = param_service
+
+        with pytest.raises(StrategyParamError, match="PARAM_SPEC"):
+            await service.set_params(
+                "sma_cross", ParamUpdateRequest(values={"commission_rate": 0})
+            )
+
+    async def test_rejects_out_of_range(self, param_service) -> None:
+        service, _store = param_service
+
+        with pytest.raises(StrategyParamError, match="slow_len"):
+            await service.set_params(
+                "sma_cross", ParamUpdateRequest(values={"slow_len": 9999})
+            )
+
+    async def test_empty_values(self, param_service) -> None:
+        service, _store = param_service
+
+        with pytest.raises(StrategyParamError, match="empty"):
+            await service.set_params("sma_cross", ParamUpdateRequest())
+
+    async def test_requires_store(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        _write_strategy(tmp_path)
+
+        with pytest.raises(StrategyParamError, match="store"):
+            await BacktestService(settings).set_params(
+                "sma_cross", ParamUpdateRequest(values={"fast_len": 8})
+            )
+
+    async def test_history_pagination(self, param_service) -> None:
+        service, _store = param_service
+        for value in (8, 9, 10):
+            await service.set_params(
+                "sma_cross", ParamUpdateRequest(values={"fast_len": value})
+            )
+
+        page = await service.param_changes("sma_cross", limit=2, offset=1)
+
+        assert page["total"] == 3
+        assert [row["new_value"] for row in page["changes"]] == ["9", "8"]
+
+
 @pytest.fixture
 def app(tmp_path):
     settings = _settings(tmp_path)
@@ -348,6 +456,82 @@ class TestApp:
 
         assert response.status_code == 400
         assert "not found" in response.json()["detail"]
+
+    # ------------------------------------------------------------------
+    # 参数覆盖（MS4-C §11.1）
+    # ------------------------------------------------------------------
+
+    async def test_params_endpoint(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/strategies/sma_cross/params")
+            missing = await client.get("/api/strategies/nope/params")
+
+        assert response.status_code == 200
+        assert response.json()["sources"]["fast_len"] == "toml"
+        assert missing.status_code == 404
+
+    async def test_put_params_requires_guard(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.put(
+                "/api/strategies/sma_cross/params",
+                json={"values": {"fast_len": 8}},
+            )
+
+        # base_url 是 test 主机，先被 Host 白名单拦下
+        assert response.status_code == 403
+
+    async def test_put_params_persists_and_records_history(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.put(
+                "/api/strategies/sma_cross/params",
+                headers=LOCAL_WRITE,
+                json={
+                    "values": {"fast_len": 8},
+                    "reason": "调快均线",
+                    "by": "alice",
+                },
+            )
+            body = response.json()
+            history = await client.get(
+                "/api/strategies/sma_cross/param-changes"
+            )
+            detail = await client.get("/api/strategies/sma_cross/params")
+
+        assert response.status_code == 200
+        assert body["changed"] == ["fast_len"]
+        assert body["params"]["fast_len"] == 8
+        assert body["sources"]["fast_len"] == "db"
+        assert detail.json()["params"]["fast_len"] == 8
+
+        changes = history.json()
+        assert changes["total"] == 1
+        row = changes["changes"][0]
+        assert row["param"] == "fast_len"
+        assert row["old_value"] is None
+        assert row["new_value"] == "8"
+        assert row["reason"] == "调快均线"
+        assert row["changed_by"] == "alice"
+
+    async def test_put_params_rejects_uneditable(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.put(
+                "/api/strategies/sma_cross/params",
+                headers=LOCAL_WRITE,
+                json={"values": {"commission_rate": 0}},
+            )
+
+        assert response.status_code == 400
+        assert "PARAM_SPEC" in response.json()["detail"]
 
     async def test_optimize_endpoint(self, app) -> None:
         async with httpx.AsyncClient(

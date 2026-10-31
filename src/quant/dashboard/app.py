@@ -18,6 +18,9 @@
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
 - GET /api/candles   K 线面板（本地 parquet + 成交 + 持仓均价）
 - GET /api/strategies 可用策略清单（含 param_spec / 生效来源 / 可编辑字段）
+- GET /api/strategies/{id}/params 单个策略的生效参数与来源
+- PUT /api/strategies/{id}/params 保存参数覆盖并写审计（写操作）
+- GET /api/strategies/{id}/param-changes 参数变更历史（分页）
 - POST /api/backtest  提交回测任务，立即返回 run_id（?sync=1 走旧同步路径）
 - GET /api/backtest/runs 回测历史（筛选 + 分页）
 - GET /api/backtest/compare 多组对比（同品种同周期）
@@ -52,6 +55,8 @@ from quant.dashboard.backtest import (
     BacktestRequestError,
     BacktestService,
     OptimizeRequest,
+    ParamUpdateRequest,
+    StrategyParamError,
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService
@@ -278,6 +283,36 @@ def create_app(
     async def strategies() -> JSONResponse:
         return JSONResponse({"strategies": await backtests.strategies()})
 
+    @app.get("/api/strategies/{strategy_id}/params")
+    async def strategy_params(strategy_id: str) -> JSONResponse:
+        try:
+            return JSONResponse(await backtests.params(strategy_id))
+        except StrategyParamError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @app.put("/api/strategies/{strategy_id}/params")
+    async def update_strategy_params(
+        request: Request, strategy_id: str, req: ParamUpdateRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse(await backtests.set_params(strategy_id, req))
+        except StrategyParamError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.get("/api/strategies/{strategy_id}/param-changes")
+    async def strategy_param_changes(
+        strategy_id: str,
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+    ) -> JSONResponse:
+        try:
+            return JSONResponse(
+                await backtests.param_changes(strategy_id, limit, offset)
+            )
+        except StrategyParamError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
     @app.post("/api/backtest")
     async def backtest(
         req: BacktestRequest, sync: bool = Query(False)
@@ -471,6 +506,8 @@ def create_app(
                     "/api/equity",
                     "/api/candles",
                     "/api/strategies",
+                    "/api/strategies/{id}/params",
+                    "/api/strategies/{id}/param-changes",
                     "/api/backtest",
                     "/api/backtest/runs",
                     "/api/optimize",
