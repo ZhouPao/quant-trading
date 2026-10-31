@@ -269,6 +269,20 @@ export type PnlResponse = {
   degraded: string[];
 };
 
+/** 规则最近一次命中详情（M7-9，来自 risk_events） */
+export type RiskRuleEvent = {
+  ts: number;
+  decision: "adjusted" | "rejected" | "halted" | "sized" | string | null;
+  strategy_id: string | null;
+  inst_id: string | null;
+  signal_id: string | null;
+  limit_value: string | null;
+  actual_value: string | null;
+  qty_before: string | null;
+  qty_after: string | null;
+  reason: string | null;
+};
+
 export type RiskLimitRule = {
   key: string;
   label: string;
@@ -279,6 +293,10 @@ export type RiskLimitRule = {
   detail: string;
   /** 该限值来自哪一层：default/global/strategy/override */
   source: string | null;
+  /** 今日（UTC+8 切日）该规则实际触发次数 */
+  triggers: number;
+  /** 最近一次命中详情；今日未触发时为 null */
+  last_event: RiskRuleEvent | null;
 };
 
 export type RiskCircuit = {

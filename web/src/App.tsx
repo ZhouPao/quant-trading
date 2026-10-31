@@ -1316,6 +1316,35 @@ function RiskLimitRow({ rule }: { rule: RiskLimitRule }) {
           </div>
         </>
       )}
+      <RiskTriggers rule={rule} />
+    </div>
+  );
+}
+
+/** 今日触发次数与最近一次详情（M7-9）。未触发时不占空间地说明一次。 */
+function RiskTriggers({ rule }: { rule: RiskLimitRule }) {
+  const triggers = rule.triggers ?? 0;
+  const last = rule.last_event;
+  if (!triggers || !last) {
+    return <div className="risk-triggers">今日未触发</div>;
+  }
+  const decision =
+    last.decision === "halted"
+      ? "硬停止"
+      : last.decision === "rejected"
+        ? "拒单"
+        : "减量";
+  const qty =
+    last.qty_before && last.qty_after
+      ? ` ${num(last.qty_before)} → ${num(last.qty_after)}`
+      : "";
+  return (
+    <div className="risk-triggers" title={last.reason ?? undefined}>
+      <span className="risk-trigger-count">今日触发 {triggers} 次</span>
+      <span>
+        最近 {clock(last.ts).slice(0, 5)} {decision}
+        {qty}
+      </span>
     </div>
   );
 }

@@ -509,6 +509,30 @@ class TestRiskEvents:
             "e0"
         ]
 
+    def test_rule_stats_counts_and_latest(self, store) -> None:
+        """按规则聚合：计数 + 最近一条；since 之前的记录不计入（M7-9）。"""
+        store.insert_risk_event(**self._event(event_id="e1", ts=1000))
+        store.insert_risk_event(
+            **self._event(event_id="e2", ts=2000, decision="adjusted")
+        )
+        store.insert_risk_event(
+            **self._event(
+                event_id="e3", ts=500, rule="max_position_pct"
+            )
+        )
+
+        stats = store.risk_rule_stats(since=1000)
+
+        assert stats["max_order_qty"]["count"] == 2
+        assert stats["max_order_qty"]["last"]["event_id"] == "e2"
+        # 早于 since 的规则完全不出现在结果里
+        assert "max_position_pct" not in stats
+
+    def test_rule_stats_skips_null_rule(self, store) -> None:
+        store.insert_risk_event(**self._event(event_id="e1", rule=None))
+
+        assert store.risk_rule_stats() == {}
+
 
 class TestEffectiveOverrides:
     """risk_overrides 的「最新未撤销行即生效」（MS4-B §11.2）。"""

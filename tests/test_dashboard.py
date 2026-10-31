@@ -1547,6 +1547,71 @@ class TestRiskLimits:
         assert result["equity_source"] == "initial_cash"
         assert Decimal(result["equity"]) == settings.backtest.initial_cash
 
+    async def test_rule_triggers_and_last_event(self, env) -> None:
+        """今日触发次数与最近一次详情要按规则映射到 risk_events（M7-9）。"""
+        service, store, redis, _settings = env
+        await self._publish(redis)
+        now = int(time.time() * 1000)
+
+        def _event(event_id: str, ts: int, rule: str, **extra) -> None:
+            store.insert_risk_event(
+                event_id=event_id,
+                ts=ts,
+                inst_id="BTC-USDT",
+                signal_id=f"sig-{event_id}",
+                decision=extra.pop("decision", "adjusted"),
+                rule=rule,
+                **extra,
+            )
+
+        # 单品种仓位今天命中两次，取最近一条
+        _event("e1", now - 2000, "max_position_pct", qty_before="1", qty_after="0.5")
+        _event(
+            "e2",
+            now - 1000,
+            "max_position_pct",
+            decision="rejected",
+            reason="position limit hit",
+            limit_value="3000",
+            actual_value="4000",
+        )
+        # 昨天的事件不计入今日
+        _event("e3", now - 3 * 86_400_000, "max_position_pct")
+        # 日亏损规则各算各的，不会串到单品种仓位
+        _event("e4", now - 500, "daily_loss_limit")
+
+        result = await service.risk_limits()
+
+        rules = {rule["key"]: rule for rule in result["rules"]}
+        assert rules["inst_position"]["triggers"] == 2
+        last = rules["inst_position"]["last_event"]
+        assert last is not None
+        assert last["decision"] == "rejected"
+        assert last["reason"] == "position limit hit"
+        assert Decimal(last["limit_value"]) == Decimal("3000")
+        assert rules["daily_loss"]["triggers"] == 1
+        assert rules["total_position"]["triggers"] == 0
+        assert rules["total_position"]["last_event"] is None
+        assert result["degraded"] == []
+
+    async def test_triggers_exclude_sized_events_by_key(self, env) -> None:
+        """服务端算量事件记在 'sized' 规则下，不能被算成任何限额触发。"""
+        service, store, redis, _settings = env
+        await self._publish(redis)
+        now = int(time.time() * 1000)
+        store.insert_risk_event(
+            event_id="e-sized",
+            ts=now,
+            inst_id="BTC-USDT",
+            signal_id="sig-sized",
+            decision="sized",
+            rule="sized",
+        )
+
+        result = await service.risk_limits()
+
+        assert all(rule["triggers"] == 0 for rule in result["rules"])
+
 
 class TestApp:
     async def test_api_endpoints(self, env, tmp_path) -> None:

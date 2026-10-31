@@ -1248,6 +1248,30 @@ code {
   gap: 5px;
 }
 
+/* 今日触发次数 + 最近一次命中（M7-9）：与阈值行同一列，字号再小一档 */
+.risk-triggers {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--line);
+  color: var(--dimmer);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.risk-triggers span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.risk-trigger-count {
+  color: var(--warn);
+}
+
 .risk-dot {
   width: 8px;
   height: 8px;

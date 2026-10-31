@@ -747,6 +747,42 @@ class SQLiteStore:
         )
         return int(row["n"]) if row else 0
 
+    def risk_rule_stats(self, since: int | None = None) -> dict[str, dict]:
+        """按规则聚合触发次数与最近一次详情（M7-9）。
+
+        看板风控页要回答「这条规则今天触发了几次、最后一次是什么」。
+        逐规则各查一次会放大查询次数，这里一次聚合出计数，再按
+        `(rule, max_ts)` 取最近一条——`rule` 上已有 `(rule, ts DESC)` 索引。
+
+        Args:
+            since: 时间下界（UTC ms）；看板传当日 UTC+8 零点。None 表示不限
+
+        Returns:
+            `{rule: {"count": n, "last": {...风险事件行...}}}`。
+            `rule` 为空的事件不计入（无法归属到具体规则）。
+        """
+        where = " WHERE ts >= ?" if since is not None else ""
+        params: tuple = (since,) if since is not None else ()
+        rows = self._query_all(
+            "SELECT rule, COUNT(*) AS n, MAX(ts) AS last_ts FROM risk_events"
+            f"{where} GROUP BY rule",
+            params,
+        )
+        stats: dict[str, dict] = {}
+        for row in rows:
+            rule = row["rule"]
+            if not rule:
+                continue
+            latest = self._query_one(
+                "SELECT * FROM risk_events WHERE rule = ? AND ts = ? LIMIT 1",
+                (rule, row["last_ts"]),
+            )
+            stats[str(rule)] = {
+                "count": int(row["n"]),
+                "last": dict(latest) if latest else None,
+            }
+        return stats
+
     def get_effective_overrides(
         self, strategy_id: str | None = None
     ) -> dict[str, str]:

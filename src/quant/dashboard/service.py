@@ -104,6 +104,16 @@ def _as_decimal_or_none(raw: object) -> Decimal | None:
 _LIMIT_WARN_RATIO = Decimal("0.7")
 _RISK_DEFAULTS = RiskConfig(strategy_id="")
 
+# 看板规则 key → `risk_events.rule`（M7-9 触发次数与最近详情）
+# 页面展示的是「规则」，事件表记的是「命中的限值字段」，两者需映射。
+_RISK_EVENT_RULES: dict[str, str] = {
+    "daily_loss": "daily_loss_limit",
+    "consecutive_loss": "consecutive_loss_limit",
+    "order_notional": "max_order_qty",
+    "inst_position": "max_position_pct",
+    "total_position": "max_total_pct",
+}
+
 
 def _limit_ratio(used: Decimal, limit: Decimal) -> Decimal | None:
     if limit <= 0:
@@ -145,6 +155,24 @@ def _limit_rule(
         # 该限值来自哪一层（default/global/strategy/override），
         # 用于区分「策略里写死的」和「今天临时放宽的」
         "source": source,
+    }
+
+
+def _risk_event_view(row: dict | None) -> dict[str, object] | None:
+    """把一条 `risk_events` 行整理成页面需要的「最近一次详情」（M7-9）。"""
+    if not row:
+        return None
+    return {
+        "ts": _as_int(row.get("ts")) or 0,
+        "decision": row.get("decision"),
+        "strategy_id": row.get("strategy_id"),
+        "inst_id": row.get("inst_id"),
+        "signal_id": row.get("signal_id"),
+        "limit_value": row.get("limit_value"),
+        "actual_value": row.get("actual_value"),
+        "qty_before": row.get("qty_before"),
+        "qty_after": row.get("qty_after"),
+        "reason": row.get("reason"),
     }
 
 
@@ -722,6 +750,26 @@ class DashboardService:
                 source=_source("max_total_pct"),
             ),
         ]
+
+        # 今日触发次数与最近一次详情（M7-9）：阈值「从哪来」由 source 回答，
+        # 这里回答「今天有没有真的挡住过」。读失败只降级，不影响限额展示。
+        stats: dict[str, dict] = {}
+        try:
+            stats = await asyncio.to_thread(
+                self._store.risk_rule_stats, day_start
+            )
+        except Exception as e:  # noqa: BLE001
+            if "sqlite" not in degraded:
+                degraded.append("sqlite")
+            log.warning(f"risk rule stats read failed: {e}")
+
+        for rule in rules:
+            event_rule = _RISK_EVENT_RULES.get(str(rule["key"]))
+            stat = stats.get(event_rule) if event_rule else None
+            rule["triggers"] = int(stat["count"]) if stat else 0
+            rule["last_event"] = (
+                _risk_event_view(stat.get("last")) if stat else None
+            )
 
         return {
             "ts": now,
