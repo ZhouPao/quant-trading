@@ -476,6 +476,59 @@ export type OptimizeRow = {
   metrics: MetricMap;
 };
 
+/** 月度收益（M4-14）：首月只作基准，不出行 */
+export type MonthlyReturn = {
+  month: string;
+  ret: number;
+};
+
+export type RunStatus = "pending" | "running" | "done" | "failed" | "canceled";
+
+/** 回测任务登记行（M4-9/M4-10，来源 backtest_runs） */
+export type BacktestRun = {
+  run_id: string;
+  strategy: string;
+  inst: string;
+  bar: string;
+  start: string;
+  end: string;
+  params: Record<string, unknown>;
+  warmup_bars: number;
+  kind: string;
+  status: RunStatus | string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  error: string | null;
+  metrics: MetricMap;
+};
+
+export type BacktestRunsResponse = {
+  total: number;
+  runs: BacktestRun[];
+};
+
+export type BacktestRunDetail = BacktestRun & {
+  artifacts: { kind: string; size: number | null; created_at: number }[];
+};
+
+export type BacktestCompareResponse = {
+  inst_id: string;
+  bar: string;
+  runs: BacktestRun[];
+};
+
+export type BacktestEquityPoint = {
+  ts: number;
+  equity: string;
+  drawdown: string;
+};
+
+export type BacktestTradesResponse = {
+  total: number;
+  trades: BacktestTrade[];
+};
+
 export type OptimizeResponse = {
   kind: "optimize";
   strategy: string;
@@ -1103,6 +1156,91 @@ export async function updateBinding(
 export async function runBacktest(signal: AbortSignal, body: BacktestBody) {
   // 后端默认已改异步，页面切换前先走兼容路径，避免拿到 {run_id} 解析失败
   return postJson<BacktestResponse>("/api/backtest?sync=1", body, signal);
+}
+
+/** 提交回测任务，立即返回 run_id（M4-12 后台任务）。 */
+export async function submitBacktest(signal: AbortSignal, body: BacktestBody) {
+  return postJson<{ run_id: string; status: string }>(
+    "/api/backtest",
+    body,
+    signal,
+  );
+}
+
+export type BacktestRunsQuery = {
+  limit?: number;
+  offset?: number;
+  strategy?: string;
+  inst?: string;
+  bar?: string;
+  status?: string;
+};
+
+export async function fetchBacktestRuns(
+  signal: AbortSignal,
+  query: BacktestRunsQuery = {},
+) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === "") continue;
+    params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return getJson<BacktestRunsResponse>(
+    `/api/backtest/runs${qs ? `?${qs}` : ""}`,
+    signal,
+  );
+}
+
+export async function fetchBacktestRun(signal: AbortSignal, runId: string) {
+  return getJson<BacktestRunDetail>(
+    `/api/backtest/${encodeURIComponent(runId)}`,
+    signal,
+  );
+}
+
+export async function fetchBacktestEquity(signal: AbortSignal, runId: string) {
+  return getJson<{ points: BacktestEquityPoint[] }>(
+    `/api/backtest/${encodeURIComponent(runId)}/equity`,
+    signal,
+  );
+}
+
+export async function fetchBacktestTrades(
+  signal: AbortSignal,
+  runId: string,
+  limit = 100,
+) {
+  return getJson<BacktestTradesResponse>(
+    `/api/backtest/${encodeURIComponent(runId)}/trades?limit=${limit}`,
+    signal,
+  );
+}
+
+export async function fetchBacktestCompare(
+  signal: AbortSignal,
+  runIds: string[],
+) {
+  return getJson<BacktestCompareResponse>(
+    `/api/backtest/compare?ids=${encodeURIComponent(runIds.join(","))}`,
+    signal,
+  );
+}
+
+export async function cancelBacktest(runId: string, token = "") {
+  return postWrite<{ run_id: string; status: string }>(
+    `/api/backtest/${encodeURIComponent(runId)}/cancel`,
+    {},
+    token,
+  );
+}
+
+export async function rerunBacktest(runId: string, token = "") {
+  return postWrite<{ run_id: string; status: string }>(
+    `/api/backtest/${encodeURIComponent(runId)}/rerun`,
+    {},
+    token,
+  );
 }
 
 export async function runOptimize(signal: AbortSignal, body: OptimizeBody) {

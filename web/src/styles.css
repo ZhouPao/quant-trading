@@ -2017,6 +2017,61 @@ tbody tr.row-active td:first-child {
   letter-spacing: 0.05em;
 }
 
+.bt-notice {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  background: rgba(200, 242, 79, 0.05);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+/* 任务状态条（M4-12 后台任务） */
+.bt-run-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 14px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+  letter-spacing: 0.04em;
+}
+
+.bt-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  color: var(--dim);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.bt-badge-pending,
+.bt-badge-running {
+  border-color: rgba(232, 196, 104, 0.55);
+  color: var(--warn);
+}
+
+.bt-badge-done {
+  border-color: rgba(200, 242, 79, 0.5);
+  color: var(--accent);
+}
+
+.bt-badge-failed {
+  border-color: rgba(255, 95, 95, 0.5);
+  color: var(--bad);
+}
+
+.bt-badge-canceled {
+  border-color: var(--line-strong);
+  color: var(--dimmer);
+}
+
 .bt-best {
   color: var(--accent);
   font-family: var(--mono);
@@ -2099,6 +2154,10 @@ tbody tr.row-active td:first-child {
   background: rgba(200, 242, 79, 0.05);
 }
 
+.hist-active {
+  border-color: rgba(140, 190, 255, 0.5);
+}
+
 .hist-check {
   display: flex;
   flex: 1;
@@ -2165,6 +2224,34 @@ tbody tr.row-active td:first-child {
 }
 
 .hist-del:hover {
+  color: var(--bad);
+}
+
+/* 历史行操作：查看 / 重跑 / 取消（M4-10） */
+.hist-actions {
+  display: flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.hist-act {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.hist-act:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.hist-act-warn:hover {
+  border-color: rgba(255, 95, 95, 0.5);
   color: var(--bad);
 }
 

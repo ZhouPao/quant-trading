@@ -33,15 +33,27 @@ import {
   reducePosition,
   replayDeadLetter,
   replayDeadLetters,
-  runBacktest,
   runOptimize,
+  submitBacktest,
+  fetchBacktestRuns,
+  fetchBacktestRun,
+  fetchBacktestEquity,
+  fetchBacktestTrades,
+  fetchBacktestCompare,
+  cancelBacktest,
+  rerunBacktest,
   setKillSwitch,
   stamp,
   updateBinding,
   updateStrategyParams,
   type AlertRow,
   type AlertSilence,
-  type BacktestResponse,
+  type BacktestCompareResponse,
+  type BacktestEquityPoint,
+  type BacktestRun,
+  type BacktestRunDetail,
+  type BacktestTrade,
+  type MonthlyReturn,
   type CandlesResponse,
   type DeadLetterItem,
   type DeadLettersResponse,
@@ -194,8 +206,7 @@ const PENDING_MODULES: Record<
   },
 };
 
-// 回测历史只存指标摘要（不存权益曲线与成交），避免撑爆 localStorage
-const HISTORY_KEY = "quant.backtest.history.v1";
+// 回测历史改由后端 backtest_runs 持久化（M4-9/M4-10），前端只做展示与筛选
 const HISTORY_LIMIT = 20;
 const COMPARE_LIMIT = 4;
 // 越小越好的指标，其余按越大越好比较
@@ -203,60 +214,27 @@ const LOWER_IS_BETTER = new Set(["max_drawdown"]);
 // 交易次数没有优劣之分，不参与高亮
 const NO_BEST = new Set(["trade_count"]);
 
-type HistoryEntry = {
-  id: string;
-  saved_at: number;
-  strategy: string;
-  inst: string;
-  bar: string;
-  start: string;
-  end: string;
-  params: string;
-  bar_count: number;
-  trade_count: number;
-  final_equity: string;
-  metrics: MetricMap;
-};
-
-function historySignature(entry: HistoryEntry): string {
-  return [entry.strategy, entry.inst, entry.bar, entry.start, entry.end, entry.params].join("|");
-}
-
-function loadHistory(): HistoryEntry[] {
-  try {
-    const raw = window.localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(
-        (item): item is HistoryEntry =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof (item as HistoryEntry).id === "string" &&
-          typeof (item as HistoryEntry).metrics === "object",
-      )
-      .slice(0, HISTORY_LIMIT);
-  } catch {
-    return [];
-  }
-}
-
-function persistHistory(entries: HistoryEntry[]): void {
-  try {
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
-  } catch {
-    // 隐私模式或配额不足时静默降级：本次仍然可用，只是不持久化
-  }
-}
-
-function bestValue(entries: HistoryEntry[], key: string): number | null {
+function bestValue(runs: { metrics: MetricMap }[], key: string): number | null {
   if (NO_BEST.has(key)) return null;
-  const values = entries
-    .map((entry) => entry.metrics[key])
+  const values = runs
+    .map((run) => run.metrics[key])
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (values.length < 2) return null;
   return LOWER_IS_BETTER.has(key) ? Math.min(...values) : Math.max(...values);
+}
+
+// 任务状态文案：pending/running 会转圈，done/failed/canceled 是终点
+const RUN_STATUS_TEXT: Record<string, string> = {
+  pending: "排队中",
+  running: "运行中",
+  done: "已完成",
+  failed: "失败",
+  canceled: "已取消",
+  canceling: "取消中",
+};
+
+function isTerminalStatus(status: string): boolean {
+  return status === "done" || status === "failed" || status === "canceled";
 }
 
 type Bundle = Awaited<ReturnType<typeof fetchAll>>;
@@ -2305,11 +2283,30 @@ function BacktestPanel() {
   const [jobs, setJobs] = useState("1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [backtest, setBacktest] = useState<BacktestResponse | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // 当前任务：登记行、权益曲线、成交分开取（M4-9 产物按需加载）
+  const [run, setRun] = useState<BacktestRunDetail | null>(null);
+  const [equity, setEquity] = useState<BacktestEquityPoint[]>([]);
+  const [trades, setTrades] = useState<{
+    total: number;
+    trades: BacktestTrade[];
+  } | null>(null);
   const [optimize, setOptimize] = useState<OptimizeResponse | null>(null);
-  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const pending = useRef<AbortController | null>(null);
+  // 历史改由后端 backtest_runs 持久化（M4-9/M4-10），不再写 localStorage
+  const [history, setHistory] = useState<BacktestRun[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [filters, setFilters] = useState({
+    strategy: "",
+    inst: "",
+    bar: "",
+    status: "",
+  });
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [compare, setCompare] = useState<BacktestCompareResponse | null>(null);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const submitAbort = useRef<AbortController | null>(null);
+  const followAbort = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2328,63 +2325,150 @@ function BacktestPanel() {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => () => pending.current?.abort(), []);
+  // 历史列表按筛选条件重新拉取；任务结束后 historyVersion 自增触发刷新
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchBacktestRuns(controller.signal, { limit: HISTORY_LIMIT, ...filters })
+      .then((res) => {
+        setHistory(res.runs);
+        setHistoryTotal(res.total);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      });
+    return () => controller.abort();
+  }, [filters, historyVersion]);
+
+  // 勾选 ≥2 条才对比；品种/周期不一致由后端拒绝并给出原因
+  useEffect(() => {
+    if (picked.length < 2) {
+      setCompare(null);
+      setCompareError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setCompareError(null);
+    fetchBacktestCompare(controller.signal, picked)
+      .then(setCompare)
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setCompare(null);
+        setCompareError((err as Error).message);
+      });
+    return () => controller.abort();
+  }, [picked]);
+
+  useEffect(
+    () => () => {
+      submitAbort.current?.abort();
+      followAbort.current?.abort();
+    },
+    [],
+  );
 
   const current = strategies.find((item) => item.id === strategy);
   const configHint = current ? formatParams(current.params) : "";
 
-  const recordEntry = (result: BacktestResponse) => {
-    const entry: HistoryEntry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      saved_at: Date.now(),
-      strategy: result.strategy,
-      inst: result.inst,
-      bar: result.bar,
-      start: result.start,
-      end: result.end,
-      params: formatParams(result.params),
-      bar_count: result.bar_count,
-      trade_count: result.trade_count,
-      final_equity: result.final_equity,
-      metrics: result.metrics,
-    };
-    setHistory((items) => {
-      // 同一配置重跑时替换旧记录，避免历史里堆满重复项
-      const rest = items.filter(
-        (item) => historySignature(item) !== historySignature(entry),
+  /** 轮询任务直到终态；done 后再取权益与成交（产物走单独接口）。 */
+  const followRun = async (runId: string) => {
+    followAbort.current?.abort();
+    const controller = new AbortController();
+    followAbort.current = controller;
+    setBusy(true);
+    setEquity([]);
+    setTrades(null);
+    try {
+      for (;;) {
+        const detail = await fetchBacktestRun(controller.signal, runId);
+        setRun(detail);
+        if (isTerminalStatus(detail.status)) {
+          if (detail.status === "done") {
+            const [eq, tr] = await Promise.all([
+              fetchBacktestEquity(controller.signal, runId),
+              fetchBacktestTrades(controller.signal, runId),
+            ]);
+            setEquity(eq.points);
+            setTrades(tr);
+          }
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+      setHistoryVersion((n) => n + 1);
+    }
+  };
+
+  /** 打开一条历史结果；未完成的任务只展示状态，不取产物。 */
+  const openRun = async (runId: string) => {
+    followAbort.current?.abort();
+    const controller = new AbortController();
+    followAbort.current = controller;
+    setBusy(false);
+    setError(null);
+    setEquity([]);
+    setTrades(null);
+    try {
+      const detail = await fetchBacktestRun(controller.signal, runId);
+      setRun(detail);
+      if (detail.status === "done") {
+        const [eq, tr] = await Promise.all([
+          fetchBacktestEquity(controller.signal, runId),
+          fetchBacktestTrades(controller.signal, runId),
+        ]);
+        setEquity(eq.points);
+        setTrades(tr);
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    }
+  };
+
+  const cancelRun = async (runId: string) => {
+    setError(null);
+    try {
+      const res = await cancelBacktest(
+        runId,
+        window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "",
       );
-      const next = [entry, ...rest].slice(0, HISTORY_LIMIT);
-      persistHistory(next);
-      return next;
-    });
+      setNotice(
+        res.status === "canceled"
+          ? "任务已取消"
+          : "已请求取消，将在下一根 bar 退出",
+      );
+      await followRun(runId);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
-  const removeEntry = (id: string) => {
-    setHistory((items) => {
-      const next = items.filter((item) => item.id !== id);
-      persistHistory(next);
-      return next;
-    });
-    setPicked((current) => {
-      if (!current.has(id)) return current;
-      const next = new Set(current);
-      next.delete(id);
-      return next;
-    });
+  const rerun = async (runId: string) => {
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await rerunBacktest(
+        runId,
+        window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "",
+      );
+      setMode("backtest");
+      setNotice(`已按原参数重跑：${res.run_id}`);
+      await followRun(res.run_id);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
-  const clearHistory = () => {
-    setHistory([]);
-    setPicked(new Set());
-    persistHistory([]);
-  };
-
-  const togglePick = (id: string) => {
-    setPicked((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else if (next.size < COMPARE_LIMIT) next.add(id);
-      return next;
+  const togglePick = (runId: string) => {
+    setPicked((items) => {
+      if (items.includes(runId)) return items.filter((id) => id !== runId);
+      if (items.length >= COMPARE_LIMIT) return items;
+      return [...items, runId];
     });
   };
 
@@ -2394,10 +2478,10 @@ function BacktestPanel() {
       setError("预热根数必须是非负整数");
       return;
     }
-    setBusy(true);
     setError(null);
+    setNotice(null);
     const controller = new AbortController();
-    pending.current = controller;
+    submitAbort.current = controller;
     const body = {
       strategy,
       inst,
@@ -2410,11 +2494,13 @@ function BacktestPanel() {
     try {
       if (mode === "backtest") {
         setOptimize(null);
-        const result = await runBacktest(controller.signal, body);
-        setBacktest(result);
-        recordEntry(result);
+        setRun(null);
+        // 提交即返回 run_id（M4-12），页面轮询状态而不是同步等待
+        const { run_id } = await submitBacktest(controller.signal, body);
+        setNotice(`任务已提交（${run_id}），正在后台计算`);
+        await followRun(run_id);
       } else {
-        setBacktest(null);
+        setRun(null);
         setOptimize(
           await runOptimize(controller.signal, {
             ...body,
@@ -2438,7 +2524,7 @@ function BacktestPanel() {
       <div className="card-head">
         <h2>策略回测</h2>
         <div className="chart-tools">
-          <span className="card-note">本地 parquet · 只计算不落盘</span>
+          <span className="card-note">本地 parquet · 结果落库可回看</span>
           <div className="seg" role="group" aria-label="回测模式">
             <button
               type="button"
@@ -2568,13 +2654,21 @@ function BacktestPanel() {
         </span>
       </div>
 
+      {notice && <div className="bt-notice">{notice}</div>}
       {error && <div className="bt-error">{error}</div>}
 
       {mode === "backtest" ? (
-        backtest ? (
-          <BacktestResult data={backtest} />
+        run ? (
+          <BacktestRunView
+            run={run}
+            equity={equity}
+            trades={trades}
+            onCancel={() => void cancelRun(run.run_id)}
+          />
         ) : (
-          <div className="empty">填好区间后点「运行回测」，指标与权益曲线会显示在这里</div>
+          <div className="empty">
+            填好区间后点「运行回测」，任务先入队，指标与权益曲线随后显示
+          </div>
         )
       ) : optimize ? (
         <OptimizeResult data={optimize} />
@@ -2584,178 +2678,359 @@ function BacktestPanel() {
 
       {mode === "backtest" && (
         <BacktestHistory
-          entries={history}
+          runs={history}
+          total={historyTotal}
+          filters={filters}
           picked={picked}
+          activeId={run?.run_id ?? null}
+          compare={compare}
+          compareError={compareError}
+          onFilter={setFilters}
           onToggle={togglePick}
-          onRemove={removeEntry}
-          onClear={clearHistory}
+          onOpen={(id) => void openRun(id)}
+          onRerun={(id) => void rerun(id)}
+          onCancel={(id) => void cancelRun(id)}
         />
       )}
     </section>
   );
 }
 
-function BacktestResult({ data }: { data: BacktestResponse }) {
-  const values = data.equity
+/** 任务状态条：未完成时给取消入口，失败时显示原因。 */
+function RunStatusBar({
+  run,
+  onCancel,
+}: {
+  run: BacktestRunDetail;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="bt-run-state">
+      <span className={`bt-badge bt-badge-${run.status}`}>
+        {RUN_STATUS_TEXT[run.status] ?? run.status}
+      </span>
+      <span className="mono">{run.run_id}</span>
+      <span className="dim">提交 {stamp(run.created_at)}</span>
+      {run.started_at !== null && (
+        <span className="dim">开始 {stamp(run.started_at)}</span>
+      )}
+      {run.finished_at !== null && (
+        <span className="dim">结束 {stamp(run.finished_at)}</span>
+      )}
+      {!isTerminalStatus(run.status) && (
+        <button type="button" className="bt-clear" onClick={onCancel}>
+          取消
+        </button>
+      )}
+      {run.error && <span className="negative">{run.error}</span>}
+    </div>
+  );
+}
+
+/** 回测结果：登记行来自 backtest_runs，曲线与成交按需从产物读取。 */
+function BacktestRunView({
+  run,
+  equity,
+  trades,
+  onCancel,
+}: {
+  run: BacktestRunDetail;
+  equity: BacktestEquityPoint[];
+  trades: { total: number; trades: BacktestTrade[] } | null;
+  onCancel: () => void;
+}) {
+  const values = equity
     .map((point) => Number(point.equity))
     .filter((value) => Number.isFinite(value));
+  // monthly_returns 在指标表里是 JSON 列，类型上仍是数值位，需要显式还原
+  const monthly = Array.isArray(run.metrics.monthly_returns)
+    ? (run.metrics.monthly_returns as unknown as MonthlyReturn[])
+    : [];
+
   return (
     <>
-      <div className="bt-sub">
-        <span>
-          {data.strategy} · {data.inst} · {data.bar} · {data.start} ~ {data.end}
-        </span>
-        <span>
-          {data.bar_count} 根 · 预热 {data.warmup_count} · 期末权益{" "}
-          {num(data.final_equity, 2)} · {data.elapsed_ms} ms
-        </span>
-      </div>
-      <div className="metric-grid bt-metrics">
-        {METRIC_ORDER.map((key) => (
-          <Metric
-            key={key}
-            label={METRIC_LABELS[key]}
-            value={metricText(key, data.metrics[key])}
-            hint={METRIC_HINTS[key] ?? ""}
-            tone={metricTone(key, data.metrics[key])}
-          />
-        ))}
-      </div>
-      <Curve values={values} emptyHint="回测区间内权益数据不足" />
-      <div className="bt-sub">
-        <span>实际参数 {formatParams(data.params)}</span>
-        <span>
-          {data.trade_count} 笔成交
-          {data.unfilled_signals > 0
-            ? ` · ${data.unfilled_signals} 个信号未成交`
-            : ""}
-        </span>
-      </div>
-      <Table
-        empty={data.trades.length === 0}
-        emptyHint="区间内没有成交"
-        head={["时间", "方向", "数量", "成交价", "手续费"]}
-        rows={data.trades.map((trade) => [
-          stamp(trade.ts),
-          <span className={trade.side === "buy" ? "positive" : "negative"}>
-            {trade.side === "buy" ? "买入" : "卖出"}
-          </span>,
-          compactQty(trade.qty),
-          num(trade.price, 2),
-          num(trade.fee, 4),
-        ])}
-      />
-      {data.trades_truncated && (
-        <div className="bt-note">
-          仅显示最近 {data.trades.length} 笔，区间内共 {data.trade_count} 笔
+      <RunStatusBar run={run} onCancel={onCancel} />
+      {run.status !== "done" ? (
+        <div className="empty">
+          {run.status === "failed"
+            ? "任务失败，原因见上方提示；可点历史里的「重跑」再试一次"
+            : "任务已提交，页面每秒轮询状态；完成后自动加载指标、曲线与成交"}
         </div>
+      ) : (
+        <>
+          <div className="bt-sub">
+            <span>
+              {run.strategy} · {run.inst} · {run.bar} · {run.start} ~ {run.end}
+            </span>
+            <span className="mono">{formatParams(run.params)}</span>
+          </div>
+          <div className="metric-grid bt-metrics">
+            {METRIC_ORDER.map((key) => (
+              <Metric
+                key={key}
+                label={METRIC_LABELS[key]}
+                value={metricText(key, run.metrics[key])}
+                hint={METRIC_HINTS[key] ?? ""}
+                tone={metricTone(key, run.metrics[key])}
+              />
+            ))}
+          </div>
+          <Curve values={values} emptyHint="回测区间内权益数据不足" />
+          <MonthlyReturnsTable rows={monthly} />
+          <Table
+            empty={(trades?.trades.length ?? 0) === 0}
+            emptyHint="区间内没有成交"
+            head={["时间", "方向", "数量", "成交价", "手续费"]}
+            rows={(trades?.trades ?? []).map((trade) => [
+              stamp(trade.ts),
+              <span className={trade.side === "buy" ? "positive" : "negative"}>
+                {trade.side === "buy" ? "买入" : "卖出"}
+              </span>,
+              compactQty(trade.qty),
+              num(trade.price, 2),
+              num(trade.fee, 4),
+            ])}
+          />
+          {trades && trades.total > trades.trades.length && (
+            <div className="bt-note">
+              仅显示最近 {trades.trades.length} 笔，区间内共 {trades.total} 笔
+            </div>
+          )}
+        </>
       )}
     </>
   );
 }
 
-function BacktestHistory({
-  entries,
-  picked,
-  onToggle,
-  onRemove,
-  onClear,
-}: {
-  entries: HistoryEntry[];
-  picked: Set<string>;
-  onToggle: (id: string) => void;
-  onRemove: (id: string) => void;
-  onClear: () => void;
-}) {
-  const runs = entries.filter((entry) => picked.has(entry.id));
+/** 月度收益表（M4-14）；首月只作基准，后端不会返回。 */
+function MonthlyReturnsTable({ rows }: { rows: MonthlyReturn[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <>
+      <div className="bt-sub">
+        <span>月度收益</span>
+        <span>{rows.length} 个月</span>
+      </div>
+      <Table
+        empty={false}
+        emptyHint=""
+        head={["月份", "收益率"]}
+        rows={rows.map((row) => [
+          row.month,
+          <span className={row.ret >= 0 ? "positive" : "negative"}>
+            {(row.ret * 100).toFixed(2)}%
+          </span>,
+        ])}
+      />
+    </>
+  );
+}
 
+function BacktestHistory({
+  runs,
+  total,
+  filters,
+  picked,
+  activeId,
+  compare,
+  compareError,
+  onFilter,
+  onToggle,
+  onOpen,
+  onRerun,
+  onCancel,
+}: {
+  runs: BacktestRun[];
+  total: number;
+  filters: { strategy: string; inst: string; bar: string; status: string };
+  picked: string[];
+  activeId: string | null;
+  compare: BacktestCompareResponse | null;
+  compareError: string | null;
+  onFilter: (next: {
+    strategy: string;
+    inst: string;
+    bar: string;
+    status: string;
+  }) => void;
+  onToggle: (id: string) => void;
+  onOpen: (id: string) => void;
+  onRerun: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
   return (
     <div className="bt-history">
       <div className="bt-history-head">
-        <h3>历史对比</h3>
+        <h3>历史回测</h3>
         <span className="card-note">
-          {entries.length === 0
-            ? "每次回测自动保存，最多 20 条"
-            : `已存 ${entries.length} 条 · 勾选 2–${COMPARE_LIMIT} 条对比`}
+          共 {total} 条，显示最近 {runs.length} 条 · 勾选 2–{COMPARE_LIMIT} 条对比
         </span>
-        {entries.length > 0 && (
-          <button type="button" className="bt-clear" onClick={onClear}>
-            清空
-          </button>
-        )}
       </div>
 
-      {entries.length === 0 ? (
-        <div className="empty">运行一次回测后会自动记入历史，刷新页面也不会丢</div>
+      <div className="bt-form">
+        <label className="bt-field">
+          <span>策略筛选</span>
+          <input
+            value={filters.strategy}
+            placeholder="全部"
+            onChange={(e) => onFilter({ ...filters, strategy: e.target.value })}
+          />
+        </label>
+        <label className="bt-field">
+          <span>品种筛选</span>
+          <input
+            value={filters.inst}
+            placeholder="全部"
+            onChange={(e) => onFilter({ ...filters, inst: e.target.value })}
+          />
+        </label>
+        <label className="bt-field">
+          <span>周期筛选</span>
+          <select
+            value={filters.bar}
+            onChange={(e) => onFilter({ ...filters, bar: e.target.value })}
+          >
+            <option value="">全部</option>
+            {BAR_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="bt-field">
+          <span>状态筛选</span>
+          <select
+            value={filters.status}
+            onChange={(e) => onFilter({ ...filters, status: e.target.value })}
+          >
+            <option value="">全部</option>
+            {["pending", "running", "done", "failed", "canceled"].map((item) => (
+              <option key={item} value={item}>
+                {RUN_STATUS_TEXT[item] ?? item}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {runs.length === 0 ? (
+        <div className="empty">还没有回测记录；运行一次后结果会落库，刷新页面也不会丢</div>
       ) : (
         <ul className="hist-list">
-          {entries.map((entry) => {
-            const ret = entry.metrics.total_return;
+          {runs.map((item) => {
+            const ret = item.metrics.total_return;
+            const pending = !isTerminalStatus(item.status);
             return (
               <li
-                key={entry.id}
-                className={picked.has(entry.id) ? "hist-item hist-on" : "hist-item"}
+                key={item.run_id}
+                className={[
+                  "hist-item",
+                  picked.includes(item.run_id) ? "hist-on" : "",
+                  activeId === item.run_id ? "hist-active" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               >
                 <label className="hist-check">
                   <input
                     type="checkbox"
-                    checked={picked.has(entry.id)}
-                    onChange={() => onToggle(entry.id)}
+                    checked={picked.includes(item.run_id)}
+                    onChange={() => onToggle(item.run_id)}
                   />
                   <span className="hist-main">
                     <span className="hist-title">
-                      {entry.strategy} · {entry.inst} · {entry.bar}
+                      {item.strategy} · {item.inst} · {item.bar}
                     </span>
                     <span className="hist-range">
-                      {entry.start} ~ {entry.end} · {entry.bar_count} 根 ·{" "}
-                      {entry.trade_count} 笔
+                      {item.start} ~ {item.end} ·{" "}
+                      {RUN_STATUS_TEXT[item.status] ?? item.status}
+                      {item.kind === "walkforward" ? " · walk-forward" : ""}
                     </span>
-                    <span className="hist-params mono">{entry.params}</span>
+                    <span className="hist-params mono">
+                      {formatParams(item.params)}
+                    </span>
                   </span>
                   <span className="hist-metrics">
                     <span
                       className={
-                        typeof ret === "number" ? (ret > 0 ? "positive" : ret < 0 ? "negative" : "") : ""
+                        typeof ret === "number"
+                          ? ret > 0
+                            ? "positive"
+                            : ret < 0
+                              ? "negative"
+                              : ""
+                          : ""
                       }
                     >
                       收益 {metricText("total_return", ret)}
                     </span>
-                    <span>回撤 {metricText("max_drawdown", entry.metrics.max_drawdown)}</span>
-                    <span>夏普 {metricText("sharpe", entry.metrics.sharpe)}</span>
+                    <span>
+                      回撤 {metricText("max_drawdown", item.metrics.max_drawdown)}
+                    </span>
+                    <span>夏普 {metricText("sharpe", item.metrics.sharpe)}</span>
                   </span>
-                  <span className="hist-time mono">{stamp(entry.saved_at)}</span>
+                  <span className="hist-time mono">{stamp(item.created_at)}</span>
                 </label>
-                <button
-                  type="button"
-                  className="hist-del"
-                  aria-label="删除这条历史"
-                  onClick={() => onRemove(entry.id)}
-                >
-                  ×
-                </button>
+                <span className="hist-actions">
+                  <button
+                    type="button"
+                    className="hist-act"
+                    onClick={() => onOpen(item.run_id)}
+                  >
+                    查看
+                  </button>
+                  <button
+                    type="button"
+                    className="hist-act"
+                    onClick={() => onRerun(item.run_id)}
+                  >
+                    重跑
+                  </button>
+                  {pending && (
+                    <button
+                      type="button"
+                      className="hist-act hist-act-warn"
+                      onClick={() => onCancel(item.run_id)}
+                    >
+                      取消
+                    </button>
+                  )}
+                </span>
               </li>
             );
           })}
         </ul>
       )}
 
-      {runs.length >= 2 && <CompareTable runs={runs} />}
+      {compareError && <div className="bt-error">{compareError}</div>}
+      {compare && compare.runs.length >= 2 && (
+        <CompareTable runs={compare.runs} />
+      )}
     </div>
   );
 }
 
 /** 多条回测横向对比：每个指标高亮最优值（回撤取最小，其余取最大）。 */
-function CompareTable({ runs }: { runs: HistoryEntry[] }) {
+function CompareTable({ runs }: { runs: BacktestRun[] }) {
   const head = [
     "指标",
-    ...runs.map((run, index) => `#${index + 1} ${clock(run.saved_at).slice(0, 5)}`),
+    ...runs.map(
+      (run, index) => `#${index + 1} ${clock(run.created_at).slice(0, 5)}`,
+    ),
   ];
   const rows: ReactNode[][] = [
     ["区间", ...runs.map((run) => `${run.start} ~ ${run.end}`)],
     ["配置", ...runs.map((run) => `${run.strategy} · ${run.inst} · ${run.bar}`)],
     [
       "参数",
-      ...runs.map((run) => <span className="mono">{run.params}</span>),
+      ...runs.map((run) => (
+        <span className="mono">{formatParams(run.params)}</span>
+      )),
+    ],
+    [
+      "状态",
+      ...runs.map((run) => RUN_STATUS_TEXT[run.status] ?? run.status),
     ],
   ];
 
@@ -2767,7 +3042,7 @@ function CompareTable({ runs }: { runs: HistoryEntry[] }) {
         const value = run.metrics[key];
         const isBest = best !== null && typeof value === "number" && value === best;
         return (
-          <span key={run.id} className={isBest ? "bt-best" : "mono"}>
+          <span key={run.run_id} className={isBest ? "bt-best" : "mono"}>
             {metricText(key, value)}
           </span>
         );
@@ -2775,16 +3050,11 @@ function CompareTable({ runs }: { runs: HistoryEntry[] }) {
     ]);
   }
 
-  rows.push([
-    "期末权益",
-    ...runs.map((run) => <span className="mono">{num(run.final_equity, 2)}</span>),
-  ]);
-
   return (
     <>
       <div className="bt-sub">
         <span>横向对比（{runs.length} 条）</span>
-        <span>高亮为该指标最优值</span>
+        <span>高亮为该指标最优值；品种与周期由后端校验一致</span>
       </div>
       <Table head={head} rows={rows} empty={false} emptyHint="" />
     </>
@@ -2936,7 +3206,15 @@ function dateOffset(days: number): string {
 function formatParams(params: Record<string, unknown>): string {
   const entries = Object.entries(params);
   if (entries.length === 0) return "—";
-  return entries.map(([key, value]) => `${key}=${String(value)}`).join("; ");
+  return entries
+    .map(([key, value]) => {
+      // walk-forward / 寻优的 params 里带嵌套结构（base、grid），直接 String 会变成 [object Object]
+      if (value !== null && typeof value === "object") {
+        return `${key}=${JSON.stringify(value)}`;
+      }
+      return `${key}=${String(value)}`;
+    })
+    .join("; ");
 }
 
 function metricTone(
