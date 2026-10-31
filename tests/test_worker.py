@@ -13,8 +13,12 @@ from quant.backtest.order import Fill
 from quant.backtest.signal import Signal
 from quant.execution.account import read_account_field
 from quant.execution.executor import Executor
+from quant.execution.kill_switch import KillSwitch
 from quant.execution.worker import Worker
+from quant.foundation.config import MonitorSettings, SmtpSettings
 from quant.foundation.schedule import day_start_ms_utc8
+from quant.monitor.alert_service import AlertService
+from quant.monitor.alerter import EmailAlerter
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
 from quant.risk.config import RiskConfig
@@ -44,6 +48,21 @@ def _risk_config(**overrides) -> RiskConfig:
     }
     defaults.update(overrides)
     return RiskConfig(**defaults)
+
+
+class _RecordingAlerter(EmailAlerter):
+    """记录发送内容、不真的发信。"""
+
+    def __init__(self) -> None:
+        super().__init__(SmtpSettings())
+        self.sent: list[tuple[str, str]] = []
+
+    def enabled(self) -> bool:
+        return True
+
+    def send(self, subject: str, body: str) -> bool:
+        self.sent.append((subject, body))
+        return True
 
 
 @pytest.fixture
@@ -132,6 +151,40 @@ class TestWorkerProcess:
         assert store.get_signal_status("sig-1") == "rejected"
         assert store.get_recent_trades(10)  # 只有预置的两笔，无新成交
         assert len(store.get_recent_trades(10)) == 2
+
+    async def test_halt_publishes_alert_and_stops(self, tmp_path) -> None:
+        """M9-11：风控硬停止当场进告警并发邮件，不等 monitor 轮询。"""
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SQLiteStore(tmp_path / "quant.db")
+        queue = SignalQueue(redis)
+        alerter = _RecordingAlerter()
+        switch = KillSwitch(redis)
+        worker = Worker(
+            queue=queue,
+            risk=RiskChecker(_risk_config(daily_loss_limit=Decimal("0")), store),
+            executor=Executor(),
+            store=store,
+            redis=redis,
+            price_provider=lambda inst_id: Decimal("100"),
+            kill_switch=switch,
+            alert_service=AlertService(
+                store, redis, alerter, MonitorSettings()
+            ),
+        )
+        try:
+            await queue.push(_signal())
+
+            await worker.run_once(timeout=1)
+
+            rows, total = store.list_alerts(10)
+            assert total == 1
+            assert rows[0]["rule"] == "risk_halt"
+            assert rows[0]["level"] == "ERROR"
+            assert rows[0]["inst_id"] == "BTC-USDT"
+            assert await switch.is_active()
+            assert len(alerter.sent) == 1
+        finally:
+            store.close()
 
     async def test_rejected_signal_writes_risk_event(self, env) -> None:
         """拒绝必须留痕，否则事后无法回答「为什么拒了这单」。"""

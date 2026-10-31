@@ -11,6 +11,7 @@
 - GET /api/reports   模拟盘偏离日报（读取 reports/daily/*.csv）
 - GET /api/quality   数据质量报告（可选 inst_id/bar_size，不传返回全部摘要）
 - GET /api/alerts    告警列表（SQLite 为准，支持级别/规则/状态/时间区间与分页）
+- GET /api/alerts/stats 近 N 天各规则触发次数（M9-14）
 - POST /api/alerts/{id}/ack 确认告警（写操作）
 - POST /api/alerts/silence  创建静音（写操作）
 - DELETE /api/alerts/silence/{id} 解除静音（写操作）
@@ -75,6 +76,8 @@ from quant.dashboard.service import DashboardService
 from quant.dashboard.tasks import RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
+from quant.monitor.alert_service import AlertService
+from quant.monitor.alerter import EmailAlerter
 from quant.risk.overrides import OverrideError
 from quant.webhook.auth import verify_token
 
@@ -114,9 +117,9 @@ class AckRequest(BaseModel):
 
 
 class SilenceRequest(BaseModel):
-    """创建静音：inst_id 为空表示该规则全部品种。"""
+    """创建静音：`inst_id` 为空表示该规则全部品种；`rule` 为空表示全局临时静音。"""
 
-    rule: str
+    rule: str = ""
     inst_id: str | None = None
     hours: float = 4
     reason: str = ""
@@ -173,7 +176,17 @@ def create_app(
     manual: ManualTrader | None = None,
 ) -> FastAPI:
     backtests = BacktestService(service.settings, service.store, service.redis)
-    tasks = TaskRunner(service.store, service.settings, backtests)
+    # 回测失败要发邮件（M9-11）：这里用真实 SMTP 配置，而不是 service 里
+    # 那个「只查不发」的 no-op alerter
+    backtest_alerts = AlertService(
+        service.store,
+        service.redis,
+        EmailAlerter(service.settings.smtp),
+        service.settings.monitor,
+    )
+    tasks = TaskRunner(
+        service.store, service.settings, backtests, alerts=backtest_alerts
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -324,6 +337,12 @@ def create_app(
                 until_ms=until,
             )
         )
+
+    @app.get("/api/alerts/stats")
+    async def alert_stats(
+        days: int = Query(7, ge=1, le=90),
+    ) -> JSONResponse:
+        return JSONResponse(await service.alert_stats(days))
 
     @app.post("/api/alerts/{alert_id}/ack")
     async def ack_alert(

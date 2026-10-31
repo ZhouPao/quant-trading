@@ -1081,6 +1081,33 @@ class SQLiteStore:
         )
         return [dict(r) for r in rows], total
 
+    def alert_rule_counts(self, since_ms: int) -> list[dict]:
+        """按规则统计告警条数与各数量（M9-14 告警趋势），按总数降序。"""
+        rows = self._query_all(
+            """
+            SELECT rule,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN level = 'ERROR' THEN 1 ELSE 0 END) AS errors,
+                   SUM(CASE WHEN level = 'WARNING' THEN 1 ELSE 0 END) AS warnings,
+                   SUM(CASE WHEN level = 'INFO' THEN 1 ELSE 0 END) AS infos
+              FROM alerts
+             WHERE created_at >= ?
+             GROUP BY rule
+             ORDER BY total DESC, rule ASC
+            """,
+            (since_ms,),
+        )
+        return [
+            {
+                "rule": row["rule"],
+                "total": int(row["total"]),
+                "errors": int(row["errors"] or 0),
+                "warnings": int(row["warnings"] or 0),
+                "infos": int(row["infos"] or 0),
+            }
+            for row in rows
+        ]
+
     def ack_alert(self, alert_id: str, by: str, now_ms: int) -> bool:
         """标记已读。幂等：已确认的再调不覆盖首次确认时间与人。
 
@@ -1695,6 +1722,55 @@ class SQLiteStore:
             except sqlite3.Error as e:
                 self._conn.rollback()
                 raise StateError(f"sqlite purge failed: {e}") from e
+        return deleted
+
+    def purge_alerts(
+        self,
+        now_ms: int,
+        *,
+        error_days: int = 90,
+        warning_days: int = 30,
+        info_days: int = 7,
+    ) -> dict[str, int]:
+        """按级别删除过期告警（M9-12），返回各表删除行数。
+
+        级别天数 <= 0 表示该级别不自动清理；未知级别沿用 WARNING 的天数，
+        避免新增级别时被无声清掉。
+        """
+        day_ms = 86_400_000
+        plan = [
+            (
+                "ERROR",
+                now_ms - error_days * day_ms if error_days > 0 else None,
+                "level = 'ERROR'",
+            ),
+            # 未知级别与 WARNING 同档，避免新增规则时被无声清掉
+            (
+                "WARNING",
+                now_ms - warning_days * day_ms if warning_days > 0 else None,
+                "level NOT IN ('ERROR', 'INFO')",
+            ),
+            (
+                "INFO",
+                now_ms - info_days * day_ms if info_days > 0 else None,
+                "level = 'INFO'",
+            ),
+        ]
+        deleted: dict[str, int] = {}
+        with self._lock:
+            try:
+                for level, cutoff, condition in plan:
+                    if cutoff is None:
+                        deleted[level] = 0
+                        continue
+                    deleted[level] = self._conn.execute(
+                        f"DELETE FROM alerts WHERE created_at < ? AND {condition}",
+                        (cutoff,),
+                    ).rowcount
+                self._conn.commit()
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                raise StateError(f"sqlite alert purge failed: {e}") from e
         return deleted
 
     # ------------------------------------------------------------------

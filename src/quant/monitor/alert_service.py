@@ -25,6 +25,9 @@ from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("monitor.alerts")
 
+#: 全局静音在 `alert_silences.rule` 里的占位值（M9-10）
+GLOBAL_SILENCE_RULE = "*"
+
 
 def fingerprint(rule: str, message: str) -> str:
     """规则 + 消息的内容指纹，用于同类事件归并。"""
@@ -152,7 +155,12 @@ class AlertService:
         reason: str,
         by: str,
     ) -> str:
-        """创建静音记录，返回 silence_id。"""
+        """创建静音记录，返回 silence_id。
+
+        `rule` 为空表示全局临时静音（M9-10）：任意规则、任意品种都命中，
+        存储上用一个不会与真实规则名冲突的 `*` 占位。
+        """
+        rule = rule.strip() or GLOBAL_SILENCE_RULE
         now = int(time.time() * 1000)
         silence_id = hashlib.sha1(
             f"{rule}|{inst_id or '-'}|{now}".encode()
@@ -206,9 +214,9 @@ class AlertService:
     def _match_silence(
         self, rule: str, inst_id: str | None, now_ms: int
     ) -> dict | None:
-        """找到命中的静音：同规则，且静音不限品种或品种一致。"""
+        """找到命中的静音：规则相同（或全局静音），且静音不限品种或品种一致。"""
         for silence in self.active_silences(now_ms):
-            if silence["rule"] != rule:
+            if silence["rule"] not in (GLOBAL_SILENCE_RULE, rule):
                 continue
             hit_inst = silence.get("inst_id")
             if hit_inst and hit_inst != inst_id:
@@ -217,4 +225,10 @@ class AlertService:
         return None
 
 
-__all__ = ["AlertEvent", "AlertService", "build_alert_id", "fingerprint"]
+__all__ = [
+    "AlertEvent",
+    "AlertService",
+    "GLOBAL_SILENCE_RULE",
+    "build_alert_id",
+    "fingerprint",
+]

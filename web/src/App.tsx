@@ -16,6 +16,7 @@ import {
   fetchProcesses,
   fetchFreshness,
   fetchTimeline,
+  fetchAlertStats,
   fetchReports,
   fetchRiskLimits,
   fetchRiskOverrides,
@@ -48,7 +49,9 @@ import {
   updateBinding,
   updateStrategyParams,
   type AlertRow,
+  type AlertRange,
   type AlertSilence,
+  type AlertStatsResponse,
   type BacktestCompareResponse,
   type BacktestEquityPoint,
   type BacktestRun,
@@ -100,6 +103,12 @@ const EQUITY_RANGES = [
   { hours: 168, label: "7d" },
   { hours: 720, label: "30d" },
 ];
+// M9-14 告警趋势的时间范围
+const ALERT_TREND_DAYS = [
+  { days: 7, label: "7 天" },
+  { days: 30, label: "30 天" },
+];
+
 const METRIC_ORDER = [
   "total_return",
   "max_drawdown",
@@ -291,6 +300,14 @@ export default function App() {
   // M1-6 今日事件流：筛选变化立即重拉，其余时间跟行情同频
   const [timeline, setTimeline] = useState<TimelineResponse | null>(null);
   const [timelineKinds, setTimelineKinds] = useState<string[]>([]);
+  // M9-5 告警时间区间（ms）；null 表示不限
+  const [alertRange, setAlertRange] = useState<AlertRange>({
+    since: null,
+    until: null,
+  });
+  // M9-14 告警趋势变化慢，单独低频拉取
+  const [alertTrend, setAlertTrend] = useState<AlertStatsResponse | null>(null);
+  const [alertTrendDays, setAlertTrendDays] = useState(7);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -302,18 +319,21 @@ export default function App() {
     }
   }, []);
 
-  const load = useCallback(async (signal: AbortSignal) => {
-    try {
-      const bundle = await fetchAll(signal);
-      setData(bundle);
-      setError(null);
-      setUpdatedAt(Date.now());
-      setPulse((n) => n + 1);
-    } catch (err) {
-      if ((err as Error).name === "AbortError") return;
-      setError((err as Error).message);
-    }
-  }, []);
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      try {
+        const bundle = await fetchAll(signal, alertRange);
+        setData(bundle);
+        setError(null);
+        setUpdatedAt(Date.now());
+        setPulse((n) => n + 1);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      }
+    },
+    [alertRange],
+  );
 
   // 告警已读/静音是写操作，成功后立刻重取，不等下一轮轮询
   const refresh = useCallback(async () => {
@@ -454,6 +474,25 @@ export default function App() {
     };
   }, [timelineKinds]);
 
+  // M9-14 告警趋势：切换 7/30 天立即重拉，其余时间 60s 一轮
+  useEffect(() => {
+    const controller = new AbortController();
+    const pull = () => {
+      fetchAlertStats(controller.signal, alertTrendDays)
+        .then(setAlertTrend)
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setAlertTrend(null);
+        });
+    };
+    pull();
+    const id = window.setInterval(pull, 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(id);
+    };
+  }, [alertTrendDays]);
+
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
   const orders = data?.orders.orders ?? [];
@@ -473,8 +512,9 @@ export default function App() {
         ...(quality?.degraded ?? []),
         ...(equity?.degraded ?? []),
         ...(timeline?.degraded ?? []),
+        ...(alertTrend?.degraded ?? []),
       ]),
-    [overview, data, risk, equity, reports, quality, timeline],
+    [overview, data, risk, equity, reports, quality, timeline, alertTrend],
   );
   const alertStats = useMemo(() => {
     const byLevel: Record<string, number> = {};
@@ -780,6 +820,32 @@ export default function App() {
           )}
         </section>
 
+        <section className="card alert-trend reveal" style={{ animationDelay: "116ms" }}>
+          <div className="card-head">
+            <h2>告警趋势</h2>
+            <span className="card-note">
+              {alertTrend
+                ? `近 ${alertTrend.days} 天 · ${alertTrend.total} 条`
+                : "接口不可用"}
+            </span>
+            <div className="chart-tools">
+              <div className="seg" role="group" aria-label="告警趋势时间范围">
+                {ALERT_TREND_DAYS.map((item) => (
+                  <button
+                    key={item.days}
+                    type="button"
+                    className={`seg-btn ${alertTrendDays === item.days ? "seg-on" : ""}`}
+                    onClick={() => setAlertTrendDays(item.days)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <AlertTrendPanel data={alertTrend} />
+        </section>
+
         <section className="card timeline reveal" style={{ animationDelay: "118ms" }}>
           <div className="card-head">
             <h2>今日事件流</h2>
@@ -899,6 +965,9 @@ export default function App() {
           <AlertPanel
             alerts={alerts}
             silences={data?.alerts.silences ?? []}
+            range={alertRange}
+            onRange={setAlertRange}
+            disabledRules={data?.alerts.disabled_rules ?? []}
             onChanged={refresh}
           />
         </section>
@@ -3994,6 +4063,45 @@ function DeadLettersPanel() {
   );
 }
 
+/** M9-14 告警趋势：各规则触发次数，条形按级别拆色。 */
+function AlertTrendPanel({ data }: { data: AlertStatsResponse | null }) {
+  if (!data) {
+    return <div className="empty">/api/alerts/stats 不可用，趋势暂时读不到</div>;
+  }
+  if (data.rules.length === 0) {
+    return <div className="empty">区间内没有告警</div>;
+  }
+  // 条长按最大值归一，避免一条 300 次的规则把其余规则压成一条线
+  const max = Math.max(...data.rules.map((item) => item.total), 1);
+  return (
+    <ul className="trend-list">
+      {data.rules.map((item) => (
+        <li key={item.rule} className="trend-row">
+          <span className="trend-name mono">{item.rule}</span>
+          <span className="trend-bar">
+            <span
+              className="trend-fill trend-bad"
+              style={{ width: `${(item.errors / max) * 100}%` }}
+            />
+            <span
+              className="trend-fill trend-warn"
+              style={{ width: `${(item.warnings / max) * 100}%` }}
+            />
+            <span
+              className="trend-fill trend-ok"
+              style={{ width: `${(item.infos / max) * 100}%` }}
+            />
+          </span>
+          <span className="trend-count mono">{item.total}</span>
+          <span className="trend-split mono dim">
+            {item.errors}E / {item.warnings}W / {item.infos}I
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** 按规则聚合的告警面板：级别筛选 + 规则筛选 + 展开查看明细。 */
 /** 告警时间：SQLite 权威行用 created_at，Redis 实时缓存行用 ts。 */
 function alertTs(alert: AlertRow): number {
@@ -4007,13 +4115,33 @@ const ALERT_STATE_TEXT: Record<string, string> = {
   silenced: "静音中",
 };
 
+/** 静音表单里代表「全局」的选项值；提交时转成空 rule（M9-10）。 */
+const SILENCE_GLOBAL = "__global__";
+
+/** ms → `YYYY-MM-DDTHH:mm`（本地时区），供 datetime-local 回显。 */
+function toLocalInput(ts: number | null): string {
+  if (ts === null) return "";
+  const date = new Date(ts);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
 function AlertPanel({
   alerts,
   silences,
+  range,
+  onRange,
+  disabledRules,
   onChanged,
 }: {
   alerts: AlertRow[];
   silences: AlertSilence[];
+  range: AlertRange;
+  onRange: (next: AlertRange) => void;
+  disabledRules: string[];
   onChanged: () => Promise<void>;
 }) {
   const [level, setLevel] = useState("ALL");
@@ -4114,6 +4242,7 @@ function AlertPanel({
       setMsg({ bad: true, text: "请先选择要静音的规则" });
       return;
     }
+    const global = silenceRule === SILENCE_GLOBAL;
     const hours = Number(silenceHours);
     if (!Number.isFinite(hours) || hours <= 0) {
       setMsg({ bad: true, text: "静音时长必须是正数小时" });
@@ -4122,8 +4251,9 @@ function AlertPanel({
     void run("silence", async () => {
       await silenceAlerts(
         {
-          rule: silenceRule,
-          inst_id: silenceInst.trim() || null,
+          // 全局静音传空 rule：任意规则、任意品种都命中（M9-10）
+          rule: global ? "" : silenceRule,
+          inst_id: global ? null : silenceInst.trim() || null,
           hours,
           reason: silenceReason.trim(),
         },
@@ -4181,7 +4311,54 @@ function AlertPanel({
           <option value="acked">已读</option>
           <option value="resolved">已解决</option>
         </select>
+        <label className="alert-range">
+          <span className="dim">从</span>
+          <input
+            type="datetime-local"
+            className="text-input"
+            value={toLocalInput(range.since)}
+            onChange={(event) =>
+              onRange({
+                ...range,
+                since: event.target.value
+                  ? new Date(event.target.value).getTime()
+                  : null,
+              })
+            }
+            aria-label="告警起始时间"
+          />
+          <span className="dim">到</span>
+          <input
+            type="datetime-local"
+            className="text-input"
+            value={toLocalInput(range.until)}
+            onChange={(event) =>
+              onRange({
+                ...range,
+                until: event.target.value
+                  ? new Date(event.target.value).getTime()
+                  : null,
+              })
+            }
+            aria-label="告警结束时间"
+          />
+          {(range.since !== null || range.until !== null) && (
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => onRange({ since: null, until: null })}
+            >
+              清除区间
+            </button>
+          )}
+        </label>
       </div>
+
+      {disabledRules.length > 0 && (
+        <p className="alert-disabled">
+          规则级启停：{disabledRules.join(" / ")} 已停用，不会产生新告警
+        </p>
+      )}
 
       {msg && (
         <p className={`form-msg ${msg.bad ? "form-bad" : "form-good"}`}>
@@ -4202,8 +4379,12 @@ function AlertPanel({
           <ul className="silence-list">
             {silences.map((item) => (
               <li key={item.silence_id} className="silence-item">
-                <span className="mono strong">{item.rule}</span>
-                <span className="mono">{item.inst_id ?? "全部品种"}</span>
+                <span className="mono strong">
+                  {item.rule === "*" ? "全局（全部规则）" : item.rule}
+                </span>
+                <span className="mono">
+                  {item.rule === "*" ? "全部品种" : item.inst_id ?? "全部品种"}
+                </span>
                 <span className="mono">至 {clock(item.until_ts)}</span>
                 {item.reason && <span className="silence-reason">{item.reason}</span>}
                 <button
@@ -4226,6 +4407,7 @@ function AlertPanel({
             aria-label="选择要静音的规则"
           >
             <option value="">选择规则…</option>
+            <option value={SILENCE_GLOBAL}>全部规则（全局）</option>
             {ruleOptions.map(([name]) => (
               <option key={name} value={name}>
                 {name}

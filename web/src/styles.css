@@ -2716,6 +2716,94 @@ tbody tr:hover {
   gap: 4px;
 }
 
+/* M9-5 告警时间区间：两个 datetime-local 同时区回显 */
+.alert-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.alert-range .text-input {
+  width: 168px;
+}
+
+/* M9-2 规则级启停提示 */
+.alert-disabled {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--warn);
+}
+
+/* M9-14 告警趋势 */
+.alert-trend {
+  grid-column: span 12;
+}
+
+.trend-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+}
+
+.trend-name {
+  flex: none;
+  width: 168px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trend-bar {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  overflow: hidden;
+  background: rgba(226, 240, 228, 0.05);
+}
+
+.trend-fill {
+  display: block;
+  height: 100%;
+}
+
+.trend-bad {
+  background: var(--bad);
+}
+
+.trend-warn {
+  background: var(--warn);
+}
+
+.trend-ok {
+  background: var(--dim);
+}
+
+.trend-count {
+  flex: none;
+  width: 36px;
+  text-align: right;
+}
+
+.trend-split {
+  flex: none;
+  width: 96px;
+  text-align: right;
+  font-size: 9px;
+}
+
 .alert-filter {
   display: flex;
   align-items: center;

@@ -1403,7 +1403,41 @@ class DashboardService:
             "total": total,
             "alerts": rows,
             "silences": silences,
+            # 规则级启停（M9-2）：让页面能明示哪些规则被有意关掉，
+            # 而不是让人以为「这条规则从不触发」
+            "disabled_rules": list(self._settings.monitor.disabled_rules),
             "degraded": degraded,
+        }
+
+    async def alert_stats(self, days: int = 7) -> dict[str, object]:
+        """近 N 天各规则触发次数（M9-14）。
+
+        `days` 只接受 1~90，超出按边界收口——前端传错不该让整张卡报错。
+        """
+        days = max(1, min(int(days), 90))
+        now = int(time.time() * 1000)
+        since = now - days * 86_400_000
+        try:
+            rules = await asyncio.to_thread(
+                self._store.alert_rule_counts, since
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"alert stats read failed: {e}")
+            return {
+                "ts": now,
+                "days": days,
+                "since": since,
+                "total": 0,
+                "rules": [],
+                "degraded": ["sqlite"],
+            }
+        return {
+            "ts": now,
+            "days": days,
+            "since": since,
+            "total": sum(int(item["total"]) for item in rules),
+            "rules": rules,
+            "degraded": [],
         }
 
     async def ack_alert(self, alert_id: str, by: str) -> dict[str, object]:

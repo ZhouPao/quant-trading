@@ -145,6 +145,10 @@ class Monitor:
     async def run(self) -> None:
         """主循环，直到 stop()。"""
         self._running = True
+        if self._settings.disabled_rules:
+            log.info(
+                f"规则级启停：{'/'.join(self._settings.disabled_rules)} 已停用（M9-2）"
+            )
         while self._running:
             try:
                 await self.run_once()
@@ -641,6 +645,10 @@ class Monitor:
         alerts.extend(self._check_api_error_rate(ts))
         alerts.extend(await self._check_kill_switch(ts))
         alerts.extend(await self._check_quality(ts))
+        if self._settings.disabled_rules:
+            # 规则级启停（M9-2）：整条规则不产生告警，不参与恢复跃迁
+            disabled = set(self._settings.disabled_rules)
+            alerts = [a for a in alerts if a.rule not in disabled]
         return alerts
 
     def _with_recovery(self, alerts: list[Alert], ts: int) -> list[Alert]:

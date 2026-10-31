@@ -208,6 +208,60 @@ class TestPurgeState:
             store.close()
 
 
+class TestPurgeAlerts:
+    """M9-12：告警按级别分档清理，且清理口径独立于 storage.retention_days。"""
+
+    def test_purges_by_level(self, tmp_path) -> None:
+        store = SQLiteStore(tmp_path / "quant.db")
+        day = 86_400_000
+        try:
+            for level, age_days in (
+                ("ERROR", 100),   # 超过 90 天 → 删
+                ("ERROR", 80),    # 未超 90 天 → 留
+                ("WARNING", 40),  # 超过 30 天 → 删
+                ("WARNING", 10),  # 留
+                ("INFO", 10),     # 超过 7 天 → 删
+                ("INFO", 1),      # 留
+            ):
+                store.insert_alert(
+                    f"{level}-{age_days}",
+                    "margin_ratio",
+                    level,
+                    "x",
+                    "fp",
+                    created_at=NOW - age_days * day,
+                )
+
+            deleted = store.purge_alerts(NOW)
+
+            assert deleted == {"ERROR": 1, "WARNING": 1, "INFO": 1}
+            rows, total = store.list_alerts(10)
+            assert total == 3
+            assert {r["alert_id"] for r in rows} == {
+                "ERROR-80",
+                "WARNING-10",
+                "INFO-1",
+            }
+        finally:
+            store.close()
+
+    def test_zero_days_keeps_level(self, tmp_path) -> None:
+        """0 表示该级别不自动清理，避免误配把历史一次性清空。"""
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            store.insert_alert(
+                "old-info", "dead_letter", "INFO", "x", "fp",
+                created_at=NOW - 365 * 86_400_000,
+            )
+
+            deleted = store.purge_alerts(NOW, info_days=0)
+
+            assert deleted["INFO"] == 0
+            assert store.list_alerts(10)[1] == 1
+        finally:
+            store.close()
+
+
 class TestRetentionPurger:
     def _env(self, tmp_path, **storage):
         settings = _settings(tmp_path, **storage)
@@ -275,6 +329,10 @@ class TestRetentionPurger:
             [_bar(NOW - 90 * DAY), _bar(NOW - HOUR)]
         )
         store.save_signal(_signal("old", NOW - 90 * DAY), "filled")
+        store.insert_alert(
+            "old-alert", "queue_backlog", "INFO", "x", "fp",
+            created_at=NOW - 30 * DAY,
+        )
         reports = settings.report.out_dir
         reports.mkdir(parents=True)
         stale = reports / "old.csv"
@@ -290,6 +348,7 @@ class TestRetentionPurger:
         assert result.bars_deleted == 1
         assert result.signals_deleted == 1
         assert result.report_files_removed == 1
+        assert result.alerts_deleted == 1
         assert "bars=1" in result.summary()
 
 

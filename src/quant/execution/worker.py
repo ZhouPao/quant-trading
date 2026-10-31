@@ -21,6 +21,7 @@ from quant.execution.kill_switch import KillSwitch
 from quant.execution.sizing import InstrumentSpec, PositionSizer, SizingResult
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
+from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker, RiskDecision
 from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
@@ -69,6 +70,7 @@ class Worker:
         spec_provider: (
             Callable[[str], Awaitable[InstrumentSpec | None]] | None
         ) = None,
+        alert_service: AlertService | None = None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -98,6 +100,8 @@ class Worker:
         self.preflight = preflight
         # 服务端仓位计算（M8-14）：信号不带 qty 时按权益比例补量。
         # None 表示关闭（server_side_sizing=false），此时无 qty 的信号直接拒单。
+        # 业务事件告警（M9-11）：风控硬停止不等 monitor 轮询，当场落库并发邮件
+        self.alert_service = alert_service
         self.sizer = sizer
         self.spec_provider = spec_provider
         self._running = False
@@ -294,6 +298,7 @@ class Worker:
                     f"kill-switch auto-enabled by risk limit: "
                     f"{decision.reason}"
                 )
+                await self._publish_halt(signal, decision)
             await self.queue.remove_inflight(signal)
             return
 
@@ -357,6 +362,31 @@ class Worker:
             f"signal executed id={signal.signal_id} "
             f"order={result.order.order_id} status={result.order.status}"
         )
+
+    async def _publish_halt(self, signal: Signal, decision: RiskDecision) -> None:
+        """风控硬停止进告警（M9-11）。
+
+        告警失败不能反过来影响拒单结果，故吞掉异常只记日志；同一信号的
+        幂等由 worker 入口的状态检查保证，不会重复发。
+        """
+        if self.alert_service is None:
+            return
+        try:
+            await self.alert_service.publish(
+                AlertEvent(
+                    rule="risk_halt",
+                    level="ERROR",
+                    message=(
+                        f"风控硬停止：{decision.reason} "
+                        f"signal={signal.signal_id}"
+                    ),
+                    ts=int(time.time() * 1000),
+                    inst_id=signal.inst_id,
+                    strategy_id=signal.strategy_id,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"publish risk_halt alert failed: {e}")
 
     async def _size_position(
         self,

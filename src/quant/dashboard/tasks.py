@@ -35,6 +35,7 @@ from quant.dashboard.backtest import (
 )
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
+from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("dashboard.tasks")
@@ -73,10 +74,13 @@ class TaskRunner:
         store: SQLiteStore,
         settings: Settings,
         service: BacktestService,
+        alerts: AlertService | None = None,
     ) -> None:
         self._store = store
         self._settings = settings
         self._service = service
+        # 回测失败进告警（M9-11）；None 表示调用方没接告警（单测常用）
+        self._alerts = alerts
         self._queue: asyncio.Queue[tuple[str, BacktestRequest]] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._canceled: set[str] = set()
@@ -339,6 +343,7 @@ class TaskRunner:
                 self._store.update_run_status(
                     run_id, FAILED, finished_at=_now_ms(), error=str(e)
                 )
+                await self._notify_failure(run_id, str(e))
             finally:
                 self._queue.task_done()
 
@@ -361,6 +366,7 @@ class TaskRunner:
             self._store.update_run_status(
                 run_id, FAILED, finished_at=_now_ms(), error=str(e)
             )
+            await self._notify_failure(run_id, str(e))
             return
 
         if run_id in self._canceled:
@@ -375,9 +381,11 @@ class TaskRunner:
             )
         except OSError as e:
             # 磁盘写不进去时宁可整单 failed，也不要落一份半截产物
+            error = f"artifact write failed: {e}"
             self._store.update_run_status(
-                run_id, FAILED, finished_at=now, error=f"artifact write failed: {e}"
+                run_id, FAILED, finished_at=now, error=error
             )
+            await self._notify_failure(run_id, error)
             return
 
         self._store.save_backtest_metrics(run_id, _metric_row(payload))
@@ -386,6 +394,29 @@ class TaskRunner:
                 run_id, kind, str(path), _size(path), now
             )
         self._store.update_run_status(run_id, DONE, finished_at=_now_ms())
+
+    async def _notify_failure(self, run_id: str, error: str) -> None:
+        """回测失败进告警（M9-11）。
+
+        业务 ID 是 run_id：同一个任务只在失败分支里发布一次，不重复告警；
+        告警链路本身出错不能影响任务状态落库，故整体吞异常。
+        """
+        if self._alerts is None:
+            return
+        try:
+            row = await asyncio.to_thread(self._store.get_backtest_run, run_id)
+            await self._alerts.publish(
+                AlertEvent(
+                    rule="backtest_failed",
+                    level="ERROR",
+                    message=f"回测任务失败 {run_id}: {error[:200]}",
+                    ts=_now_ms(),
+                    inst_id=(row or {}).get("inst_id"),
+                    strategy_id=(row or {}).get("strategy_id"),
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"publish backtest_failed alert failed: {e}")
 
     def _write_artifacts(
         self,

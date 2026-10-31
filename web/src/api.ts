@@ -242,6 +242,31 @@ export type AlertsResponse = {
   total: number | null;
   alerts: AlertRow[];
   silences: AlertSilence[];
+  /** 规则级启停（M9-2）：被配置有意停用的规则 */
+  disabled_rules: string[];
+  degraded: string[];
+};
+
+export type AlertRange = {
+  since: number | null;
+  until: number | null;
+};
+
+export type AlertStatsRule = {
+  rule: string;
+  total: number;
+  errors: number;
+  warnings: number;
+  infos: number;
+};
+
+export type AlertStatsResponse = {
+  ts: number;
+  days: number;
+  since: number;
+  /** 区间内告警总数（各规则之和） */
+  total: number;
+  rules: AlertStatsRule[];
   degraded: string[];
 };
 
@@ -723,7 +748,14 @@ export type QualityDetailResponse = {
   degraded: string[];
 };
 
-export async function fetchAll(signal: AbortSignal) {
+export async function fetchAll(
+  signal: AbortSignal,
+  alertRange: AlertRange = { since: null, until: null },
+) {
+  const alertsQuery = new URLSearchParams({ limit: "200" });
+  // M9-5 时间区间筛选走服务端：前端只截 200 条时按时间过滤会漏掉区间内的行
+  if (alertRange.since !== null) alertsQuery.set("since", String(alertRange.since));
+  if (alertRange.until !== null) alertsQuery.set("until", String(alertRange.until));
   const [overview, positions, orders, fills, pnl, alerts, engine] =
     await Promise.all([
       getJson<Overview>("/api/overview", signal),
@@ -731,10 +763,23 @@ export async function fetchAll(signal: AbortSignal) {
       getJson<OrdersResponse>("/api/orders?limit=30", signal),
       getJson<FillsResponse>("/api/fills?limit=30", signal),
       getJson<PnlResponse>("/api/pnl", signal),
-      getJson<AlertsResponse>("/api/alerts?limit=200", signal),
+      getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal),
       getJson<EngineResponse>("/api/engine", signal),
     ]);
   return { overview, positions, orders, fills, pnl, alerts, engine };
+}
+
+/** M9-14 告警趋势：近 N 天各规则触发次数（days 支持 7/30）。 */
+export async function fetchAlertStats(signal: AbortSignal, days = 7) {
+  const data = await getJson<AlertStatsResponse>(
+    `/api/alerts/stats?days=${days}`,
+    signal,
+  );
+  return {
+    ...data,
+    rules: data.rules ?? [],
+    degraded: data.degraded ?? [],
+  };
 }
 
 /** 风控限额单独拉取：后端尚未部署该接口时不能拖垮整个页面。 */
@@ -934,7 +979,7 @@ export async function ackAlert(alertId: string, token = "") {
   );
 }
 
-/** 创建静音：inst_id 为空表示该规则下全部品种。 */
+/** 创建静音：`rule` 传空串表示全局临时静音（M9-10）。 */
 export async function silenceAlerts(
   input: { rule: string; inst_id?: string | null; hours: number; reason: string },
   token = "",

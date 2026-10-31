@@ -240,6 +240,25 @@ async def test_queue_backlog(redis) -> None:
 
 
 @pytest.mark.asyncio
+async def test_disabled_rule_never_fires(redis) -> None:
+    """M9-2：规则级启停——停用的规则整条不产生告警。"""
+    monitor = _monitor(
+        redis,
+        _balance("10000"),
+        queue_backlog_threshold=50,
+        disabled_rules=["worker_heartbeat", "queue_backlog"],
+    )
+    for i in range(60):
+        await redis.lpush("quant:signals", f"sig-{i}")
+
+    alerts = await monitor.run_once()
+
+    assert not any(
+        a.rule in {"worker_heartbeat", "queue_backlog"} for a in alerts
+    )
+
+
+@pytest.mark.asyncio
 async def test_dead_letter_new(redis) -> None:
     import time
 

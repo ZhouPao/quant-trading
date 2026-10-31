@@ -292,6 +292,13 @@ class MonitorSettings(BaseModel):
     dashboard_alert_cooldown_seconds: int = 600
     # 告警落库总开关；置 false 退回「只写 Redis」的旧行为（MS4-A §13 回滚用）
     alerts_persist: bool = True
+    # 规则级启停（M9-2）：列出的规则整条停用，既不告警也不发邮件。
+    # 静音（M9-7/M9-10）是临时压噪，这里是「这条规则我不要」，用途不同。
+    disabled_rules: list[str] = Field(default_factory=list)
+    # 告警保留分档（M9-12）：按级别给不同天数，0 表示该级别不自动清理
+    alert_retention_error_days: int = 90
+    alert_retention_warning_days: int = 30
+    alert_retention_info_days: int = 7
     # worker 每轮发布生效风控参数（键后缀 :{strategy}），看板只读
     risk_limits_key: str = "quant:risk:limits"
     risk_limits_ttl_seconds: int = 300

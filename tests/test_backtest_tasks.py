@@ -411,6 +411,40 @@ class TestRecover:
         assert store.get_backtest_run("r3")["status"] == DONE
 
 
+class TestFailureAlert:
+    async def test_artifact_error_publishes_alert(self, env, monkeypatch) -> None:
+        """M9-11：回测失败进告警，带 run_id 对应的策略与品种。"""
+        store, settings, service = env
+        alerts = _RecordingAlerts()
+        tasks = TaskRunner(store, settings, service, alerts=alerts)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(tasks, "_write_artifacts", boom)
+        run_id = await tasks.submit(_request())
+
+        detail = await _drain(tasks, run_id)
+        await tasks.close()
+
+        assert detail["status"] == FAILED
+        assert [event.rule for event in alerts.events] == ["backtest_failed"]
+        assert alerts.events[0].level == "ERROR"
+        assert alerts.events[0].inst_id == INST
+        assert alerts.events[0].strategy_id == "sma_cross"
+
+
+class _RecordingAlerts:
+    """记录发布出去的告警，不落库也不发信。"""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def publish(self, event) -> str:
+        self.events.append(event)
+        return f"id-{len(self.events)}"
+
+
 class _SlowService:
     """跑到取消为止的假服务，用来验证 running 状态下的取消。"""
 

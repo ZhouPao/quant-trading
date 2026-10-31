@@ -964,6 +964,61 @@ class TestAlertsApi:
         assert revoked.json()["revoked"] is True
         assert store.list_active_silences(int(time.time() * 1000)) == []
 
+    async def test_global_silence_via_api(self, env, tmp_path) -> None:
+        """M9-10：不传 rule 即全局临时静音，列表里以 `*` 呈现。"""
+        service, _store, _redis, _settings = env
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            created = await client.post(
+                "/api/alerts/silence",
+                json={"hours": 1, "reason": "全局维护"},
+                headers=self.LOCAL,
+            )
+            listed = await client.get("/api/alerts?limit=5")
+
+        assert created.status_code == 200
+        assert listed.json()["silences"][0]["rule"] == "*"
+
+    async def test_alert_stats_endpoint(self, env, tmp_path) -> None:
+        """M9-14：近 N 天各规则计数，按总数降序。"""
+        service, store, _redis, _settings = env
+        for i in range(3):
+            store.insert_alert(
+                f"a-{i}", "margin_ratio", "ERROR", "m", "fp",
+                created_at=NOW - i * 1000,
+            )
+        store.insert_alert(
+            "b-1", "queue_backlog", "WARNING", "q", "fp", created_at=NOW
+        )
+        store.insert_alert(
+            "old", "margin_ratio", "ERROR", "old", "fp",
+            created_at=NOW - 40 * 86_400_000,
+        )
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            week = await client.get("/api/alerts/stats?days=7")
+            month = await client.get("/api/alerts/stats?days=30")
+            quarter = await client.get("/api/alerts/stats?days=90")
+
+        body = week.json()
+        assert body["days"] == 7
+        assert body["total"] == 4
+        assert body["rules"][0] == {
+            "rule": "margin_ratio",
+            "total": 3,
+            "errors": 3,
+            "warnings": 0,
+            "infos": 0,
+        }
+        assert month.json()["total"] == 4
+        assert quarter.json()["total"] == 5
+
     async def test_processes_endpoint(self, env, tmp_path) -> None:
         service, _store, redis, _settings = env
         await redis.set(

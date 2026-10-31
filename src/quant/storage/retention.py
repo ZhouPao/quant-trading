@@ -3,7 +3,8 @@
 清理范围：
 - K线 parquet：删除早于 cut-off 的行；整年文件清空后直接删文件
 - SQLite：signals / orders / fills / equity_snapshots 早于 cut-off 的记录
-  （权益快照保留历史峰值那一行，见 `SQLiteStore.purge_before`）
+  （权益快照保留历史峰值那一行，见 `SQLiteStore.purge_before`）；告警按
+  级别分档清理（ERROR 90 天 / WARNING 30 天 / INFO 7 天，见 M9-12）
 - 日报 CSV：`report.out_dir` 下修改时间早于 cut-off 的文件
 
 调度：monitor 每轮调用 `RetentionPurger.maybe_run`，本地时间过
@@ -48,6 +49,7 @@ class PurgeResult:
     fills_deleted: int = 0
     equity_deleted: int = 0
     report_files_removed: int = 0
+    alerts_deleted: int = 0
 
     def summary(self) -> str:
         """单行摘要，便于写日志。"""
@@ -55,7 +57,7 @@ class PurgeResult:
             f"bars={self.bars_deleted} bar_files={self.bar_files_removed} "
             f"signals={self.signals_deleted} orders={self.orders_deleted} "
             f"fills={self.fills_deleted} equity={self.equity_deleted} "
-            f"reports={self.report_files_removed}"
+            f"reports={self.report_files_removed} alerts={self.alerts_deleted}"
         )
 
 
@@ -154,6 +156,16 @@ class RetentionPurger:
         bars, bar_files = purge_bars(self._settings.storage.data_dir, cutoff)
         deleted = self._store.purge_before(cutoff)
         reports = purge_reports(self._settings.report.out_dir, cutoff)
+        # 告警按级别分档（M9-12）：ERROR 留得更久，INFO 恢复通知最短
+        monitor = self._settings.monitor
+        alerts = sum(
+            self._store.purge_alerts(
+                now_ms,
+                error_days=monitor.alert_retention_error_days,
+                warning_days=monitor.alert_retention_warning_days,
+                info_days=monitor.alert_retention_info_days,
+            ).values()
+        )
         return PurgeResult(
             cutoff_ts=cutoff,
             bars_deleted=bars,
@@ -163,6 +175,7 @@ class RetentionPurger:
             fills_deleted=deleted.get("fills", 0),
             equity_deleted=deleted.get("equity_snapshots", 0),
             report_files_removed=reports,
+            alerts_deleted=alerts,
         )
 
     # internal

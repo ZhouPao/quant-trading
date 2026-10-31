@@ -30,6 +30,8 @@ from quant.execution.sizing import InstrumentSpec, PositionSizer
 from quant.execution.worker import Worker
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger, setup_logger
+from quant.monitor.alert_service import AlertService
+from quant.monitor.alerter import EmailAlerter
 from quant.okx.client import OKXClient
 from quant.okx.ws_client import WSClient
 from quant.queue.signal_queue import SignalQueue
@@ -293,6 +295,9 @@ async def _run(args, settings: Settings) -> int:
             preflight=_build_preflight(args, settings, public_client),
             sizer=sizer,
             spec_provider=spec_provider,
+            alert_service=AlertService(
+                store, redis, EmailAlerter(settings.smtp), settings.monitor
+            ),
         )
 
         log.info(

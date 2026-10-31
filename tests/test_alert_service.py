@@ -160,6 +160,22 @@ class TestSilence:
         rows, _ = store.list_alerts(10)
         assert rows[0]["suppressed"] == 0
 
+    async def test_global_silence_suppresses_every_rule(self, env) -> None:
+        """M9-10：rule 为空表示全局临时静音，任意规则/品种都命中。"""
+        service, store, _redis, alerter, _settings = env
+        await service.silence("", inst_id=None, hours=1, reason="全局", by="owner")
+
+        assert service.active_silences(int(time.time() * 1000))[0]["rule"] == "*"
+
+        await service.publish(_event(rule="margin_ratio", ts=10))
+        await service.publish(
+            AlertEvent("queue_backlog", "ERROR", "堆积", 11, inst_id="ETH-USDT")
+        )
+
+        rows, _ = store.list_alerts(10)
+        assert [r["suppressed"] for r in rows] == [1, 1]
+        assert alerter.sent == []
+
     async def test_active_silences_excludes_expired_and_revoked(self, env) -> None:
         service, store, _redis, _alerter, _settings = env
         now = int(time.time() * 1000)
