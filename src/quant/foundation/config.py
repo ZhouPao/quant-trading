@@ -101,6 +101,7 @@ class BacktestSettings(BaseModel):
     window_size: int = 200
     task_workers: int = 1           # 回测任务消费者数（CPU 密集，默认串行）
     artifacts_dir: Path = Path("./data/backtests")
+    max_combos: int = 500           # 单次寻优的网格组合上限（CLI 与看板共用）
 
 
 class ParamsSettings(BaseModel):

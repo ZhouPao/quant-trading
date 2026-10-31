@@ -228,6 +228,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["optimize"].add_argument(
         "--top", type=int, default=10, help="输出前 N 组，默认 10"
     )
+    sub.choices["optimize"].add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="并行进程数，默认 1（串行）；>1 走进程池",
+    )
+    sub.choices["optimize"].add_argument(
+        "--max-combos",
+        type=int,
+        default=None,
+        help="组合数上限，默认取 config 里的 backtest.max_combos（500）",
+    )
 
     # walk-forward
     _add_backtest_args(sub, "walk-forward")

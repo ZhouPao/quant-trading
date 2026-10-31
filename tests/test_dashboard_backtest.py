@@ -243,8 +243,9 @@ class TestOptimize:
                 OptimizeRequest(**_request().model_dump(), grid="")
             )
 
-    async def test_rejects_too_many_combos(self, service, monkeypatch) -> None:
-        monkeypatch.setattr("quant.dashboard.backtest.MAX_COMBOS", 2)
+    async def test_rejects_too_many_combos(self, service) -> None:
+        # 上限来自 config，CLI 与看板共用同一个值
+        service._settings.backtest.max_combos = 2
         with pytest.raises(BacktestRequestError, match="组合过多"):
             await service.optimize(
                 OptimizeRequest(
@@ -252,6 +253,24 @@ class TestOptimize:
                     grid="fast_len=3,5;slow_len=20,30",
                 )
             )
+
+    async def test_parallel_matches_serial(self, service) -> None:
+        req = OptimizeRequest(
+            **_request().model_dump(),
+            grid="fast_len=3,5;slow_len=20,30",
+            metric="total_return",
+        )
+
+        serial = await service.optimize(req)
+        parallel = await service.optimize(req.model_copy(update={"n_jobs": 2}))
+
+        assert parallel["n_jobs"] == 2
+        assert [r["params"] for r in parallel["results"]] == [
+            r["params"] for r in serial["results"]
+        ]
+        assert [r["metrics"] for r in parallel["results"]] == [
+            r["metrics"] for r in serial["results"]
+        ]
 
     async def test_all_combos_invalid(self, service) -> None:
         with pytest.raises(BacktestRequestError, match="all 1 parameter"):

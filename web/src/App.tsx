@@ -1462,6 +1462,7 @@ function BacktestPanel() {
   const [grid, setGrid] = useState("fast_len=5,10,20;slow_len=20,50,80");
   const [metric, setMetric] = useState("sharpe");
   const [top, setTop] = useState("10");
+  const [jobs, setJobs] = useState("1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backtest, setBacktest] = useState<BacktestResponse | null>(null);
@@ -1580,6 +1581,7 @@ function BacktestPanel() {
             grid,
             metric,
             top: Number(top) || 10,
+            n_jobs: Math.min(Math.max(Number(jobs) || 1, 1), 8),
           }),
         );
       }
@@ -1702,6 +1704,16 @@ function BacktestPanel() {
               onChange={(e) => setTop(e.target.value)}
             />
           </label>
+          <label className="bt-field">
+            <span>并行进程</span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={jobs}
+              onChange={(e) => setJobs(e.target.value)}
+            />
+          </label>
         </div>
       )}
 
@@ -1712,7 +1724,7 @@ function BacktestPanel() {
         <span className="card-note">
           {mode === "backtest"
             ? "区间前仅预热：不成交、不计入指标"
-            : "网格组合上限 500 组，非法组合自动跳过"}
+            : "组合上限取配置 backtest.max_combos，非法组合自动跳过"}
         </span>
       </div>
 

@@ -467,6 +467,8 @@ class TestCliOptimize:
             grid="fast_len=3,5;slow_len=20",
             metric="sharpe",
             top=5,
+            n_jobs=1,
+            max_combos=None,
         )
         base.update(overrides)
         return SimpleNamespace(**base)
@@ -504,3 +506,24 @@ class TestCliOptimize:
         )
 
         assert code == 1
+
+    def test_combo_limit_returns_1(self, tmp_path) -> None:
+        config, cfg_dir = self._env(tmp_path)
+
+        code = optimize_main(
+            self._args(tmp_path, config, cfg_dir, max_combos=1)
+        )
+
+        assert code == 1
+
+    def test_parallel_runs(self, tmp_path) -> None:
+        """--n-jobs >1 走进程池，退出码与串行一致。"""
+        config, cfg_dir = self._env(tmp_path)
+
+        assert optimize_main(self._args(tmp_path, config, cfg_dir)) == 0
+        assert (
+            optimize_main(
+                self._args(tmp_path, config, cfg_dir, n_jobs=2)
+            )
+            == 0
+        )

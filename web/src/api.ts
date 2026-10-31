@@ -570,6 +570,8 @@ export type OptimizeBody = BacktestBody & {
   grid: string;
   metric: string;
   top: number;
+  // 并行进程数；>1 时后端走进程池
+  n_jobs?: number;
 };
 
 export async function fetchStrategies(signal: AbortSignal) {

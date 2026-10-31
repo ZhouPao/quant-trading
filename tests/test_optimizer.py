@@ -61,6 +61,8 @@ class _QtyStrategy(Strategy):
     def on_init(self, ctx) -> None:
         self.received_params = dict(ctx.params)
         self.qty = Decimal(str(ctx.params.get("qty", "1")))
+        if self.qty <= 0:
+            raise ValueError("qty must be positive")
 
     def on_bar(self, bar: Bar, ctx) -> Signal | None:
         if len(ctx.bars_window) == 1 and ctx.position.is_flat:
@@ -152,3 +154,66 @@ class TestGridOptimizer:
         metrics = results[0][1]
         assert "sharpe" in metrics
         assert "total_return" in metrics
+
+
+class TestProgress:
+    def test_serial_reports_every_combo(self) -> None:
+        seen: list[tuple[int, int]] = []
+
+        _optimizer({"qty": ["1", "2"]}).search(
+            _bars(), progress=lambda done, total: seen.append((done, total))
+        )
+
+        assert seen == [(1, 2), (2, 2)]
+
+    def test_progress_not_required(self) -> None:
+        assert _optimizer({"qty": ["1"]}).search(_bars(), progress=None)
+
+
+class TestParallel:
+    def _optimizer(self, grid: dict) -> GridOptimizer:
+        return GridOptimizer(
+            _factory,
+            grid,
+            initial_cash=Decimal("10000"),
+            matcher=Matcher(commission_rate=Decimal("0")),
+            base_params={"slow_len": 3},
+            strategy_cls=_QtyStrategy,
+        )
+
+    def test_requires_strategy_cls(self) -> None:
+        with pytest.raises(ValueError, match="strategy_cls"):
+            _optimizer({"qty": ["1", "2"]}).search(_bars(), n_jobs=2)
+
+    def test_matches_serial_result(self) -> None:
+        grid = {"qty": ["1", "2", "3"]}
+        serial = self._optimizer(grid).search(_bars(), metric="total_return")
+        parallel = self._optimizer(grid).search(
+            _bars(), metric="total_return", n_jobs=2
+        )
+
+        assert [p for p, _ in parallel] == [p for p, _ in serial]
+        assert [m["total_return"] for _, m in parallel] == [
+            m["total_return"] for _, m in serial
+        ]
+
+    def test_skips_invalid_combos(self) -> None:
+        """子进程里的 ValueError 也要变成「跳过」，不能让整批失败。"""
+        grid = {"qty": ["1", "0", "2"]}
+        serial = self._optimizer(grid).search(_bars(), metric="total_return")
+        parallel = self._optimizer(grid).search(
+            _bars(), metric="total_return", n_jobs=2
+        )
+
+        # 按指标降序，qty=2 收益更高；这里只关心「0 被跳过」
+        assert sorted(p["qty"] for p, _ in serial) == ["1", "2"]
+        assert sorted(p["qty"] for p, _ in parallel) == ["1", "2"]
+
+    def test_reports_progress(self) -> None:
+        seen: list[int] = []
+
+        self._optimizer({"qty": ["1", "2", "3"]}).search(
+            _bars(), n_jobs=2, progress=lambda done, _total: seen.append(done)
+        )
+
+        assert sorted(seen) == [1, 2, 3]

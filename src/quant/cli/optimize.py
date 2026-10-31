@@ -68,20 +68,36 @@ def main(args) -> int:
         window_size=settings.backtest.window_size,
         warmup_bars=warmup,
         base_params={**config_params, **fixed_params},
+        strategy_cls=strategy_cls,
     )
 
     combos = 1
     for values in grid.values():
         combos *= len(values)
 
+    limit = args.max_combos or settings.backtest.max_combos
+    if combos > limit:
+        log.error(
+            f"参数组合过多：{combos} 组 > 上限 {limit}，"
+            f"缩小网格或用 --max-combos 显式放开"
+        )
+        return 1
+
     log.info(
         f"optimize started strategy={args.strategy} inst={args.inst} "
         f"bar={args.bar} range={args.start}..{args.end} "
-        f"combos={combos} metric={args.metric}"
+        f"combos={combos} metric={args.metric} n_jobs={args.n_jobs}"
     )
 
+    def on_progress(done: int, total: int) -> None:
+        # 只在整十与收尾时打日志，避免几千行刷屏
+        if done == total or done % 10 == 0:
+            log.info(f"optimize progress {done}/{total}")
+
     try:
-        results = optimizer.search(bars, metric=args.metric)
+        results = optimizer.search(
+            bars, metric=args.metric, n_jobs=args.n_jobs, progress=on_progress
+        )
     except ValueError as e:
         log.error(str(e))
         return 1

@@ -48,9 +48,9 @@ from quant.strategies.params import (
 
 log = get_logger("dashboard.backtest")
 
-MAX_COMBOS = 500          # 单次寻优的网格组合上限
 MAX_EQUITY_POINTS = 2000  # 权益曲线降采样后最多点数
 MAX_TRADES = 300          # 单次回测返回的成交明细上限
+MAX_N_JOBS = 8            # 寻优并行度上限，避免小机器被进程池拖死
 
 # 越小越好的指标，排序时反向
 ASCENDING_METRICS = frozenset({"max_drawdown", "avg_holding_bars"})
@@ -101,6 +101,7 @@ class OptimizeRequest(BacktestRequest):
     grid: str
     metric: str = "sharpe"
     top: int = Field(10, ge=1, le=50)
+    n_jobs: int = Field(1, ge=1, le=MAX_N_JOBS)
 
 
 class BacktestService:
@@ -336,9 +337,10 @@ class BacktestService:
             raise BacktestRequestError(str(e)) from e
 
         combos = math.prod(len(values) for values in grid.values())
-        if combos > MAX_COMBOS:
+        limit = self._settings.backtest.max_combos
+        if combos > limit:
             raise BacktestRequestError(
-                f"参数组合过多：{combos} 组 > 上限 {MAX_COMBOS}，请缩小网格"
+                f"参数组合过多：{combos} 组 > 上限 {limit}，请缩小网格"
             )
 
         warmup, bars, strategy_cls, params = self._prepare(req, inst)
@@ -350,9 +352,10 @@ class BacktestService:
             window_size=self._settings.backtest.window_size,
             warmup_bars=warmup,
             base_params=params,
+            strategy_cls=strategy_cls,
         )
         try:
-            results = optimizer.search(bars, metric=req.metric)
+            results = optimizer.search(bars, metric=req.metric, n_jobs=req.n_jobs)
         except ValueError as e:
             raise BacktestRequestError(str(e)) from e
 
@@ -370,6 +373,7 @@ class BacktestService:
             "end": req.end,
             "grid": grid,
             "metric": req.metric,
+            "n_jobs": req.n_jobs,
             "bar_count": len(bars),
             "warmup_count": len(warmup),
             "combo_count": combos,
