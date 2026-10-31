@@ -19,6 +19,8 @@
 - POST /api/dead-letters/{id}/replay 重放单条死信（写操作）
 - POST /api/dead-letters/replay 批量重放（写操作）
 - POST /api/dead-letters/{id}/discard 标记丢弃（写操作）
+- GET /api/reconciliations 三项对账差异（kind/only_open + 分页）
+- POST /api/reconciliations/{id}/resolve 标记差异已处理（写操作）
 - GET /api/processes 7 个常驻进程健康
 - GET /api/equity    权益时序（默认近 24 小时）
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
@@ -439,6 +441,26 @@ def create_app(
     ) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
         return JSONResponse(await service.discard_dead_letter(dead_id))
+
+    @app.get("/api/reconciliations")
+    async def reconciliations(
+        limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+        kind: str | None = Query(None),
+        only_open: bool = Query(False),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await service.reconciliations(
+                limit, offset, kind=kind, only_open=only_open
+            )
+        )
+
+    @app.post("/api/reconciliations/{rec_id}/resolve")
+    async def resolve_reconciliation(
+        request: Request, rec_id: str
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        return JSONResponse(await service.resolve_reconciliation(rec_id))
 
     @app.get("/api/processes")
     async def processes() -> JSONResponse:

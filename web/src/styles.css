@@ -1034,6 +1034,39 @@ code {
   color: var(--accent);
 }
 
+/* 对账差异的类型徽标与处置标记（M8-18） */
+.dl-kind-order {
+  color: var(--accent);
+}
+
+.dl-kind-position {
+  color: var(--warn);
+}
+
+.dl-kind-balance {
+  color: var(--good);
+}
+
+.recon-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--dim);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.recon-tag.recon-manual {
+  color: var(--warn);
+  background: rgba(255, 196, 87, 0.12);
+}
+
+.recon-note {
+  padding: 2px 0 6px 74px;
+  color: var(--dim);
+  font-size: 10px;
+}
+
 .dl-signal {
   min-width: 150px;
   color: var(--dim);

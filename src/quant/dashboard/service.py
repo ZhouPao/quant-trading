@@ -1308,6 +1308,54 @@ class DashboardService:
     async def discard_dead_letter(self, dead_id: str) -> dict[str, object]:
         return await self._dead.discard(dead_id)
 
+    async def reconciliations(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        kind: str | None = None,
+        only_open: bool = False,
+    ) -> dict[str, object]:
+        """三项对账差异列表（M8-18）。"""
+        now = int(time.time() * 1000)
+        try:
+            items, total = await asyncio.to_thread(
+                self._store.list_reconciliations,
+                limit,
+                offset,
+                kind=kind,
+                only_open=only_open,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"reconciliations read failed: {e}")
+            return {
+                "ts": now,
+                "items": [],
+                "total": None,
+                "degraded": ["sqlite"],
+            }
+        return {
+            "ts": now,
+            "items": [_reconciliation_row(row) for row in items],
+            "total": total,
+            "degraded": [],
+        }
+
+    async def resolve_reconciliation(
+        self, rec_id: str, *, by: str = "dashboard"
+    ) -> dict[str, object]:
+        """标记一条对账差异已处理（幂等）。"""
+        changed = await asyncio.to_thread(
+            self._store.resolve_reconciliation,
+            rec_id,
+            by=by,
+            now_ms=int(time.time() * 1000),
+        )
+        return {
+            "rec_id": rec_id,
+            "result": "resolved" if changed else "already_resolved",
+        }
+
     async def reports(self, limit: int = 20) -> dict[str, object]:
         """日报列表：读取 monitor 落盘的偏离报告 CSV。
 
@@ -1764,6 +1812,24 @@ def _dead_letter_row(row: dict) -> dict[str, object]:
         "created_at": row["created_at"],
         "replayed_at": row.get("replayed_at"),
         "replay_result": row.get("replay_result"),
+    }
+
+
+def _reconciliation_row(row: dict) -> dict[str, object]:
+    """对账差异行：`resolved` 转布尔，便于前端判处置按钮。"""
+    return {
+        "rec_id": row["rec_id"],
+        "ts": row["ts"],
+        "kind": row["kind"],
+        "key": row["key"],
+        "local_value": row.get("local_value"),
+        "remote_value": row.get("remote_value"),
+        "diff": row.get("diff"),
+        "severity": row["severity"],
+        "resolved": bool(row.get("resolved")),
+        "resolved_at": row.get("resolved_at"),
+        "resolved_by": row.get("resolved_by"),
+        "note": row.get("note"),
     }
 
 

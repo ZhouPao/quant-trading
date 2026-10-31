@@ -172,6 +172,7 @@ class TestPurgeState:
                 "orders": 1,
                 "signals": 1,
                 "equity_snapshots": 0,
+                "reconciliations": 0,
             }
             assert store.get_signal("old") is None
             assert store.get_signal("new") is not None

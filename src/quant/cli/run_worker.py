@@ -202,6 +202,10 @@ async def _run(args, settings: Settings) -> int:
         if args.broker == "okx":
             client = OKXClient(settings.okx)
         broker = _build_broker(args, settings, client)
+        # 告警服务同时供 worker（风控硬停止）与对账（差异）使用
+        alert_service = AlertService(
+            store, redis, EmailAlerter(settings.smtp), settings.monitor
+        )
 
         # 仅 OKX broker 支持对账（需 get_order 查询远端订单状态）
         order_timeout = (
@@ -215,7 +219,16 @@ async def _run(args, settings: Settings) -> int:
             else settings.execution.reconcile_interval_seconds
         )
         reconciler = (
-            Reconciler(store, broker, order_timeout_seconds=order_timeout)
+            Reconciler(
+                store,
+                broker,
+                order_timeout_seconds=order_timeout,
+                # 持仓/余额对账需要账户与持仓接口；mock 模式没有 client 时
+                # Reconciler 会自动只做订单对账
+                client=client,
+                snapshot_max_age_ms=settings.risk.snapshot_max_age_ms,
+                alert_service=alert_service,
+            )
             if args.broker == "okx"
             else None
         )
@@ -295,9 +308,7 @@ async def _run(args, settings: Settings) -> int:
             preflight=_build_preflight(args, settings, public_client),
             sizer=sizer,
             spec_provider=spec_provider,
-            alert_service=AlertService(
-                store, redis, EmailAlerter(settings.smtp), settings.monitor
-            ),
+            alert_service=alert_service,
         )
 
         log.info(

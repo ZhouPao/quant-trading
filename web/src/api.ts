@@ -1187,6 +1187,68 @@ export async function resumeCircuit(instId: string, token = "") {
   );
 }
 
+export type ReconciliationRow = {
+  rec_id: string;
+  ts: number;
+  /** order / position / balance */
+  kind: string;
+  key: string;
+  local_value: string | null;
+  remote_value: string | null;
+  diff: string | null;
+  /** auto=本地已自动校正；manual=需人工确认 */
+  severity: "auto" | "manual";
+  resolved: boolean;
+  resolved_at: number | null;
+  resolved_by: string | null;
+  note: string | null;
+};
+
+export type ReconciliationsResponse = {
+  ts: number;
+  items: ReconciliationRow[];
+  /** null 表示 SQLite 读取失败，列表不可信 */
+  total: number | null;
+  degraded: string[];
+};
+
+export type ResolveReconciliationResult = {
+  rec_id: string;
+  /** resolved / already_resolved */
+  result: string;
+};
+
+/** 对账差异列表；`kind` 可选 order / position / balance。 */
+export async function fetchReconciliations(
+  signal: AbortSignal,
+  options: {
+    limit?: number;
+    offset?: number;
+    kind?: string;
+    onlyOpen?: boolean;
+  } = {},
+) {
+  const query = new URLSearchParams({
+    limit: String(options.limit ?? 50),
+    offset: String(options.offset ?? 0),
+  });
+  if (options.kind) query.set("kind", options.kind);
+  if (options.onlyOpen) query.set("only_open", "true");
+  return getJson<ReconciliationsResponse>(
+    `/api/reconciliations?${query}`,
+    signal,
+  );
+}
+
+/** 标记差异已处理；重复点击返回 already_resolved。 */
+export async function resolveReconciliation(recId: string, token = "") {
+  return postGuarded<ResolveReconciliationResult>(
+    `/api/reconciliations/${encodeURIComponent(recId)}/resolve`,
+    {},
+    token,
+  );
+}
+
 export type KillSwitchCancel = {
   ok: boolean;
   exchange_canceled?: number;

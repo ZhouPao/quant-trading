@@ -593,7 +593,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | `Order` | `order_id` / `signal` / `state` / `filled_qty` / `avg_price` / `reduce_only` / `cl_ord_id` / `source` / `created_ts` / `updated_ts` | `state` ∈ `pending` / `live` / `partially_filled` / `filled` / `canceled` / `failed` |
 | `Fill` | `order_id` / `inst_id` / `side` / `qty` / `price` / `fee` / `fee_ccy` / `ts` | 现货手续费扣基础币，合约扣 USDT，`fee_ccy` 明确标注 |
 | `PositionSnapshot` | `ts` / `inst_id` / `qty` / `avg_price` / `upl` / `source` | `source` ∈ `local` / `remote`，对账时两侧对比 |
-| `Discrepancy` | `ts` / `kind` / `key` / `local_value` / `remote_value` / `resolved` | `kind` ∈ `order` / `position` / `balance` |
+| `Discrepancy` | `ts` / `kind` / `key` / `local_value` / `remote_value` / `diff` / `severity` / `resolved` / `resolved_at` / `resolved_by` / `note` | `kind` ∈ `order` / `position` / `balance`；`severity` ∈ `auto`（本地已校正）/ `manual`（需人工确认） |
 | `DeadLetter` | `id` / `signal` / `reason` / `created_ts` / `status` / `replayed_ts` | `status` ∈ `new` / `replayed` / `discarded` |
 
 #### 4.8.2 存储
@@ -610,7 +610,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | 仓位计算 | `PositionSizer.size(signal, equity, price, limits) -> Decimal \| None` | 信号不带 `qty` 时按「权益 × 单笔比例 ÷ 价格」算量，向下取整到 `lotSz`；无法定价或算量为 0 返回 `None` 并拒单 |
 | 状态机 | `OrderStateMachine.transition(local_order, remote_detail) -> Order` | 只允许 `pending → live → partially_filled → filled/canceled`，禁止回退；部分成交累加 `filled_qty` 并重算 `avg_price` |
 | 死信运维 | `DeadLetterService.list(limit, offset)` / `replay(id)` / `discard(id)` | 重放前查 `signals` 表做幂等，已 `executed` 的直接拒绝重放 |
-| 对账 | `Reconciler.reconcile() -> list[Discrepancy]` | 三类对象：订单状态、持仓数量、账户余额；以远端为准并写 `reconciliations` |
+| 对账 | `Reconciler.reconcile(now_ms=None) -> int` | 三类对象：订单状态、持仓数量、账户余额；以远端为准，订单/本地多记的持仓自动校正，其余写 `reconciliations` 交人工确认。返回值是订单状态变化数，本轮差异另存 `self.discrepancies` |
 | 手工交易 | `ManualTrader.place` / `cancel` / `amend` / `reduce` / `flatten` | 全部走同一套 M7 风控与 `signals` 审计，`source=manual` |
 
 #### 4.8.4 需求条目
@@ -634,7 +634,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M8-15 | 订单状态机 | `pending→live→partially_filled→filled/canceled` 单向推进；部分成交累加并重算均价；禁止状态回退。**已落地**：`order_state.can_transition` 定义合法迁移与终态，`update_order_fill` 累加成交量并按加权重算均价、非法迁移只记 WARNING 保持原状态；`save_order` 由「整行覆盖」改为「插入或忽略 + 状态机推进」，重复落库（重放/崩溃恢复）不会把 `filled` 打回 `pending`。`pending → filled` 直连保留，因为市价单可能一次回包即成交 | 新增 | ✅ |
 | M8-16 | 死信查看与重放 | 看板列出死信（原始信号 + 原因 + 时间）；支持单条/批量重放回 pending，或标记丢弃；重放前做幂等检查 | 新增 | ✅ |
 | M8-17 | 手工下单与撤改 | 看板可下市价/限价单，可撤单、改价改量；与自动单共用风控、审计与状态机。**已实现**：`ManualTrader.place_order`（`POST /api/manual/orders`）在 Redis 同品种短锁内按「kill switch → 品种熔断 → 权益快照 → `RiskChecker` 五条规则 → 精度取整 → `OkxBroker.execute`」执行，`strategy_id=manual`、`signal_id=manual-{uuid}`，落 signals/orders/fills/positions。风控参数取 `[risk]` 全局层（手动单无策略归属）；权益读 monitor 快照并受 `snapshot_max_age_ms` 约束，快照缺失或超龄直接 503 拒单。名义/比例类规则按「减量」执行（响应同时给 `requested_qty`/`submitted_qty`/`adjusted`，页面明示「风控减量 X → Y」）；日亏损/连亏这类硬性上限只拒当前这一笔，不替 worker 打开 kill switch。撤单 `POST /api/manual/orders/{id}/cancel` 对已终结订单直接返回 `already=true`（连点幂等），交易所报错时先查远端 `state`，确为 canceled 才算成功；改单 `POST /api/manual/orders/{id}/amend` 只允许限价单、同样过风控闸门，`qty` 缺省表示只改价，成功后回写 `signals.qty/price`（orders 表不存这两列，看板靠 JOIN）。看板执行页新增「手工下单」卡与订单操作列：挂单可撤、限价单可改，撤单需二次确认并填原因 | 新增 | ✅ |
-| M8-18 | 三项对账 | 订单 + 持仓 + 余额三类对象对账；差异写 `reconciliations` 并区分「可自动修复」与「需人工确认」 | 新增 | 🟡 |
+| M8-18 | 三项对账 | 订单 + 持仓 + 余额三类对象对账；差异写 `reconciliations` 并区分「可自动修复」与「需人工确认」。**已实现**：`Reconciler` 扩为三项。订单沿用原逻辑（远端已成交补记、已撤销改本地、超时撤单）并逐单留痕。持仓按基础币比对（合约 `pos × ctVal`，现货取 `balance.details.cashBal`）；**只比对本地记账过的品种与交易所合约持仓**，现货里从未记账的币视为用户自持不参与。本地多于交易所 → `severity=auto`，按远端下调（否则卖出会因可用量不足被拒）；本地少于交易所（外部转入/历史缺失）→ `manual`，不自动加仓。余额比本地最近权益快照与交易所实时 `totalEq`，快照超过 `snapshot_max_age_ms` 直接跳过（本地视图不可信时不报假差异），差异一律 `manual`。差异表新增 `severity`/`diff`/`resolved_at`/`resolved_by`/`note`，同 `(kind,key,severity)` 的未处理行原地刷新不膨胀；清理任务只删已处理行。新增 `GET /api/reconciliations`（kind/only_open + 分页）、`POST /api/reconciliations/{id}/resolve`（写守卫），执行页新增「对账差异」卡（类型筛选、只看未处理、标记已处理）。新增 `manual` 差异按 `kind:key` 去重发 `reconcile_mismatch` 告警（WARNING），消失后再现会重新提醒；接口整体失败时跳过本轮，不会把「查不到持仓」当成「没有持仓」清空本地 | 新增 | ✅ |
 | M8-19 | 下单幂等与重试边界 | `clOrdId` 由 `signal_id` 派生保证交易所侧幂等；超时状态不明时先查询再决定，禁止直接重发；重试上限 3 次。**已实现**：`_cl_ord_id` 对 `signal_id` 做稳定派生（≤32 位字母数字），`_submit_with_idempotency` 在 `NetworkError` 时先按 `clOrdId` 查（`state=all`，否则已成交查成空），查到即复用 `ordId`、查不到才退避重试，最多 3 次；`sCode=51016`（重复 clOrdId）同样转为查询而非报错。测试覆盖「超时后复用已落地单」「查不到时恰好重发 3 次后抛错」「重复 clOrdId 复用」 | 新增 | ✅ |
 
 **下单流程**：`webhook → 去重 → pending → worker BRPOPLPUSH → 幂等检查 → 仓位计算(M8-14，仅 qty 缺省时) → 风控(M7) → 预检(M7-7) → 下单 → 状态机推进(M8-15) → 写 signals/orders/fills/positions → 移出 inflight`。
@@ -643,7 +643,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 **前置条件**：M8-14 依赖 M7-1 的单笔上限；M8-15 依赖 OKX 订单 `state` 枚举；M8-18 依赖 `/api/v5/account/positions` 与 `/api/v5/account/balance`。
 
-**验收**：信号不带 `qty` 时仍能按权益比例正确下单且不超单笔上限；部分成交后 `filled_qty` 单调递增且最终等于成交量；死信重放不会产生重复订单；杀掉 worker 后重启，未消费信号不丢、不重复下单；持仓与余额差异能被对账识别并落 `reconciliations`；看板手工单与自动单走同一套风控（kill switch、熔断、五条规则），撤单可重复点击且不会重复打交易所。
+**验收**：信号不带 `qty` 时仍能按权益比例正确下单且不超单笔上限；部分成交后 `filled_qty` 单调递增且最终等于成交量；死信重放不会产生重复订单；杀掉 worker 后重启，未消费信号不丢、不重复下单；持仓与余额差异能被对账识别并落 `reconciliations`，本地多记的持仓自动下调、其余标记待人工确认，看板可筛选并标记处理；看板手工单与自动单走同一套风控（kill switch、熔断、五条规则），撤单可重复点击且不会重复打交易所。
 
 ---
 
@@ -691,7 +691,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M9-8 | 告警持久化 | 告警写 SQLite `alerts` 作为权威记录；Redis list 仅作实时推送缓存，掉电或重启不丢历史 | 新增 | ✅ |
 | M9-9 | 去重与冷却 | 同一规则在冷却窗口（默认 600 秒）内只推一次；`kill_switch` 不参与冷却但需防刷屏；恢复类通知（`level=INFO`）不受冷却约束 | 新增 | ✅ |
 | M9-10 | 静音粒度 | 支持三种：按规则（所有品种）、按规则+品种（单品种）、全局临时静音；多条静音叠加时任一命中即静音。**三种均已实现**：全局静音在存储里用 `rule='*'` 占位（空 rule 提交时归一化），`_match_silence` 对 `*` 命中任意规则与品种；`SilenceRequest.rule` 改为可选，看板静音表单新增「全部规则（全局）」并自动清空品种，生效静音列表把 `*` 显示为「全局（全部规则）」。全局静音与规则级启停（M9-2）互补：前者临时压噪、仍入库，后者长期不产生 | 新增 | ✅ |
-| M9-11 | 与业务事件联动 | 风控 `halt`/熔断（M7-17）、死信新增（M8-16）、回测任务失败（M4-12）、对账差异（M8-18）统一走 `AlertService.publish`；同一次事件按业务 ID 去重，不重复告警。**已接通 3 条**：①熔断由 engine 直接 publish（既有）；②风控硬停止在 worker 当场发布 `risk_halt`（ERROR，带品种/策略，同时自动启用 kill switch），不等 monitor 轮询；③回测任务在「执行异常 / 参数错误 / 产物写入失败」三条失败路径发布 `backtest_failed`（message 带 run_id 作为业务 ID，同一任务只报一次）。**死信**沿用 monitor 的 `dead_letter` 计数告警（增量即报，已含冷却）；**对账差异**待 M8-18 落地后接入 | 新增 | 🟡 |
+| M9-11 | 与业务事件联动 | 风控 `halt`/熔断（M7-17）、死信新增（M8-16）、回测任务失败（M4-12）、对账差异（M8-18）统一走 `AlertService.publish`；同一次事件按业务 ID 去重，不重复告警。**已接通 4 条**：①熔断由 engine 直接 publish（既有）；②风控硬停止在 worker 当场发布 `risk_halt`（ERROR，带品种/策略，同时自动启用 kill switch），不等 monitor 轮询；③回测任务在「执行异常 / 参数错误 / 产物写入失败」三条失败路径发布 `backtest_failed`（message 带 run_id 作为业务 ID，同一任务只报一次）；④对账新增的 `manual` 差异由 `Reconciler` 发布 `reconcile_mismatch`（WARNING，message 列出 kind/key/本地/交易所，同一 `kind:key` 只报一次，差异消失后再现会重新提醒）。**死信**沿用 monitor 的 `dead_letter` 计数告警（增量即报，已含冷却） | 新增 | ✅ |
 | M9-12 | 告警保留策略 | 按级别区分保留天数（ERROR 90 天、WARNING 30 天、INFO 7 天）；过期由保留清理任务删除，不影响日志文件保留。**已实现**：`[monitor].alert_retention_{error,warning,info}_days` 可配，0 表示该级别不自动清理；`SQLiteStore.purge_alerts` 按级别切三档（未知级别归 WARNING 档，避免新增规则漏清），由 `RetentionPurger.run` 与既有历史清理同批执行，`PurgeResult` 增加 `alerts_deleted` 计数 | 新增 | ✅ |
 | M9-13 | 存活邮件 | 每 `alive_email_hours`（默认 4 小时）发一封存活邮件，时间戳存 Redis 以便 monitor 重启后不重复发送 | 新增 | ✅ |
 | M9-14 | 告警趋势统计 | 近 7/30 天各规则触发次数与 TOP 规则；供首页总览卡片使用。**已实现**：`GET /api/alerts/stats?days=7`（支持 7/30，1~90 收口）按规则聚合总数与 ERROR/WARNING/INFO 拆分，按总数降序；首页新增「告警趋势」卡，7/30 天切换、条形按级别拆色、标注 `xE / xW / xI`；SQLite 读失败只让该卡 `degraded=["sqlite"]` | 新增 | ✅ |
@@ -700,7 +700,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 **不做**：日志全文检索（M9-6 明确不做）、Prometheus/Grafana 接入、告警升级链（先短信后电话）、外部推送（钉钉/企微）、日志集中采集（ELK/Loki）。
 
-**前置条件**：M9-11 的「对账差异」依赖 M8-18 的对账事件入口（其余三条已接通）；M9-3 仅剩填好 `[smtp]` 的运维配置并用 `quant test-email` 验证。
+**前置条件**：M9-11 的四条业务事件已全部接通（熔断、风控硬停止、回测失败、对账差异）；M9-3 仅剩填好 `[smtp]` 的运维配置并用 `quant test-email` 验证。
 
 **验收**：`quant test-email` 能真实发出并收到邮件；kill 掉 monitor 后重启会产生「上次心跳中断」告警；同一规则持续命中时冷却期内只出现一条；静音期内告警仍能在列表查到但状态为 `silenced` 且未发邮件；清空 Redis 缓存后历史告警仍可从 SQLite 查询。
 
@@ -930,7 +930,7 @@ quant-trading/
 | MS2（已完成） | M4-1 ~ M4-5、M8-2 ~ M8-6、M7-1 ~ M7-3、M3-1 | 回测引擎 + 样例策略双副本；webhook + Redis + worker；风控规则与持久化 |
 | MS3（已完成） | M8-1、M8-4 ~ M8-6、M8-12、M8-13 | 模拟盘跑通完整链路；执行页与减仓平仓可用 |
 | MS4（进行中） | M9-1 ~ M9-5、M9-7、M9-8、M9-9、M9-11、M9-13、M1-1 ~ M1-7、M1-10、M7-4、M7-5、M7-10、M7-11、M7-15、M7-16、M4-6、M4-9 ~ M4-14、M8-14 ~ M8-17、M8-19、M3-9、M3-10、M3-11、M3-12、M2-15 | 监控告警与告警持久化、告警确认与静音、首页总览（含 7 进程健康与事件流）、kill switch 补齐撤单、风险指标、风控参数合并与事件落库、walk-forward 与回测结果落库对比、执行可靠性、策略参数与启停、数据质量报告 |
-| MS5（未开始） | M8-7、M8-8、M8-18、M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17、M1-8、M1-9、M3-3、M3-4、M3-7、M3-8、M3-13 ~ M3-15、M4-7、M4-15、M4-16、M2-14、M10-1 ~ M10-4、M10-9 ~ M10-15，以及两条 🟡 的收口项 M3-5、M4-8 | 实盘接入、真 webhook、三项对账、熔断与在线阈值调整、今日盈亏与告警摘要、研究工作流与策略详情页、批量回测、资金费率成本、Pine 对比、持仓量采集、配置视图与白名单热改、凭证健康、备份与自检（M9-10/12/14、M9-5 与 M8-11/17/19 已提前在 MS4 收尾批次完成） |
+| MS5（未开始） | M8-7、M8-8、M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17、M1-8、M1-9、M3-3、M3-4、M3-7、M3-8、M3-13 ~ M3-15、M4-7、M4-15、M4-16、M2-14、M10-1 ~ M10-4、M10-9 ~ M10-15，以及两条 🟡 的收口项 M3-5、M4-8 | 实盘接入、真 webhook、熔断与在线阈值调整、今日盈亏与告警摘要、研究工作流与策略详情页、批量回测、资金费率成本、Pine 对比、持仓量采集、配置视图与白名单热改、凭证健康、备份与自检（M9-10/12/14、M9-5、M9-11 与 M8-11/17/18/19 已提前在 MS4 收尾批次完成） |
 | MS6（未开始） | M10-6、M10-7 | 上云、systemd 托管与开机自启（进程自愈由 M8-11 承担） |
 | MS7+（候选） | M5 全部（15 条）、M6 全部（14 条） | 因子库、组合管理 |
 
@@ -1029,3 +1029,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 27，今日事件流） | M1-6 由 ⬜ 改 ✅：`SQLiteStore.daily_timeline()` 单条 `UNION ALL` 合并 signals/orders/fills/alerts 四表，时间取各自的事件时间（`signals.ts`、`orders.created_ts`、`fills.ts`、`alerts.created_at`），`ORDER BY ts DESC, kind, ref_id` 支撑稳定分页；新增 `GET /api/timeline?kinds=&limit=&offset=`，`kinds` 为空表示全部、大小写归一、非法值回落全部（前端拼错参数不该白屏），`since` 取当日 UTC+8 零点；看板首页新增「今日事件流」卡，类型多选筛选，点击行按后端 `module` 跳日志告警/策略研究/交易执行。**取舍**：不新增表、不双写，查询时聚合（PRD §4.1 已定）；每个 UNION 分支都显式写列别名，否则只筛一类时外层 `ORDER BY kind` 会报 `no such column`；SQLite 读失败只让该卡 `degraded=["sqlite"]`。**未做**：时间区间自定义（当日口径固定）与跨日翻页 |
 | 2026-10-31 | v0.6（补充 28，手工下单与撤改） | M8-17 由 🟡 改 ✅。`ManualTrader` 从「只能减/平/撤」扩到开仓与改单：`place_order` 在 Redis 同品种短锁内按「kill switch → 品种熔断 → 权益快照 → `RiskChecker` 五条规则 → `lotSz/minSz` 取整 → `OkxBroker.execute`」执行，`strategy_id=manual`、`signal_id=manual-{uuid}`，经与 worker 相同的 `save_signal/save_order/update_order_fill/save_fill/apply_fill` 落库，orders 靠 JOIN signals 仍能在执行页显示品种/方向/数量/价格。风控参数只取 `[risk]` 全局层（手动单无策略归属，不借策略覆盖）；权益读 monitor 快照并校验 `snapshot_max_age_ms`，快照缺失/超龄直接 503，避免按初始资金放大敞口。**语义取舍**：名义与比例类规则沿用「减量」（响应带 `requested_qty`/`submitted_qty`/`adjusted`，前端提示「风控减量 X → Y」），日亏损/连亏这类硬性上限只拒当前这一笔、不替 worker 打开 kill switch（停自动交易仍归 worker）。撤单对已终结订单直接返回 `already=true`，交易所报错时先查远端 `state`，确为 canceled 才算成功；改单只允许限价单、同样过风控闸门，`qty` 缺省表示只改价，成功后回写 `signals.qty/price`（orders 表不存这两列）。新增三个写接口（`POST /api/manual/orders`、`/{id}/cancel`、`/{id}/amend`，均走 `_guard_write`）与存储方法 `get_order`/`update_signal_order`；看板执行页新增「手工下单」卡，最近订单表新增操作列（挂单可撤、限价可改，撤单二次确认并填原因）。测试补 29 条：风控减量与日亏损拒单、快照缺失/超龄、kill switch 拦截、合约折张、撤单幂等与远端已撤、改单回写与风控截断、三个路由及写守卫 |
 | 2026-10-31 | v0.6（补充 29，M9 告警系列收口） | **M9-2/3/5/10/12/14 改 ✅，M9-11 仍 🟡（差对账差异）**。①规则级启停：`[monitor].disabled_rules` 在 `_evaluate` 末尾整条过滤，`/api/alerts` 回传停用清单，告警页明示；②邮件告警：核对代码与测试后确认已完整（三要素齐备才发、失败不抛、`quant test-email` 可验证），🟡 只是缺部署侧 SMTP 配置；③时间区间：`fetchAll` 带 `since/until` 走服务端筛选，告警页用两个 `datetime-local` 输入（本地时区），避免前端只截 200 条导致区间内漏行；④全局静音：`rule` 可省略，存储用 `*` 占位，`_match_silence` 命中任意规则/品种，静音表单新增「全部规则（全局）」；⑤保留分档：`purge_alerts` 按 ERROR/WARNING/INFO 三档清理（0=不清，未知级别归 WARNING 档），接入 `RetentionPurger`；⑥告警趋势：`GET /api/alerts/stats?days=` + 首页「告警趋势」卡（7/30 切换、按级别拆色）。⑦业务联动补两条：worker 风控硬停止当场发 `risk_halt`（同时自动 kill switch），回测三条失败路径发 `backtest_failed`（run_id 作业务 ID）；死信沿用 monitor 计数告警，对账待 M8-18。**取舍**：启停做在配置层而非看板热改（热改归 M10-10 白名单）；全局静音不改表结构，用哨兵值避免 schema 迁移 |
+| 2026-10-31 | v0.6（补充 30，三项对账） | M8-18 由 🟡 改 ✅、M9-11 由 🟡 改 ✅（第四条业务事件接通）。`Reconciler` 从「只对订单」扩到订单/持仓/余额三项，schema v8 新增 `reconciliations`。订单分支保持原语义（远端成交补记、已撤销改本地、超时撤单），每笔变更落一条 `severity=auto` 留痕。持仓按基础币比对：合约 `pos × ctVal`、现货取 `balance.details.cashBal`；比对集合限定为「本地记账过的品种 ∪ 交易所合约持仓」，现货里从未记账的币视为用户自持，避免天天误报。**处置分级**：本地多于交易所会因可用量不足卖不出去，按远端自动下调（`auto`，立即 resolved=1）；本地少于交易所多为外部转入，成本基数未知，只记录 `manual`，不自动加仓。余额比本地最近权益快照与交易所实时 `totalEq`，快照超过 `snapshot_max_age_ms` 直接跳过而非报假差异，差异一律 `manual`（现金变动无法从成交流水反推）。**去重**：同 `(kind,key,severity)` 的未处理行原地刷新数值与时间，不随每分钟对账膨胀；用户标记处理后再出现才新增一行；清理任务只删已处理行。**告警**：新增 `manual` 差异按 `kind:key` 只发一次 `reconcile_mismatch`（WARNING），差异消失后再现会重新提醒。**容错**：账户/持仓接口整体失败时跳过本轮，不会把「查不到」当成「没有持仓」清空本地。新增 `GET /api/reconciliations`、`POST /api/reconciliations/{id}/resolve`（写守卫）与执行页「对账差异」卡（类型筛选、只看未处理、标记已处理）。测试补 16 条：持仓多记自动修复、少记人工确认并只告警一次、合约远端多出、未记账现货币忽略、余额差异与快照过旧跳过、接口失败保留本地、订单撤销留痕、处理后重现新增、列表筛选与写守卫、清理保留未处理行 |

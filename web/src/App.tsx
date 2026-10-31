@@ -15,6 +15,7 @@ import {
   fetchParamChanges,
   fetchQuality,
   fetchQualityReport,
+  fetchReconciliations,
   fetchProcesses,
   fetchFreshness,
   fetchTimeline,
@@ -38,6 +39,7 @@ import {
   reducePosition,
   replayDeadLetter,
   replayDeadLetters,
+  resolveReconciliation,
   runOptimize,
   submitBacktest,
   fetchBacktestRuns,
@@ -80,6 +82,8 @@ import {
   type QualityItem,
   type QualityListResponse,
   type QualityReport,
+  type ReconciliationRow,
+  type ReconciliationsResponse,
   type ReportItem,
   type ReportsResponse,
   type PositionRow,
@@ -992,6 +996,10 @@ export default function App() {
           <>
         <section className="card dead reveal" style={{ animationDelay: "215ms" }}>
           <DeadLettersPanel />
+        </section>
+
+        <section className="card dead reveal" style={{ animationDelay: "225ms" }}>
+          <ReconcilePanel />
         </section>
 
         <section className="card pnl reveal" style={{ animationDelay: "240ms" }}>
@@ -4401,6 +4409,164 @@ function DeadLettersPanel() {
         <span>重放会回到 pending，由 worker 重新走风控与下单</span>
         <span>已 executed/rejected 的信号不会重复下单</span>
         <span>记录来自 SQLite dead_letters</span>
+      </div>
+    </>
+  );
+}
+
+const RECON_KIND_TEXT: Record<string, string> = {
+  order: "订单",
+  position: "持仓",
+  balance: "余额",
+};
+
+/** 三项对账差异（M8-18）：自动修复留痕 + 人工确认待办。 */
+function ReconcilePanel() {
+  const [kind, setKind] = useState("");
+  const [onlyOpen, setOnlyOpen] = useState(true);
+  const [data, setData] = useState<ReconciliationsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const controller = useRef<AbortController | null>(null);
+
+  const pull = useCallback(async () => {
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
+    try {
+      const res = await fetchReconciliations(next.signal, {
+        kind: kind || undefined,
+        onlyOpen,
+      });
+      setData(res);
+      setError(null);
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    }
+  }, [kind, onlyOpen]);
+
+  useEffect(() => {
+    void pull();
+    const id = window.setInterval(() => void pull(), 30_000);
+    return () => {
+      controller.current?.abort();
+      window.clearInterval(id);
+    };
+  }, [pull]);
+
+  const act = async (row: ReconciliationRow) => {
+    setBusy(row.rec_id);
+    setNotice(null);
+    try {
+      const res = await resolveReconciliation(row.rec_id, writeToken());
+      setNotice(res.result === "resolved" ? "已标记处理" : "该差异已处理过");
+      await pull();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const items = data?.items ?? [];
+  const pending = items.filter((item) => !item.resolved).length;
+
+  return (
+    <>
+      <div className="card-head">
+        <h2>对账差异</h2>
+        <span className="card-note">
+          {data?.total === null
+            ? "SQLite 不可读"
+            : `${data?.total ?? "…"} 条 · 当前 ${pending} 条未处理`}
+        </span>
+      </div>
+
+      <div className="dl-tools">
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value)}
+          aria-label="按类型筛选对账差异"
+        >
+          <option value="">全部类型</option>
+          <option value="order">order · 订单</option>
+          <option value="position">position · 持仓</option>
+          <option value="balance">balance · 余额</option>
+        </select>
+        <label className="dl-check">
+          <input
+            type="checkbox"
+            checked={onlyOpen}
+            onChange={(e) => setOnlyOpen(e.target.checked)}
+          />
+          只看未处理
+        </label>
+        {(notice || error) && (
+          <span className={error ? "dl-msg dl-bad" : "dl-msg"}>
+            {error ?? notice}
+          </span>
+        )}
+      </div>
+
+      {items.length === 0 ? (
+        <div className="empty">
+          {onlyOpen ? "没有待处理的对账差异。" : "暂无对账记录。"}
+        </div>
+      ) : (
+        <ul className="dl-list">
+          {items.map((item) => (
+            <li
+              key={item.rec_id}
+              className={item.resolved ? "dl-item dl-done" : "dl-item"}
+            >
+              <div className="dl-row">
+                <span className={`dl-stage dl-kind-${item.kind}`}>
+                  {RECON_KIND_TEXT[item.kind] ?? item.kind}
+                </span>
+                <span className="dl-signal mono">{item.key}</span>
+                <span className="dl-reason mono">
+                  本地 {item.local_value ?? "—"} · 交易所{" "}
+                  {item.remote_value ?? "—"}
+                  {item.diff ? ` · 差 ${item.diff}` : ""}
+                </span>
+                <span
+                  className={
+                    item.severity === "manual"
+                      ? "recon-tag recon-manual"
+                      : "recon-tag"
+                  }
+                >
+                  {item.severity === "manual" ? "待确认" : "已自动修复"}
+                </span>
+                <span className="dl-time mono">{stamp(item.ts)}</span>
+                {item.resolved ? (
+                  <span className="dl-result mono">
+                    {item.resolved_by === "auto" ? "自动" : "已处理"}
+                  </span>
+                ) : (
+                  <span className="dl-actions">
+                    <button
+                      type="button"
+                      className="dl-btn"
+                      onClick={() => void act(item)}
+                      disabled={busy === item.rec_id}
+                    >
+                      {busy === item.rec_id ? "处理中…" : "标记已处理"}
+                    </button>
+                  </span>
+                )}
+              </div>
+              {item.note ? <div className="recon-note">{item.note}</div> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="rpt-foot">
+        <span>订单/持仓/余额三类对比，以交易所为准</span>
+        <span>本地多记自动下调；少记与余额差异需人工确认</span>
+        <span>记录来自 SQLite reconciliations</span>
       </div>
     </>
   );

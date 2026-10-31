@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 from decimal import Decimal
@@ -282,6 +283,33 @@ _MIGRATIONS: list[str] = [
         ON dead_letters(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_dead_stage
         ON dead_letters(stage, created_at DESC);
+    """,
+    # v7 -> v8：三项对账差异（M8-18）
+    #
+    # severity 区分「可自动修复」（auto，本地已被校正）与「需人工确认」
+    # （manual）。持续存在的差异不每轮插新行：同 (kind,key,severity) 的
+    # 未处理行原地更新数值与时间，处理后再出现才新增一条。
+    """
+    CREATE TABLE IF NOT EXISTS reconciliations (
+        rec_id       TEXT PRIMARY KEY,
+        ts           INTEGER NOT NULL,
+        kind         TEXT NOT NULL,
+        key          TEXT NOT NULL,
+        local_value  TEXT,
+        remote_value TEXT,
+        diff         TEXT,
+        severity     TEXT NOT NULL,
+        resolved     INTEGER NOT NULL DEFAULT 0,
+        resolved_at  INTEGER,
+        resolved_by  TEXT,
+        note         TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_rec_created
+        ON reconciliations(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_rec_kind
+        ON reconciliations(kind, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_rec_open
+        ON reconciliations(resolved, ts DESC);
     """,
 ]
 
@@ -1414,6 +1442,158 @@ class SQLiteStore:
         )
 
     # ------------------------------------------------------------------
+    # reconciliations（M8-18）
+    # ------------------------------------------------------------------
+
+    #: 对账差异的两档处置：auto=本地已被校正，manual=必须人工确认
+    RECONCILE_AUTO = "auto"
+    RECONCILE_MANUAL = "manual"
+
+    def record_reconciliation(
+        self,
+        *,
+        kind: str,
+        key: str,
+        local_value: str | None,
+        remote_value: str | None,
+        diff: str | None,
+        severity: str,
+        note: str | None,
+        now_ms: int,
+        resolved: bool = False,
+    ) -> str:
+        """写入一条对账差异并返回 rec_id。
+
+        用于「已自动修复」的一次性记录（`resolved=True`），或需要人工
+        处理但不需要原地更新的场景。持续存在的差异请用
+        `upsert_open_reconciliation`，避免每轮插新行。
+        """
+        rec_id = hashlib.sha1(
+            f"{kind}|{key}|{severity}|{now_ms}".encode()
+        ).hexdigest()[:16]
+        self._execute(
+            """
+            INSERT INTO reconciliations
+                (rec_id, ts, kind, key, local_value, remote_value, diff,
+                 severity, resolved, resolved_at, resolved_by, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rec_id,
+                now_ms,
+                kind,
+                key,
+                local_value,
+                remote_value,
+                diff,
+                severity,
+                1 if resolved else 0,
+                now_ms if resolved else None,
+                "auto" if resolved else None,
+                note,
+            ),
+        )
+        return rec_id
+
+    def upsert_open_reconciliation(
+        self,
+        *,
+        kind: str,
+        key: str,
+        local_value: str | None,
+        remote_value: str | None,
+        diff: str | None,
+        severity: str,
+        note: str | None,
+        now_ms: int,
+    ) -> str:
+        """写入/刷新一条未处理差异，同 (kind,key,severity) 只保留一行。
+
+        对账每分钟跑一次，持仓/余额漂移如果每轮都插一行，表会迅速被同一
+        条问题刷满，页面也无法判断「这是新问题还是老问题」。这里原地更新
+        数值与时间；用户标记处理后再出现才会新增一条。
+        """
+        row = self._query_one(
+            """
+            SELECT rec_id FROM reconciliations
+             WHERE kind = ? AND key = ? AND severity = ? AND resolved = 0
+             ORDER BY ts DESC LIMIT 1
+            """,
+            (kind, key, severity),
+        )
+        if row is not None:
+            rec_id = row["rec_id"]
+            self._execute(
+                """
+                UPDATE reconciliations
+                   SET ts = ?, local_value = ?, remote_value = ?,
+                       diff = ?, note = ?
+                 WHERE rec_id = ?
+                """,
+                (now_ms, local_value, remote_value, diff, note, rec_id),
+            )
+            return rec_id
+        return self.record_reconciliation(
+            kind=kind,
+            key=key,
+            local_value=local_value,
+            remote_value=remote_value,
+            diff=diff,
+            severity=severity,
+            note=note,
+            now_ms=now_ms,
+        )
+
+    def list_reconciliations(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        kind: str | None = None,
+        only_open: bool = False,
+    ) -> tuple[list[dict], int]:
+        """按时间倒序分页；总数与分页共用同一组 WHERE。"""
+        where, params = _reconciliation_filters(kind=kind, only_open=only_open)
+        total_row = self._query_one(
+            f"SELECT COUNT(*) AS n FROM reconciliations {where}", tuple(params)
+        )
+        total = int(total_row["n"]) if total_row else 0
+        rows = self._query_all(
+            f"""
+            SELECT rec_id, ts, kind, key, local_value, remote_value, diff,
+                   severity, resolved, resolved_at, resolved_by, note
+              FROM reconciliations {where}
+             ORDER BY ts DESC, rec_id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )
+        return [dict(r) for r in rows], total
+
+    def resolve_reconciliation(
+        self, rec_id: str, *, by: str, now_ms: int
+    ) -> bool:
+        """标记差异已处理；已处理过的返回 False（幂等，不覆盖首次时间）。"""
+        return (
+            self._execute(
+                """
+                UPDATE reconciliations
+                   SET resolved = 1, resolved_at = ?, resolved_by = ?
+                 WHERE rec_id = ? AND resolved = 0
+                """,
+                (now_ms, by, rec_id),
+            )
+            > 0
+        )
+
+    def get_latest_equity_snapshot(self) -> dict | None:
+        """最近一条权益快照；余额对账用它的 `ts` 判断本地视图是否过时。"""
+        row = self._query_one(
+            "SELECT * FROM equity_snapshots ORDER BY ts DESC LIMIT 1", ()
+        )
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
     # strategy bindings（MS4-C §4.1 / §10.3）
     # ------------------------------------------------------------------
 
@@ -1742,6 +1922,12 @@ class SQLiteStore:
                 """,
                 (cutoff_ms,),
             ),
+            # 只清已处理的对账差异：未处理的行是待办事项，不能随历史过期
+            (
+                "reconciliations",
+                "DELETE FROM reconciliations WHERE ts < ? AND resolved = 1",
+                (cutoff_ms,),
+            ),
         )
         deleted: dict[str, int] = {}
         with self._lock:
@@ -1924,6 +2110,23 @@ def _dead_letter_filters(
         params.append(since)
     if only_pending:
         clauses.append("replayed_at IS NULL")
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, tuple(params)
+
+
+def _reconciliation_filters(
+    *,
+    kind: str | None,
+    only_open: bool,
+) -> tuple[str, tuple]:
+    """拼 reconciliations 的 WHERE 子句。"""
+    clauses: list[str] = []
+    params: list[object] = []
+    if kind is not None:
+        clauses.append("kind = ?")
+        params.append(kind)
+    if only_open:
+        clauses.append("resolved = 0")
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, tuple(params)
 
