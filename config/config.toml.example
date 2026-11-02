@@ -50,6 +50,7 @@ window_size = 200                         # 策略可见历史 bar 数
 task_workers = 1                          # 回测任务消费者数（CPU 密集，默认串行）
 artifacts_dir = "./data/backtests"        # 回测产物目录（equity/trades/report）
 max_combos = 500                          # 单次寻优的组合上限（CLI 与看板共用）
+funding_rate_enabled = false              # 计入永续资金费率成本（需先 fetch-funding-rates 回补 -SWAP）
 
 [params]
 resolve_from_db = true                    # 策略参数是否合并在线覆盖；false=只看 toml（回滚开关）
@@ -111,6 +112,7 @@ bindings_fail_mode = "db"                 # 绑定缓存丢失时：db=回落读
 host = "127.0.0.1"                        # 只读看板监听地址，默认仅本机
 port = 8080
 web_dir = "./web/dist"                    # 前端构建产物目录
+token = "${DASHBOARD_TOKEN:-}"            # 写操作 token；留空=只校验本机 Host + 自定义头
 
 [monitor]
 alerts_persist = true                     # 告警写 SQLite；false 退回「只写 Redis」的旧行为
@@ -133,3 +135,14 @@ limit = 500                               # 读取的模拟盘成交上限
 config_dir = "./config/strategies"
 out_dir = "./reports/daily"               # CSV 输出目录
 email = true                              # SMTP 未配置时自动降级为仅日志
+
+[smtp]
+# 告警与日报邮件；host/username/to_addrs 缺任一则降级为仅日志。
+# 密码为邮箱「授权码」，不是登录密码；详见 docs/reference/SMTP_SETUP.md
+host = "${SMTP_HOST:-smtp.qq.com}"        # QQ 邮箱 smtp.qq.com；其他服务商按需改
+port = 465
+username = "${SMTP_USERNAME:-}"           # 发件邮箱地址
+password = "${SMTP_PASSWORD:-}"           # 邮箱授权码（非登录密码）
+from_addr = "${SMTP_FROM:-}"              # 留空则用 username
+to_addrs = []                             # 收件人列表，如 ["me@example.com"]
+use_ssl = true

@@ -1,0 +1,23 @@
+# 复制为 sma_cross.toml 后使用（真实 toml 不入 git）
+# 说明：class 指向 Python 策略副本；[params] 键名必须与策略 PARAM_SPEC / on_init 逐字一致
+
+[strategy]
+strategy_id = "sma_cross"                                 # 与文件名一致；不一致会加载失败
+class = "quant.strategies.python.sma_cross.SmaCrossStrategy"
+
+[params]
+fast_len = 10            # 快线周期（根），必须 < slow_len
+slow_len = 100           # 慢线周期（根）
+ema_filter = true        # 启用 EMA 趋势过滤
+ema_len = 200            # EMA 周期（根）
+ema_band_atr = 0.0       # 趋势门槛在 EMA 之上再抬高的 ATR 倍数，0=不抬高
+atr_len = 14             # ATR 周期（根）
+commission_rate = 0.001  # 下单量预留用的手续费率
+
+[risk]
+# 与全局 [risk] 取严（两者都有时取更小的一侧）
+max_position_pct = 0.30        # 单品种最大持仓占比
+max_total_pct = 0.80           # 账户总仓位上限
+max_order_qty = 2000           # 单笔最大名义价值（USDT，不是数量）
+daily_loss_limit = 0.05        # 日亏损上限（比例）
+consecutive_loss_limit = 3     # 连续亏损笔数上限

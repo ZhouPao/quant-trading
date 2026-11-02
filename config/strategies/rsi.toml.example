@@ -1,0 +1,20 @@
+# 复制为 rsi.toml 后使用（真实 toml 不入 git）
+# 说明：class 指向 Python 策略副本；[params] 键名必须与策略 PARAM_SPEC / on_init 逐字一致
+
+[strategy]
+strategy_id = "rsi"                                       # 与文件名一致；不一致会加载失败
+class = "quant.strategies.python.rsi.RsiStrategy"
+
+[params]
+rsi_period = 14          # RSI 周期（根），Wilder 平滑
+oversold = 30            # 低于该值且空仓时买入
+overbought = 70          # 高于该值且持多时平仓；必须 > oversold
+commission_rate = 0.001  # 下单量预留用的手续费率
+
+[risk]
+# 与全局 [risk] 取严（两者都有时取更小的一侧）
+max_position_pct = 0.30        # 单品种最大持仓占比
+max_total_pct = 0.80           # 账户总仓位上限
+max_order_qty = 2000           # 单笔最大名义价值（USDT，不是数量）
+daily_loss_limit = 0.05        # 日亏损上限（比例）
+consecutive_loss_limit = 3     # 连续亏损笔数上限
