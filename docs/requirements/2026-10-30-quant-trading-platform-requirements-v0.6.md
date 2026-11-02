@@ -104,15 +104,15 @@
 
 | # | 模块 | 一句话职责 | 状态 |
 |---|---|---|---|
-| 1 | 首页总览 | 账户/持仓/风险/权益、7 进程健康、今日事件流、数据新鲜度 | 🟡 部分实现 |
+| 1 | 首页总览 | 账户/持仓/风险/权益、7 进程健康、今日事件流、数据新鲜度 | ✅ 基本实现 |
 | 2 | 市场监控 | 多周期 K 线下载与校验、tickers 实时行情、技术指标图表 | ✅ 基本实现 |
 | 3 | 策略研究 | 策略登记、PARAM_SPEC 参数编辑、启停矩阵、双副本一致性 | 🟡 部分实现 |
 | 4 | 回测分析 | 回测、寻优、walk-forward、结果持久化与对比 | ✅ 基本实现 |
 | 5 | 因子库 | 因子注册、时序/横截面计算与缓存、有效性检验 | ⬜ 未开始 |
 | 6 | 组合管理 | 多策略×多品种的权重、资金分配、再平衡、归因 | ⬜ 未开始 |
-| 7 | 风险控制 | 两层参数、六条规则、在线阈值覆盖、熔断与 kill switch | 🟡 部分实现 |
-| 8 | 交易执行 | webhook → 队列 → 下单 → 对账 → 审计；含死信与手工交易 | 🟡 部分实现（缺仓位计算、状态机、死信重放、对账） |
-| 9 | 日志告警 | 单文件日志、11 条告警规则、SQLite 主存、已读与静音 | 🟡 部分实现 |
+| 7 | 风险控制 | 两层参数、六条规则、在线阈值覆盖、熔断与 kill switch | ✅ 基本实现 |
+| 8 | 交易执行 | webhook → 队列 → 下单 → 对账 → 审计；含死信与手工交易 | ✅ 基本实现 |
+| 9 | 日志告警 | 单文件日志、11 条告警规则、SQLite 主存、已读与静音 | ✅ 基本实现 |
 | 10 | 系统设置 | 配置只读与白名单热改、凭证健康、保留分档、进程控制、备份自检 | 🟡 部分实现 |
 
 **编号规则**：`M<模块号>-<序号>`（如 `M2-7`）。每条需求附「来源」列标注 v0.5 的原编号，便于追溯；`新增` 表示 v0.6 首次提出。
@@ -165,7 +165,7 @@
 | M1-2 | 持仓摘要 | 各品种方向、数量、开仓均价、未实现盈亏、杠杆；一行一品种，可跳转交易执行 | F5.2 | ✅ |
 | M1-3 | 风险摘要 | 保证金率、实时最大回撤、强平价距离、撤单率；超标项用颜色区分 | F5.3 | ✅ |
 | M1-4 | 权益曲线 | 近 24 小时 / 7 天 / 30 天三档切换（默认 24h）；数据来自 `equity_snapshots`，保留 365 天 | 新增 | ✅ |
-| M1-5 | 进程与引擎健康 | **7 个进程各自心跳**（supervisor/candles/webhook/worker/engine/monitor/dashboard）+ engine 当前周期与最近评估时间；任一进程心跳过期即标红。看板「进程健康」卡按 `/api/processes` 呈现 7 进程在线/心跳/pid/重启次数，并附 engine 当前策略·品种·周期、最近评估与落后根数 | 新增 | ✅ |
+| M1-5 | 进程与引擎健康 | **7 个进程各自心跳**（supervisor/candles/webhook/worker/engine/monitor/dashboard）+ engine 当前周期与最近评估时间；任一进程心跳过期即标红。看板「进程健康」卡按 `/api/processes` 呈现 7 进程在线/心跳/pid/重启次数，并附 engine 当前策略·品种·周期、最近评估与落后根数；worker 以 `--ws` 启动时另显示 WS 连接状态与连续失败次数（数据源见 M2-2） | 新增 | ✅ |
 | M1-6 | 今日事件流 | 当日信号/下单/成交/告警按时间倒序合并成一条流；支持按类型筛选；点击可跳到对应模块。**已落地**：新增 `SQLiteStore.daily_timeline()` 用单条 `UNION ALL` 查四表（各自显式列别名，只筛一类时外层排序仍可用），时间一律取事件发生时间（`signals.ts` / `orders.created_ts` / `fills.ts` / `alerts.created_at`），`ORDER BY ts DESC, kind, ref_id` 保证同毫秒可稳定分页；`GET /api/timeline?kinds=&limit=&offset=`，`kinds` 大小写在路由层归一、非法值回落全部；`since` 为当日 UTC+8 零点，与风控日切口径一致。看板首页「今日事件流」卡按类型多选筛选（全部/信号/下单/成交/告警），点击行按后端 `module`（alerts/strategies/execution）跳到日志告警、策略研究、交易执行；SQLite 读失败只让该卡 `degraded=["sqlite"]`，不影响首页其余卡片 | 新增 | ✅ |
 | M1-7 | 数据新鲜度 | 引擎消费的 `品种 × 周期` 最新已收盘 bar 时间与滞后根数；超过阈值标红并提示「engine 落后 N 根」。**已实现 `GET /api/freshness`**：`lag_bars` 复用 engine 口径，另加 `missing_bars`（本地最新 bar 相对「此刻应有 bar」的缺口，用于识别 candles 与 engine 一起卡住时 `lag_bars=0` 的假同步）；阈值 1 根，`stale` 为两种落后取或；看板首页「数据新鲜度」卡分别提示「engine 落后 N 根」「本地缺 N 根」。当前只返回 engine 主组合，多绑定逐组合待 engine 发布各自水位 | 新增 | ✅ |
 | M1-8 | 今日盈亏汇总 | 当日已实现盈亏 + 未实现盈亏变化 + 手续费，按品种拆分；口径与 M4 回测指标一致。**已实现**：`SQLiteStore.get_today_pnl_by_inst()` 按品种统计今日 FIFO 回合盈亏（含手续费）+ 手续费 + 成交额；`DashboardService.today_pnl()` 合并持仓未实现盈亏（按标记价估算，缺标记价回退均价）；`GET /api/today-pnl` 返回按总盈亏降序排列的品种列表 + 汇总（已实现/未实现/手续费/总盈亏）；看板首页「今日盈亏」卡展示汇总数据与品种明细表，SQLite 读失败只让该卡 `degraded=["sqlite"]` | 新增 | ✅ |
@@ -222,9 +222,9 @@
 | 编号 | 功能项 | 详细要求 | 来源 | 状态 |
 |---|---|---|---|---|
 | M2-1 | 历史 K 线下载 | 指定品种（现货/永续）、周期、时间范围；`history-candles` 自动翻页拉旧数据；按 `.checkpoints` 断点续传 | F1.1 | ✅ |
-| M2-2 | 实时行情订阅 | **仅订阅 `tickers` 频道**，产出 `Tick`；每品种只保留最新一条（不缓存历史）；自动重连带 ±20% 抖动，退避 5s→60s；连接状态与连续失败次数上报 Redis | F1.2 | 🟡 |
+| M2-2 | 实时行情订阅 | **仅订阅 `tickers` 频道**，产出 `Tick`；每品种只保留最新一条（不缓存历史）；自动重连带 ±20% 抖动，退避 5s→60s；连接状态与连续失败次数上报 Redis。**已实现**：`WSClient` 退避基数仍按 5s 翻倍至 60s，实际等待取 `base × U(0.8, 1.2)` 并封顶 60s，多进程同时断线不会同秒重连；状态快照含 `connected`/`failures`/`last_error`/`last_error_ts`/`connected_since`/`next_delay`，连上即清零连续失败次数。worker 每次心跳把快照写入 `quant:ws:status:worker`（TTL 同心跳 120s，进程一停自然过期），`GET /api/processes` 把它挂在 worker 条目上，看板进程卡显示「WS 已连接」或「WS 断开 · 连续失败 N · Xs 后重连」，错误详情放 `title` | F1.2 | ✅ |
 | M2-3 | 产品配置拉取 | 拉取全部交易对 `instruments`（`tickSz`/`lotSz`/`minSz` 等）；模拟盘与实盘 `instIdCode` 独立拉取；USD 现货已迁 USDC | F1.3 | ✅ |
-| M2-4 | 资金费率 | 定时拉取当前资金费率并按 `ts` 去重追加到 `data/funding_rates/{inst_id}.json`，供手续费估算与持仓成本参考。**现状只取最新一条（`/public/funding-rate`），未接 `/public/funding-rate-history`，因此无法回补历史区间**，M4-15 的资金费率成本回测需先补该能力，故为 🟡 | F1.4 | 🟡 |
+| M2-4 | 资金费率 | 定时拉取当前资金费率并按 `ts` 去重追加到 `data/funding_rates/{inst_id}.json`，供手续费估算与持仓成本参考。**已实现历史回补**：新增 `OKXClient.get_funding_rate_history()`（`/public/funding-rate-history`，按 `after` 向前翻页），`FundingRateFetcher.fetch_history()` 以「本页最旧 ts」为游标翻页，按 `start_ts`/`end_ts` 过滤、按 ts 去重合并，并设 `max_pages` 兜底（默认 100 页 ≈ 9 年）。历史端点不返回 `nextFundingTime`，该字段回补时记 0，之后实时轮询会把同 ts 记录补齐（合并时优先保留非 0 值）。CLI：`quant fetch-funding-rates --inst X [--start YYYY-MM-DD [--end YYYY-MM-DD] [--max-pages N]]`，不传 `--start` 维持「只拉最新一条」 | F1.4 | ✅ |
 | M2-5 | 数据存储 | K 线按「品种/周期/年份」分 parquet 落盘；产品配置存 JSON。**落盘字段统一转 snake_case**（`volCcyQuote` → `vol_quote`），不保留 OKX 原始驼峰名，避免下游到处做名称映射 | F1.5 | ✅ |
 | M2-6 | 限频管理 | 按端点组令牌桶：公开行情 20req/2s、账户 10req/2s、单下 60/批下 300/撤单 60req/2s；命中 `50011` 睡 2 秒重试 | F1.6 | ✅ |
 | M2-7 | 数据完整性校验 | 按周期校验时间戳连续性；缺失段自动补拉（最多 3 次）；重复时间戳保留最新；校验 OHLC 合法性；结果输出为 `DataQualityReport` | F1.7 | ✅ |
@@ -302,8 +302,11 @@
 | M3-11 | 启停矩阵 | `strategy_id × inst_id` 为键，`bar` 记在绑定上但不作为键——同一策略同一品种只允许一个周期，避免两个周期对同一持仓重复下单 | 新增 | ✅ |
 | M3-12 | 启停即时生效 | 启停状态写 Redis 缓存，engine 每轮读取；切换无需重启进程 | 新增 | ✅ |
 | M3-13 | 双副本一致性校验 | 比对 Pine 与 Python 的参数名、默认值、周期；不一致时在策略页提示并产生告警 | 新增 | ⬜ |
-| M3-14 | 参数变更回滚 | 可从 `strategy_param_changes` 选任一条历史值一键恢复（产生一条新的变更记录，不删历史） | 新增 | ⬜ |
-| M3-15 | 策略详情页 | 一页呈现：参数表单、启停开关、最近 10 次评估、关联回测入口、变更历史 | 新增 | ⬜ |
+| M3-14 | 参数变更回滚 | 可从 `strategy_param_changes` 选任一条历史值一键恢复（产生一条新的变更记录，不删历史）。首条变更的 `old_value` 为空（变更前用 toml 默认值），此类记录不可回滚 | 新增 | ✅ |
+| M3-15 | 策略详情页 | 一页呈现：参数表单、启停开关、最近 10 次评估、关联回测入口、变更历史。评估历史由 engine 每轮写 Redis 定长列表（含无信号轮次），按绑定合并后取最近 10 条 | 新增 | ✅ |
+| M3-16 | 策略一键回测 | 详情页「用当前参数回测」把策略与其当前组合带入回测页并立即提交；参数不额外覆盖，由后端按 toml 默认 + DB 覆盖合并，保证「回测用 A、实盘用 B」不会发生。回测页轮询进度并展示指标 | 新增 | ✅ |
+| M3-17 | 详情页回测结果回显 | 详情页列出该策略最近 5 次回测（时间/品种周期/区间/状态/收益/回撤/夏普/交易数与参数），点「查看」跳回测页直接载入该次权益曲线与成交明细，不重复提交任务；循环刷新，一键回测完成后新结果即时出现 | 新增 | ✅ |
+| M3-18 | 参数版本回测对比 | 按「同品种 + 同周期 + 同区间」分组，把不同参数版本（同参数只保留最新一次）并排展示收益/回撤/夏普并标出各项最优，小字给出与最优值的差距（pp / 绝对差）；「曲线形态」按需懒加载前 3 个版本的权益曲线（共用纵轴、每股 60 点），「在回测页对比」把最多 4 个版本带入叠加曲线。复用 `/api/backtest/runs`、`/api/backtest/{id}/equity` 与 `/api/backtest/compare`，不新增表 | 新增 | ✅ |
 
 **参数变更流程**：`看板提交 → 校验(PARAM_SPEC) → 写 strategy_params → 写 strategy_param_changes(含 commit) → 刷新 Redis 缓存 → engine 下一根 bar 生效`。
 
@@ -330,12 +333,15 @@
 | `BacktestArtifact` | `run_id` / `kind` / `path` / `rows` | 指向 parquet 或 HTML 文件；DB 只存路径与行数，不存数组 |
 | `OptimizeJob` | `job_id` / `base` / `grid` / `metric` / `status` / `total` / `done` / `best_params` | 网格任务进度与最优解 |
 | `PineBaseline` | `run_id` / 各同名指标值 / `deviation` | 手工导入的 TradingView 回测指标与偏离度 |
+| `FundingSchedule` | `timestamps` / `rates` | 资金费率结算表（M4-15），两条等长元组按 ts 升序平行存放，回测期间只读；由 `data/funding_rates/{inst}.json` 构造，不落库 |
 
 #### 4.4.2 存储
 
 **SQLite 新增 4 张表**：`backtest_runs`、`backtest_metrics`、`backtest_artifacts`、`optimize_jobs`。金额沿用 TEXT 存 Decimal 字符串，指标用 REAL。
 
-`PineBaseline` **不单独建表**：导入的 Pine 指标落在 `backtest_metrics` 的 `pine_<metric>` 列与 `deviation` 列（同名指标一一对应），保持「5 个模型 ↔ 4 张表」口径一致。
+`PineBaseline` **不单独建表**：导入的 Pine 指标落在 `backtest_metrics` 的 `pine_<metric>` 列与 `deviation` 列（同名指标一一对应），保持「6 个模型 ↔ 4 张表」口径一致（`FundingSchedule` 是内存结构，不入库）。
+
+**资金费率（M4-15）不新增表**：结算表每次回测时从 M2-4 落的 `data/funding_rates/{inst}.json` 读入内存，回测结束即丢弃；净支出写 `backtest_metrics.funding_cost`（schema v9 补列）。**为什么走增量迁移**：这一列原先只在 `BacktestResult.metrics` 里存在，页面刷新/进程重启后「这笔回测付了多少资金费」就查不到了；而 v5 的建表语句早已在存量库里执行过，直接改它等于让老库永远缺列。`user_version` 会把每段迁移只执行一次，因此 `ALTER TABLE ... ADD COLUMN` 不会重放——代价是若有人手工把版本号回退到 v8 再启动，该迁移会因列已存在而失败，属于人工改库后的已知限制，正常升级路径不受影响。
 
 **文件布局**：
 
@@ -345,6 +351,7 @@ data/backtests/{run_id}/
 ├── drawdown.parquet    # ts, drawdown
 ├── trades.parquet      # 成交明细
 ├── segments.parquet    # 仅 walk_forward：逐段 IS/OOS 结果
+├── batch.parquet       # 仅 batch：逐格参数与指标（含失败行）
 └── report.html         # 可选，复用现有 ReportGenerator
 ```
 
@@ -356,6 +363,11 @@ data/backtests/{run_id}/
 | 查询状态 | `BacktestService.status(run_id) -> dict` | 返回 `status` / 进度 / 完成时的指标 |
 | 任务执行 | `TaskRunner` | 单 worker 线程 + FIFO 队列；同时只跑 1 个重任务，避免打满 CPU |
 | Pine 对比 | `PineBaseline.compare(run_id, csv) -> dict` | 按固定列名 `metric,value` 解析，逐项算偏离度，> 5% 标记超限 |
+| 资金费率开关 | `load_funding_schedule(settings, inst, enabled=None) -> FundingSchedule \| None` | 未启用返回 `None`；启用但本地无 `-SWAP` 费率数据抛 `BacktestSetupError`（不静默按 0 处理）。`enabled=None` 取 `[backtest] funding_rate_enabled`，CLI `--funding` 显式覆盖 |
+| 回测入参 | `Backtest(..., funding: FundingSchedule \| None = None)` | 单次回测、`GridOptimizer`（含进程池 worker）、`WalkForward` 统一透传，保证三条路径口径一致 |
+| Pine 导入对比 | `POST /api/backtest/{run_id}/pine`，body `{csv}` | 只接受 `done` 的回测；返回逐项 `pine`/`python`/`deviation`/`over_limit`、`unmatched` 与 `max_deviation`，并把 `pine_*` 列写回指标表。写操作，需本机 Host + 自定义头 |
+| 批量回测提交 | `POST /api/backtest/batch`，body `{strategy, insts[], bars[], start, end, params?, grid?, metric?, warmup_bars?}` | 品种 × 周期 × 参数网格展平成格子，登记为 `kind="batch"` 的 pending 任务后立即返回 `run_id`；组合数上限复用 `backtest.max_combos`，品种数上限 10。`sync=1` 时同步跑完直接返回汇总（测试/脚本用） |
+| 批量回测结果 | `GET /api/backtest/{run_id}/batch` | 读 `batch.parquet` 返回逐格行：`inst`/`bar`/`params`/`metrics`/`error`。成功格按 `metric` 排序（回撤类升序），失败格 `error` 非空、指标为空 |
 
 #### 4.4.4 需求条目
 
@@ -367,7 +379,7 @@ data/backtests/{run_id}/
 | M4-4 | 回测报告 | 收益曲线、回撤曲线、交易明细；输出 CSV 与 HTML（内联 SVG） | F2.5 | ✅ |
 | M4-5 | 参数寻优 | 网格搜索；结果按指标降序；非法组合跳过而非报错；单次组合数上限。上限 `backtest.max_combos`（默认 500）由看板与 CLI 共用，CLI 可用 `--max-combos` 覆盖 | F2.6 | ✅ |
 | M4-6 | Walk-forward 验证 | 滚动 IS/OOS；IS 选参、OOS 只评估；输出逐段表、复合收益、盈利段数、参数众数 | 新增 | ✅ |
-| M4-7 | 批量回测 | 一次跑「多品种 × 多周期 × 多参数」，结果汇总成表。当前只有单策略单品种回测与单策略网格寻优，无跨品种/跨周期批量 | 新增 | ⬜ |
+| M4-7 | 批量回测 | 一次跑「多品种 × 多周期 × 多参数」，结果汇总成表。**已落地**：新增 `backtest/batch.py`（`expand_cells` 按「品种 → 周期 → 参数组合」展平、`BatchSweep` 逐格回测、`sort_cells` 排序），复用 `Backtest` 与 M4-15 的资金费率透传；同一 `(品种, 周期)` 的 K 线与「读不到」的异常各缓存一次，整批只读一遍。单格失败不中断整批（失败行带原因），全部失败才报错；`should_stop` 支持取消。结果登记为 `kind="batch"` 任务、逐格行写 `batch.parquet`，汇总口径留空 `metrics`（批量没有单一代表指标，避免历史列表出现来路不明的数字）。组合上限复用 `backtest.max_combos`（默认 500），品种数上限 `MAX_BATCH_INSTS=10`。接口 `POST /api/backtest/batch` + `GET /api/backtest/{run_id}/batch`，前端回测面板新增「批量回测」模式（品种/周期逗号分隔 + 可选网格 + 排序指标）与汇总表，失败格单列原因 | 新增 | ✅ |
 | M4-8 | 与实盘偏离 | 日报记录模拟盘成交与同参数回测的偏离度，超 5% 判定 FAIL 并随日报邮件发出。**未进 M9 告警体系**（`alerts` 表无对应规则），故为 🟡 | F3.6 | 🟡 |
 | M4-9 | 结果持久化 | 每次回测登记 `BacktestRun`，指标写 `backtest_metrics`，大体积曲线与成交写 parquet 并登记 `artifacts`；重启后可查。**已落地**：后端 4 张表 + `/api/backtest/runs`、详情、`/equity`、`/trades`、`/segments`；前端历史改读后端，权益曲线与成交按需从产物接口加载，localStorage 摘要已移除 | 新增 | ✅ |
 | M4-10 | 历史列表与重跑 | 按策略/品种/周期/时间/状态筛选历史回测；可复制参数一键重跑（新 `run_id`，不覆盖旧结果）。**已落地**：前端筛选项直传 `/api/backtest/runs`，每行提供「查看 / 重跑 / 取消」，重跑走 `/rerun` 生成新 `run_id`，旧结果保留 | 新增 | ✅ |
@@ -375,16 +387,18 @@ data/backtests/{run_id}/
 | M4-12 | 后台任务与进度 | 提交即返回 `run_id`；前端轮询状态；支持取消（`pending` 直接取消，`running` 标记后在下根 bar 退出）。**已落地**：页面改用异步提交，每秒轮询详情直到 `done/failed/canceled`，状态条显示排队/运行/结束时间并带取消按钮；完成后自动加载曲线与成交 | 新增 | ✅ |
 | M4-13 | 寻优进度与并发 | `GridOptimizer` 的 `n_jobs` 真正生效（进程池）；进度按已完成组合数上报；单次组合数上限可配。**并行与 `backtest.max_combos` 已实现**；进度回调未上报到看板，`/api/optimize` 仍同步返回（需把寻优改为登记式任务 + 进度列，schema 迁移后再做） | 新增 | 🟡 |
 | M4-14 | 扩展指标 | 新增 Calmar、Sortino、月度收益表、最大连续亏损次数与金额、持仓暴露度（有仓 K 线占比）。**已落地**：7 项均已计算并落库；前端展示 Calmar/Sortino/连亏/暴露度，本次补上「月度收益表」（读 `metrics.monthly_returns`，首月只作基准不出行） | 新增 | ✅ |
-| M4-15 | 永续资金费率成本 | 回测可选计入资金费率：按 `funding_rate` 历史逐 8 小时结算，持仓过结算点才计费；多空方向符号不同 | 新增 | ⬜ |
-| M4-16 | Pine 回测结果导入对比 | 支持粘贴/上传 `metric,value` 两列 CSV，与同参数 Python 回测逐项算偏离度；> 5% 标红并禁止该参数集上实盘 | 新增 | ⬜ |
+| M4-15 | 永续资金费率成本 | 回测可选计入资金费率：按 `funding_rate` 历史逐 8 小时结算，持仓过结算点才计费；多空方向符号不同。**已落地**：新增 `backtest/funding.py`（`FundingSchedule` 不可变结算表 + 本地费率读取 + 现货→`-SWAP` 映射），引擎在主循环内逐根推进结算点，按 `cash -= rate × qty × bar.open` 统一处理多空符号（qty 带符号，rate>0 多头付、空头收），并对 §4.4 的单次回测、寻优、walk-forward 全部透传。开关 `[backtest] funding_rate_enabled`（默认关）+ CLI `--funding`；启用但本地无费率数据直接报错而非静默忽略。`BacktestResult.funding_cost` 与 `metrics["funding_cost"]` 暴露净支出（正=付出），CLI 指标区展示；**已随指标落库**（schema v9 给 `backtest_metrics` 补 `funding_cost` 列，老库启动时自动升级），看板回测详情的指标区新增「资金费率成本」卡（4 位小数，正=付出显示 warn 色、负=收取显示 good 色），刷新页面后仍可见 | 新增 | ✅ |
+| M4-16 | Pine 回测结果导入对比 | 支持粘贴/上传 `metric,value` 两列 CSV，与同参数 Python 回测逐项算偏离度；> 5% 标红并禁止该参数集上实盘。**已落地**：新增 `backtest/pine_compare.py`（CSV 解析 + 逐项偏离度 + 落库列转换），解析容忍表头/空行/`#` 注释，带 `%` 的数值按小数归一（`9.21% → 0.0921`）；偏离度 `|pine−python|/|python|`，分母为 0 时只在两边都为 0 时算一致，否则标记超限但不给数值。指标名与内部字段对不上的归入 `unmatched` 而非整单失败，全部对不上才报错。结果回写 `backtest_metrics` 的 `pine_total_return`/`pine_sharpe`/`pine_max_drawdown`/`pine_deviation` 四列；`pine_deviation` 与同策略同参数（`backtest_runs.params` 的规范化 JSON 文本）的最大值比对，> 5% 时启停矩阵拒绝启用。接口 `POST /api/backtest/{run_id}/pine`（写操作，需本机 Host + 自定义头），前端在回测详情里提供粘贴框与标红表格 | 新增 | ✅ |
 
 **指标口径**：`equity = cash + qty × close` 逐根记录；年化按 `(1+r)^(365天/回测时长)-1`；夏普用日收益 `mean/std × sqrt(365)`（加密 7×24）；最大回撤与回撤曲线共用一次遍历。新增指标沿用同一权益序列，不引入新的数据来源。
 
+**资金费率口径（M4-15）**：每个结算点（费率记录的 `ts`）在「该时刻已持仓」时结算一次，`cash -= rate × qty × 结算价`；qty 带符号，因此 `rate > 0` 时多头付出、空头收取，负费率反向。结算价用结算时刻所在 bar 的开盘价近似（OKX 用标记价格，本地只有 K 线）；结算发生在当根 bar 成交之前，故与开仓同一根 bar 的结算点不计费。一根 bar 跨多个结算点时逐个结算。`funding_cost` 汇总净支出（正=付出、负=收取），已体现在权益曲线里，不重复计入手续费。
+
 **不做**：分布式回测、tick 级回测、可视化策略编辑器、自动对接 TradingView（无公开 API，只支持导入）。
 
-**前置条件**：M4-15 依赖 M2-4 补齐资金费率历史回补（当前只取最新一条，不足以覆盖回测区间）；**M4-12/M4-13 的后端长任务与并发已就绪**，剩余为前端轮询与进度展示；M4-16 的 CSV 列名固定为 `metric,value`，指标名与内部字段同名。
+**前置条件**：M4-15 的资金费率历史回补已由 M2-4 完成（`quant fetch-funding-rates --start`），启用前需先回补对应 `-SWAP` 合约的区间；**M4-12/M4-13 的后端长任务与并发已就绪**，剩余为前端轮询与进度展示；M4-16 的 CSV 列名固定为 `metric,value`，指标名与内部字段同名。
 
-**验收**：提交一次长的批量回测，HTTP 在 1 秒内返回 `run_id` 且页面可轮询进度；进程重启后历史回测仍可列出并查看曲线；同一参数集的全量重跑与缓存结果逐项相等；导入 Pine 指标后偏离度 > 5% 的项明确标红；walk-forward 的 OOS 数据不得回流影响选参（有单测固定）。
+**验收**：提交一次长的批量回测，HTTP 在 1 秒内返回 `run_id` 且页面可轮询进度；进程重启后历史回测仍可列出并查看曲线；同一参数集的全量重跑与缓存结果逐项相等；导入 Pine 指标后偏离度 > 5% 的项明确标红且该参数集启用被拒；walk-forward 的 OOS 数据不得回流影响选参（有单测固定）；开启资金费率后同一区间结果与关闭时有差异（多空方向符号正确），关闭时 `funding_cost` 恒为 0，启用但未回补费率数据时直接报错并提示回补命令，且该值随指标落库（刷新页面、重启进程后仍能从历史详情读到同一数值）；批量回测选 2 品种 × 2 周期 × 2 组参数应返回 8 行并按所选指标排序，某个品种缺本地 K 线时只有该品种的行进失败表（带原因），其余格照常出结果。
 
 ---
 
@@ -565,7 +579,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M7-14 | 阈值变更审计 | `risk_overrides` 记录字段、改前、改后、时间、原因、来源；覆盖值可从页面一键清除回落到配置值。已落地：`insert_risk_override` 只追加不覆盖，`revoke_risk_overrides` 置 `revoked_at/revoked_by` 而非删行；`RiskOverrideService` 先写 Redis 后写审计，**审计失败回滚 Redis**，避免「生效了但查不到谁改的」；变更原因必填，比例类字段约束在 (0,1]；看板「变更历史」可查全部记录（含已清除） | 新增 | ✅ |
 | M7-15 | 权益口径统一 | 一律使用 monitor 账户快照的 `total_equity`；未拿到快照时不得退回 `initial_equity` 做真实下单判定，应拒绝并记原因。`[risk] allow_initial_equity_fallback` 默认 `false`，worker 已按配置传入 | 新增 | ✅ |
 | M7-16 | 规则边界单测 | 每条规则覆盖：恰好等于阈值、无可用价格、空持仓、权益为 0、多规则同时命中时的优先级。`tests/test_risk.py` 已覆盖上述边界 | 新增 | ✅ |
-| M7-17 | 风控与告警联动 | `halt=true` 或熔断触发时，同步产生 M9 告警；同一次事件不重复告警（按 signal_id 去重）。熔断分支已接入（引擎直接 `AlertService.publish`）；`halt`（日亏损/连亏）的告警联动仍未接 | 新增 | 🟡 |
+| M7-17 | 风控与告警联动 | `halt=true` 或熔断触发时，同步产生 M9 告警；同一次事件不重复告警（按 signal_id 去重）。**已落地**：熔断分支由引擎直接 `AlertService.publish`；`halt`（日亏损/连亏）分支由 worker 在拒单当场发布 `risk_halt` 告警（ERROR，带品种与策略，同时自动启用 kill switch，不等 monitor 轮询），发布失败只记日志、不影响拒单结果；同一信号由 worker 入口的状态检查保证不重复发 | 新增 | ✅ |
 
 **规则执行顺序**：日亏损 → 连亏 → 熔断（三者任一命中即 `halt`，不再继续）→ 单笔名义价值 → 单品种比例 → 总仓位比例。前三条为硬停止，后三条为可下调数量的软限制。
 
@@ -931,8 +945,8 @@ quant-trading/
 | MS1（已完成） | M2-1 ~ M2-8 | OKX 客户端、本地 parquet、校验与对齐 |
 | MS2（已完成） | M4-1 ~ M4-5、M8-2 ~ M8-6、M7-1 ~ M7-3、M3-1 | 回测引擎 + 样例策略双副本；webhook + Redis + worker；风控规则与持久化 |
 | MS3（已完成） | M8-1、M8-4 ~ M8-6、M8-12、M8-13 | 模拟盘跑通完整链路；执行页与减仓平仓可用 |
-| MS4（进行中） | M9-1 ~ M9-5、M9-7、M9-8、M9-9、M9-11、M9-13、M1-1 ~ M1-7、M1-10、M7-4、M7-5、M7-10、M7-11、M7-15、M7-16、M4-6、M4-9 ~ M4-14、M8-14 ~ M8-17、M8-19、M3-9、M3-10、M3-11、M3-12、M2-15 | 监控告警与告警持久化、告警确认与静音、首页总览（含 7 进程健康与事件流）、kill switch 补齐撤单、风险指标、风控参数合并与事件落库、walk-forward 与回测结果落库对比、执行可靠性、策略参数与启停、数据质量报告 |
-| MS5（未开始） | M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17、M1-8、M1-9、M3-3、M3-4、M3-7、M3-8、M3-13 ~ M3-15、M4-7、M4-15、M4-16、M2-14、M10-1 ~ M10-4、M10-9 ~ M10-15，以及四条 🟡 的收口项 M3-5、M4-8、M8-7（待申请实盘 Key）、M8-8（代码完成，待公网反代与 TV 模板部署） | 公网反代与 TV alert 模板、实盘切换（Key/IP/权限运维动作）、熔断与在线阈值调整、今日盈亏与告警摘要、研究工作流与策略详情页、批量回测、资金费率成本、Pine 对比、持仓量采集、配置视图与白名单热改、凭证健康、备份与自检（M9-10/12/14、M9-5、M9-11 与 M8-11/17/18/19 已提前在 MS4 收尾批次完成） |
+| MS4（进行中） | M9-1 ~ M9-5、M9-7、M9-8、M9-9、M9-11、M9-13、M1-1 ~ M1-7、M1-10、M7-4、M7-5、M7-10、M7-11、M7-15、M7-16、M4-6、M4-7、M4-9 ~ M4-16、M8-14 ~ M8-17、M8-19、M3-9、M3-10、M3-11、M3-12、M2-15 | 监控告警与告警持久化、告警确认与静音、首页总览（含 7 进程健康与事件流）、kill switch 补齐撤单、风险指标、风控参数合并与事件落库、walk-forward 与回测结果落库对比、执行可靠性、策略参数与启停、数据质量报告、资金费率成本、批量回测、Pine 对比 |
+| MS5（未开始） | M7-6 ~ M7-9、M7-12 ~ M7-14、M7-17、M1-8、M1-9、M3-3、M3-4、M3-7、M3-8、M3-13 ~ M3-18、M2-14、M10-1 ~ M10-4、M10-9 ~ M10-15，以及四条 🟡 的收口项 M3-5、M4-8、M8-7（待申请实盘 Key）、M8-8（代码完成，待公网反代与 TV 模板部署） | 公网反代与 TV alert 模板、实盘切换（Key/IP/权限运维动作）、熔断与在线阈值调整、今日盈亏与告警摘要、研究工作流与策略详情页、持仓量采集、配置视图与白名单热改、凭证健康、备份与自检（M9-10/12/14、M9-5、M9-11 与 M8-11/17/18/19 已提前在 MS4 收尾批次完成） |
 | MS6（未开始） | M10-6、M10-7 | 上云、systemd 托管与开机自启（进程自愈由 M8-11 承担） |
 | MS7+（候选） | M5 全部（15 条）、M6 全部（14 条） | 因子库、组合管理 |
 
@@ -1035,3 +1049,10 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-10-31 | v0.6（补充 31，实盘接入自检） | M8-7 由 ⬜ 改 🟡（代码与自检完成，待运维申请实盘 Key）。①新增 `OKXClient.get_account_config()`（`GET /api/v5/account/config`）与 `quant.okx.live_check`：按 `perm` 判定「必须有 trade、不能有 withdraw」，按 `uid`/`mainUid` 判定子账户（主账户只 warn，不阻断），按 `ip` 核对白名单，`acctLv` 仅作展示；字段缺失一律按未知给 warn，不因交易所改字段名就误判通过。②新增 `quant check-live`：读 `[okx] demo` 打印当前环境，接口失败（典型为 50101 环境不匹配）直接给可执行提示，exit 1；有 fail 项 exit 1。③worker 在 `demo=false` 时启动即复检同一份判定：查到 fail（只读 Key / 开着提币）拒绝启动，网络或鉴权失败只告警放行——权限问题随后下单会暴露，但一次网络抖动不该让进程起不来。④看板总览新增 `trading_mode`（取配置而非快照，快照过期也不会误判环境），顶栏新增 MODE 徽标、标题栏改为「实盘 · 真实资金」并在实盘下标红。**取舍**：不做「一切实盘都要二次确认」的强制开关（PRD 只要求 Key 权限合规），也不在运行时反复查权限（仅启动一次，避免增加交易路径的失败面）。测试补 14 条：权限三态、主账户 warn、缺字段不误判、客户端解析与空响应、CLI 退出码、总览 env 字段 |
 | 2026-10-31 | v0.6（补充 32，真 webhook 与多策略路由） | M8-8 由 ⬜ 改 🟡（代码侧完成，待公网反代与 TV 模板部署）。**鉴权适配 TV**：TradingView 无法给 alert 加自定义请求头，原实现只认 `X-Auth-Token`，实盘接入必然失败；改为按「请求头 → `?token=` → JSON 体 `token`」取凭据，并新增 `[webhook] hmac_secret`（自建调用方可走 `X-Signature`）。**公网护栏**：`host` 非回环且两项鉴权都为空时 `serve-webhook` 拒绝启动。**来源可查**：接收/拒绝/解析失败日志统一带 `client=`（反代取 `X-Forwarded-For` 首跳）。**多策略路由**：原先 worker 用启动参数里的单一 `RiskConfig` 判定所有信号，而 engine 按 `strategy_bindings` 会产生多个 `strategy_id`，等于用 A 的阈值放行 B 的单；现改为 `--strategy a,b` 声明，信号按自身 `strategy_id` 取各自的 `RiskConfig`/`RiskLimits`，每个策略一个独立 `RiskChecker`（`to_thread` 执行中不会被换参数），在线覆盖按 `{strategy}:{param}` 逐策略生效，生效值逐策略发布到 `risk_limits_key:{strategy}`（看板已按前缀取最新一份）。未声明的策略进死信（`stage=route`、不落 rejected，补齐配置后可重放），绝不用别的策略阈值下单。运行手册新增 §1.2：Caddy/Nginx 反代示例、TV message 模板、curl 验证与多策略启动命令。测试补 14 条：token 三种来源与错误 token、未知策略进死信、逐策略限额与覆盖、逐策略发布、`--strategy` 解析、公网无鉴权拒绝 |
 | 2026-10-31 | v0.6（补充 33，M9 系列核查） | M9 逐条对账后仍全部 ✅/🚫，但补掉三个「文档写了、代码没落地」的点。**①M9-4 心跳中断检测缺失**：原实现只写带 TTL 的心跳键，从未读过上一轮——而 TTL 键在长停机后本身就过期了，无从判断。新增 `[monitor].monitor_last_beat_key`（无 TTL，仅存时间戳）：`run_once` 每轮刷新，`run()` 启动时比一次，超过 `monitor_heartbeat_timeout_seconds` 发 WARNING `monitor_restart`（带中断分钟数）。首次部署无基线不报、脏值只记日志不阻断启动、键留空即关闭该项。**②`silenced` 状态从未落库**：M9-7 要求静音期告警标 `silenced`，实际只写 `suppressed=1`、`state` 恒为 `open`，导致看板的「静音中」文案是死代码、也无法按该状态筛选。改为 `insert_alert` 在 `suppressed` 时落 `state='silenced'`，并同步放宽 `ack_alert` 与 `resolve_alerts` 的状态白名单（否则静音告警既不能标记已读、也不会被恢复关闭）；看板补「静音中」筛选项与可标记已读。**③M9-1 模块前缀没用上绑定名**：格式串写的是 loguru `{module}`（Python 文件名），`get_logger("cli.run_worker")` 绑定的 `extra.name` 一直是死字段，多进程日志只能区分到 `server`/`monitor` 这一级。改为 `{extra[name]}` 并在 filter 里 `setdefault` 回退模块名，未 bind 的调用方行为不变。顺带把 M9-2 的规则数从 11 修正为 12（含 M4-13 数据质量）。测试补 8 条：重启间隔四态（无基线/未超阈值/超阈值/脏值）、无 TTL 校验、键留空关闭、静音告警的 `silenced` 状态与 ack、静音告警可被 resolve |
+| 2026-10-31 | v0.6（补充 34，M2-2 WS 退避抖动与状态上报） | M2-2 由 🟡 改 ✅。①`WSClient` 重连退避加抖动：基数仍 5s 起翻倍至 60s，实际等待 `base × U(0.8, 1.2)` 并封顶，避免多进程/多品种同时断线后在同一秒集体重连；对端正常关闭也走同一套退避计数，不会空转。②新增 `status()` 快照（`connected`/`failures`/`last_error`/`last_error_ts`/`connected_since`/`next_delay`）：连上即清零连续失败与退避基数，异常与对端关闭都记录错误时间，日志追加 `failures=N` 便于判断「偶发一次」还是「一直连不上」。③worker 新增 `ws_client` 参数，`--ws` 启动时随心跳把快照写 `quant:ws:status:worker`（TTL 复用心跳 120s，worker 停则状态自然消失，不会留下「最后已连接」的假象），写失败只记日志不影响主循环。④`/api/processes` 把该快照挂在 worker 条目上，看板进程卡新增一行 `WS 已连接` / `WS 断开 · 连续失败 N · Xs 后重连`（warn 色），错误详情放 `title`；未启用 `--ws` 或键是脏值时该行不出现，其余判活逻辑不变。测试补 10 条：抖动区间与封顶、连续失败累计与错误记录、连上后清零、心跳写入快照、无 ws_client 不写键、进程接口挂载与脏值忽略 |
+| 2026-10-31 | v0.6（补充 35，M2-4 历史资金费率回补） | M2-4 由 🟡 改 ✅，解除 M4-15 的资金费率成本回测前置。①`OKXClient.get_funding_rate_history(instId, before, after, limit)` 接 `/api/v5/public/funding-rate-history`；该端点不返回 `nextFundingTime`，复用同一解析函数时该字段自然为 0。②`FundingRateFetcher.fetch_history(start_ts, end_ts, page_limit, max_pages)`：OKX 从新到旧返回，用「本页最旧 ts」作为下一轮 `after` 向前翻，命中 `start_ts` 或页面不满即停；`max_pages` 默认 100（≈9 年）防参数写错时无限请求，两侧边界都做区间过滤，`start_ts >= end_ts` 直接抛错而不是静默返回空。③新增 `_merge_and_save()` 统一合并路径：按 ts 去重、按 ts 升序落盘，同 ts 保留 `next_funding_ts` 非 0 的一条——否则先回补再实时轮询会把实时端点带来的 `nextFundingTime` 永久留空。④CLI 增加 `--start/--end/--max-pages`，不传 `--start` 保持原「只拉最新一条」语义；`--end` 单独出现或起点晚于终点直接 exit 1。测试补 13 条：分页游标推进、区间过滤、跑两遍幂等、`max_pages` 上限、混合去重与 `next_funding_ts` 补齐、客户端端点与参数透传、CLI 三种参数组合 |
+| 2026-10-31 | v0.6（补充 36，M4-15 资金费率成本） | M4-15 由 ⬜ 改 ✅，接上补充 35 解除的前置。①新增 `backtest/funding.py`：`FundingSchedule` 用两条平行元组（`timestamps`/`rates`）保持不可变，`index_until()` 借 `bisect` 让引擎每根 bar 只推进游标、不重复扫描历史结算点（1m 级别回测也不会退化成 O(bar×结算点)）；`load_funding_rates()` 直接读 M2-4 落的 `data/funding_rates/{inst}.json`，`swap_inst_id()` 把现货 `BTC-USDT` 映射到 `BTC-USDT-SWAP`。②引擎新增可选 `funding` 参数与 `BacktestResult.funding_cost`（正=付出、负=收取），逐根 bar 在开盘前结算：`cash -= rate × position.qty × bar.open`，用带符号 qty 统一多空方向（rate>0 多头付、空头收），空仓 `cost == 0` 直接跳过；结算发生在当根成交之前，故「结算时刻与开仓同 bar」不计该次费用。③结算价用结算时刻所在 bar 的开盘价近似（OKX 用标记价格，本地只有 K 线），一根 bar 跨多个结算点逐个结算。④`[backtest] funding_rate_enabled` 默认关，CLI `--funding` 可临时开启；`load_funding_schedule()` 在启用但本地无数据时抛 `BacktestSetupError`，避免「开关开了成本却是 0」的静默错误。⑤看板的单次回测、寻优与 walk-forward 一并透传（寻优的进程池 worker 通过 initializer 注入结算表），保证同一开关下三条路径口径一致。⑥`metrics["funding_cost"]` 供 CLI 打印，暂不落 `backtest_metrics`：SQLite 的 `ALTER TABLE ADD COLUMN` 非幂等，与迁移脚本的重放要求冲突，留待需要持久化时整表重建。测试补 12 条：结算表排序与游标、本地费率读取与缺失、开关三态、多头付/空头收、空仓不计费、单 bar 多结算点；实盘数据核对（BTC-USDT-SWAP 2026-10-01~10-31，1H，sma_cross）：关闭时资金费率成本 0.00，开启后 -84.51（净收取），总收益率由 -6.17% 变为 -5.37% |
+| 2026-11-01 | v0.6（补充 37，M4-16 Pine 结果导入对比） | M4-16 由 ⬜ 改 ✅。①新增 `backtest/pine_compare.py`：`parse_pine_csv` 解析 `metric,value` 两列文本，容忍表头、空行与 `#` 注释，带 `%` 的数值统一折成小数（`9.21% → 0.0921`），列数不对/数值非法/空输入都给出带行号的错误。②偏离度按 `|pine − python|/|python|` 逐项计算，`> 5%` 判超限；分母为 0 时只有两边同为 0 才算一致，否则标记超限且不给数值——宁可判可疑，也不因分母为 0 放行。③对不上的指标名不整单失败，归入 `unmatched` 单独返回（Pine 常导出我们没实现的统计量），全部对不上才算输入错误。④结果回写 `backtest_metrics` 已有的 `pine_total_return`/`pine_sharpe`/`pine_max_drawdown`/`pine_deviation` 四列（不新增表、不改 schema）；只覆盖本次导入的指标，其余列保持原值。⑤`SQLiteStore.worst_pine_deviation()` 用「策略 + `backtest_runs.params` 规范化 JSON 文本」定位同参数集的最大偏离度，启停矩阵在「启用」动作上拦截超限参数集（已启用的重复提交不重复拦），错误信息带上对比的 `run_id` 与百分比。⑥`POST /api/backtest/{run_id}/pine`：只接受 `done` 的回测，写操作走本机 Host + 自定义头校验；前端在回测详情底部提供粘贴框、逐项对比表（超限标红）与落库/未匹配提示。测试补 27 条：CSV 解析 8 条、偏离度与退化分支 7 条、落库列 2 条、服务与拦截 7 条、HTTP 端点 2 条、以及 1 条真实数据核对——BTC-USDT-SWAP 2026-10-01~10-31 的 sma_cross 回测（总收益 -6.17%、夏普 -4.7981、回撤 9.21%）按原值导入偏离度为 0，夏普虚报 10% 时偏离度 10.00% 且启用被拒，改到 3% 后放开 |
+| 2026-11-01 | v0.6（补充 38，M4-7 批量回测） | M4-7 由 ⬜ 改 ✅，MS4 收尾。①新增 `backtest/batch.py`：`expand_cells(insts, bars, grid)` 按「品种 → 周期 → 参数组合」展平成格子（去空白去重，空品种/空周期直接报错），`BatchSweep.run(cells, load_bars)` 逐格跑 `Backtest`，`sort_cells` 按指标排序。②**K 线只读一遍**：同一 `(品种, 周期)` 的加载结果与异常各缓存一次——一个缺数据的品种不会再按参数组数重复踩坑，也不会因 12 组参数把同一份 parquet 读 12 次。③**失败隔离**：单格 `ValueError`（如 `fast_len >= slow_len`）记入 `failed` 并带原因，其余格照常出结果；只有全部失败才抛错，否则用户拿到空表分不清是参数写错还是数据缺失。④**取消**：透传 `should_stop`，任务被取消后在下一次格子边界退出，不会卡在半批。⑤资金费率沿用 M4-15：按品种预加载 `FundingSchedule`，任一品种缺数据在开跑前就报错，不静默按 0。⑥服务层 `BatchRequest`（品种上限 `MAX_BATCH_INSTS=10`）+ `_batch_inputs` 一次校验 metric/网格/策略/区间，组合数沿用 `backtest.max_combos`；结果登记为 `kind="batch"`、逐格行写 `batch.parquet`（列 `inst`/`bar`/`params`/`metrics`/`error`），`metrics` 汇总口径故意留空——批量没有单一代表指标，塞某个格子的数字会让历史列表出现来路不明的值。⑦接口 `POST /api/backtest/batch`（`sync=1` 同步返回）与 `GET /api/backtest/{run_id}/batch`；`rerun` 按 `kind` 走回批量分支。⑧前端回测面板新增「批量回测」模式（品种/周期逗号分隔、可选网格、排序指标）与汇总表：成功格按指标排序（回撤类升序，缺失值恒排末尾），失败格单列原因，历史列表带「· 批量」标记。测试补 26 条：展平顺序与去重、空入参、排序三类（降序/升序/非数值末尾）、K 线缓存、单格失败与全失败、取消、进度、服务层组合数与上限、任务登记到 done 并读回逐格行、重跑、三个 HTTP 端点 |
+| 2026-11-01 | v0.6（补充 39，M4-15 资金费率成本落库与看板） | M4-15 收尾，把上一轮「暂不入库」的两项缺口补掉。①**schema v9**：新增一段迁移 `ALTER TABLE backtest_metrics ADD COLUMN funding_cost TEXT;`，`SCHEMA_VERSION` 8→9。刻意不改 v5 的建表语句——v5 早已在存量库里执行过，改它只会让老库永远缺列；版本闸门保证这段迁移只执行一次。②`_METRIC_COLUMNS` 增加 `funding_cost`，普通回测、寻优、walk-forward 三条路径的 `metrics` 都会原样落库（引擎早在 `compute_metrics` 之后写入该键），刷新页面或重启进程后从历史详情仍能读到。③前端 `METRIC_LABELS` 补「资金费率成本」，回测详情指标区新增该卡；`metricText` 新增金额口径（4 位小数，避免几分钱的资金费被四舍五入成 `0.00`），`metricTone` 按「正=付出 warn / 负=收取 good」着色。④批量回测的逐格 `metrics` 走 `batch.parquet`，同步受益，无需额外改动。测试补 4 条：v8 存量库升级后补列且不丢老数据、`funding_cost` 写入/读回、任务到 `done` 后详情带该指标（关闭时恒 0）；端到端核对（BTC-USDT 1H，2026-10-01~10-31，sma_cross，开启资金费率）：详情 `funding_cost = -20.750149421087215`，`backtest_metrics` 读回同一数值 |
+| 2026-11-02 | v0.6（补充 40，模块状态与代码对齐） | 按代码逐条核对 153 条需求后修正模块总览的滞后标记，不改需求内容。①**M1 首页总览** 🟡→✅：10 条全部落地（7 进程健康、今日事件流、数据新鲜度、今日盈亏、告警摘要与趋势、降级标注）。②**M8 交易执行** 🟡→✅：原注「缺仓位计算、状态机、死信重放、对账」四项早已补齐（M8-14/M8-15/M8-16/M8-18），仅 M8-7 实盘切 Key/IP 与 M8-8 公网反代属运维动作，不再影响模块状态。③**M9 日志告警** 🟡→✅：13 条落地、M9-6 明确不做。④**M7-17** 🟡→✅：`halt` 分支已由 worker 在拒单当场发布 `risk_halt` 告警（ERROR，同时启用 kill switch），发布失败只记日志不影响拒单；连同其余 16 条使 **M7 风险控制** 同步 🟡→✅。⑤仍存在的实现缺口不在本次修正范围：M4-6 缺看板提交入口、M8-12 缺订单/成交筛选、M3-5/M4-8/M4-13/M10-3 为部分完成，详见 `docs/requirements/2026-11-02-feature-inventory-and-completion.md` |

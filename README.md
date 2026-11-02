@@ -5,6 +5,8 @@
 **架构**：OKX 数据源 + TradingView Pine 回测 + Python 执行层（FastAPI + Redis + worker）
 **范围**：个人使用，不对外提供服务
 
+> **接手本项目请先读**：[AGENTS.md](AGENTS.md)（硬规则与命令）→ [交接知识文档](docs/2026-11-02-project-handoff.md)（架构/数据流/坑）→ [功能清单与完成度](docs/requirements/2026-11-02-feature-inventory-and-completion.md)（现在做到哪了）。
+
 ## 项目结构
 
 ```
@@ -62,11 +64,13 @@ quant-trading/
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-# 2. 安装项目（M1 依赖）
-pip install -e ".[m1,dev]"
+# 2. 安装项目（含看板所需的 m2 依赖）
+pip install -e ".[m1,m2,dev]"
 
 # 3. 复制配置
 cp config/config.toml.example config/config.toml
+cp config/strategies/sma_cross.toml.example config/strategies/sma_cross.toml
+cp config/strategies/rsi.toml.example config/strategies/rsi.toml
 cp .env.example .env
 # 编辑 .env 填入 OKX_API_KEY/SECRET/PASSPHRASE
 
