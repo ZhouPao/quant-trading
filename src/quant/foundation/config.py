@@ -109,6 +109,9 @@ class BacktestSettings(BaseModel):
     task_workers: int = 1           # 回测任务消费者数（CPU 密集，默认串行）
     artifacts_dir: Path = Path("./data/backtests")
     max_combos: int = 500           # 单次寻优的网格组合上限（CLI 与看板共用）
+    #: 回测是否计入永续资金费率（M4-15）。开启前需先用 fetch-funding-rates
+    #: 回补对应 `-SWAP` 合约的历史，否则回测会直接报错而不是静默忽略成本。
+    funding_rate_enabled: bool = False
 
 
 class ParamsSettings(BaseModel):

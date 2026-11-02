@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any
 
 from quant.backtest.engine import Backtest
+from quant.backtest.funding import FundingSchedule
 from quant.backtest.matcher import Matcher
 from quant.backtest.optimizer import GridOptimizer
 from quant.backtest.strategy import Strategy
@@ -150,6 +151,7 @@ class WalkForward:
         warmup_bars: 每段预热根数（只取段起点之前的 bar）
         base_params: 固定参数，与网格参数合并后传给策略
         metric: IS 段选参依据（最大化该指标）
+        funding: 资金费率结算表（M4-15），透传给每段 IS/OOS 回测
     """
 
     def __init__(
@@ -162,6 +164,7 @@ class WalkForward:
         warmup_bars: int = 0,
         base_params: dict[str, Any] | None = None,
         metric: str = "sharpe",
+        funding: FundingSchedule | None = None,
     ) -> None:
         if not callable(strategy_factory):
             raise ValueError("strategy_factory must be callable")
@@ -175,6 +178,7 @@ class WalkForward:
         self.warmup_bars = warmup_bars
         self.base_params = dict(base_params or {})
         self.metric = metric
+        self.funding = funding
 
     def run(
         self,
@@ -221,6 +225,7 @@ class WalkForward:
                 window_size=self.window_size,
                 warmup_bars=is_warmup,
                 base_params=self.base_params,
+                funding=self.funding,
             )
             ranked = optimizer.search(bars[seg.is_start : seg.is_end], self.metric)
             params, is_metrics = ranked[0]
@@ -234,6 +239,7 @@ class WalkForward:
                 window_size=self.window_size,
                 params=params,
                 warmup_bars=oos_warmup,
+                funding=self.funding,
             ).run(oos_bars_slice)
 
             results.append(

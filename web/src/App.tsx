@@ -14,6 +14,8 @@ import {
   fetchTodayPnl,
   fetchBindings,
   fetchParamChanges,
+  fetchStrategyEvaluations,
+  rollbackParam,
   fetchQuality,
   fetchQualityReport,
   fetchReconciliations,
@@ -43,13 +45,16 @@ import {
   resolveReconciliation,
   runOptimize,
   submitBacktest,
+  submitBatch,
   fetchBacktestRuns,
   fetchBacktestRun,
   fetchBacktestEquity,
   fetchBacktestTrades,
+  fetchBacktestBatch,
   fetchBacktestCompare,
   cancelBacktest,
   rerunBacktest,
+  importPine,
   setKillSwitch,
   stamp,
   updateBinding,
@@ -63,7 +68,9 @@ import {
   type BacktestRun,
   type BacktestRunDetail,
   type BacktestTrade,
+  type BatchCellRow,
   type MonthlyReturn,
+  type PineCompareResponse,
   type CandlesResponse,
   type DeadLetterItem,
   type DeadLettersResponse,
@@ -94,6 +101,7 @@ import {
   type RiskLimitsResponse,
   type RiskOverridesResponse,
   type StrategyBinding,
+  type StrategyEvaluation,
   type StrategyInfo,
   type TimelineItem,
   type TimelineResponse,
@@ -131,6 +139,7 @@ const METRIC_ORDER = [
   "turnover",
   "max_consecutive_losses",
   "max_consecutive_loss_amount",
+  "funding_cost",
 ];
 const OPTIMIZE_METRICS = ["total_return", "sharpe", "max_drawdown", "trade_count"];
 const METRIC_SELECT = [
@@ -157,6 +166,7 @@ const METRIC_HINTS: Record<string, string> = {
   turnover: "成交名义 / 平均权益",
   max_consecutive_losses: "连续亏损最多几笔",
   max_consecutive_loss_amount: "单段连亏最大金额",
+  funding_cost: "净支出，正=付出 / 负=收取",
 };
 const ENGINE_STATUS: Record<string, string> = {
   signal: "已出信号",
@@ -194,6 +204,19 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 type PendingTab = "factors" | "portfolio" | "settings";
+
+// M3-16 策略一键回测：详情页把当前组合与策略带进回测面板，
+// M3-17 另可带 `runId` 直接打开一条历史结果；
+// M3-18 带 `pick` 时把若干参数版本设为对比对象；
+// nonce 每次自增，保证重复点击也能重新提交。
+type BacktestPreset = {
+  strategy: string;
+  inst?: string;
+  bar?: string;
+  runId?: string;
+  pick?: string[];
+  nonce: number;
+};
 
 // M1-6 今日事件流：四类事件与筛选标签
 const TIMELINE_KINDS = [
@@ -256,6 +279,15 @@ const PENDING_MODULES: Record<
 // 回测历史改由后端 backtest_runs 持久化（M4-9/M4-10），前端只做展示与筛选
 const HISTORY_LIMIT = 20;
 const COMPARE_LIMIT = 4;
+// M3-17 详情页「最近回测」最多展示几条（数据源仍取 HISTORY_LIMIT 供参数对比）
+const RECENT_RUN_LIMIT = 5;
+// M3-18 曲线形态：展开分组时最多取几个版本、每条取多少个降采样点
+const CURVE_VERSION_LIMIT = 3;
+const CURVE_POINTS = 60;
+// M3-18 对比表默认只列前 5 名，其余折叠，避免组内版本多时表格过长
+const COMPARE_ROW_LIMIT = 5;
+// 对比表排序键：点表头切换，名次与首行高亮随之重排
+type CompareSort = "total_return" | "max_drawdown" | "sharpe";
 // 越小越好的指标，其余按越大越好比较
 const LOWER_IS_BETTER = new Set(["max_drawdown"]);
 // 交易次数没有优劣之分，不参与高亮
@@ -302,6 +334,10 @@ export default function App() {
   // 人工恢复熔断后立即重取，不必等下一次轮询
   const [riskRefresh, setRiskRefresh] = useState(0);
   const [tab, setTab] = useState<TabKey>(loadTab);
+  // M3-16：策略详情页跳回测时带过去的目标策略与组合
+  const [backtestPreset, setBacktestPreset] = useState<BacktestPreset | null>(
+    null
+  );
   // M1-5 进程健康：进程心跳变化比行情慢，15s 一拉即可
   const [processes, setProcesses] = useState<ProcessesResponse | null>(null);
   // M1-7 数据新鲜度与进程健康同频，都是分钟级信号
@@ -1065,11 +1101,27 @@ export default function App() {
           </>
         )}
 
-        {tab === "strategy" && <EnginePanel engine={data?.engine} />}
+        {tab === "strategy" && (
+          <EnginePanel
+            engine={data?.engine}
+            onOpenBacktest={(preset) => {
+              setBacktestPreset((prev) => ({
+                ...preset,
+                nonce: (prev?.nonce ?? 0) + 1,
+              }));
+              setTab("backtest");
+            }}
+          />
+        )}
 
         {tab === "market" && <ChartPanel />}
 
-        {tab === "backtest" && <BacktestPanel />}
+        {tab === "backtest" && (
+          <BacktestPanel
+            preset={backtestPreset}
+            onPresetConsumed={() => setBacktestPreset(null)}
+          />
+        )}
 
         {tab === "execution" && (
           <>
@@ -2344,7 +2396,19 @@ function KillSwitchPanel({ state }: { state?: Overview["kill_switch"] }) {
   );
 }
 
-function EnginePanel({ engine }: { engine?: EngineResponse }) {
+function EnginePanel({
+  engine,
+  onOpenBacktest,
+}: {
+  engine?: EngineResponse;
+  onOpenBacktest?: (preset: {
+    strategy: string;
+    inst?: string;
+    bar?: string;
+    runId?: string;
+    pick?: string[];
+  }) => void;
+}) {
   const [info, setInfo] = useState<StrategyInfo | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -2363,6 +2427,18 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
   const [newBar, setNewBar] = useState("");
   const [bindingBusy, setBindingBusy] = useState("");
   const [bindingError, setBindingError] = useState("");
+  const [rollbackBusy, setRollbackBusy] = useState<number | null>(null);
+  const [evaluations, setEvaluations] = useState<StrategyEvaluation[]>([]);
+  const [recentRuns, setRecentRuns] = useState<BacktestRun[]>([]);
+  // M3-18 曲线形态：只对展开的那一组懒加载，最多取前 3 个版本
+  const [curveGroup, setCurveGroup] = useState<string | null>(null);
+  const [curves, setCurves] = useState<Record<string, number[] | null>>({});
+  const [curveLoading, setCurveLoading] = useState(false);
+  // M3-18 对比表：排序键与「展开全部名次」的分组集合
+  const [compareSort, setCompareSort] = useState<CompareSort>("total_return");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
+    () => new Set()
+  );
   const strategyId = engine?.strategy;
 
   const loadInfo = useCallback(
@@ -2381,15 +2457,159 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
     return () => controller.abort();
   }, [loadInfo]);
 
-  // 展开编辑时拉最近变更；保存后 notice 变化会触发重新拉取
+  // 变更历史常驻展示；保存或回滚后 notice 变化会触发重新拉取
   useEffect(() => {
-    if (!editing || !strategyId) return;
+    if (!strategyId) return;
     const controller = new AbortController();
     fetchParamChanges(controller.signal, strategyId)
       .then((res) => setChanges(res.changes))
       .catch(() => setChanges([]));
     return () => controller.abort();
-  }, [editing, strategyId, notice]);
+  }, [strategyId, notice]);
+
+  // M3-15 最近评估：每轮刷新，保存/回滚后 notice 变化也会立即重拉
+  useEffect(() => {
+    if (!strategyId) return;
+    const controller = new AbortController();
+    const load = () => {
+      fetchStrategyEvaluations(controller.signal, strategyId)
+        .then((res) => setEvaluations(res.items))
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [strategyId, notice]);
+
+  // M3-17 最近回测 / M3-18 参数版本对比共用一份数据：
+  // 多取一些，才能在同一区间下凑齐多个参数版本。
+  useEffect(() => {
+    if (!strategyId) return;
+    const controller = new AbortController();
+    const load = () => {
+      fetchBacktestRuns(controller.signal, {
+        strategy: strategyId,
+        limit: HISTORY_LIMIT,
+      })
+        .then((res) => setRecentRuns(res.runs))
+        .catch(() => setRecentRuns([]));
+    };
+    load();
+    const timer = window.setInterval(load, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [strategyId, notice]);
+
+  /**
+   * M3-18 参数版本对比：只有「同品种 + 同周期 + 同区间」的回测才可比，
+   * 因此先按这三项分组，再在组内按参数签名归纳版本（同参数只留最新一次）。
+   * 只保留有 ≥2 个参数版本的组。
+   */
+  const paramGroups = useMemo(() => {
+    type VersionMap = Map<string, BacktestRun>;
+    const groups = new Map<
+      string,
+      {
+        inst: string;
+        bar: string;
+        start: string;
+        end: string;
+        versions: VersionMap;
+      }
+    >();
+    for (const run of recentRuns) {
+      if (run.status !== "done") continue;
+      const key = `${run.inst}|${run.bar}|${run.start}|${run.end}`;
+      const entry = groups.get(key) ?? {
+        inst: run.inst,
+        bar: run.bar,
+        start: run.start,
+        end: run.end,
+        versions: new Map<string, BacktestRun>(),
+      };
+      const signature = formatParams(run.params);
+      const prev = entry.versions.get(signature);
+      if (!prev || (run.created_at ?? 0) > (prev.created_at ?? 0)) {
+        entry.versions.set(signature, run);
+      }
+      groups.set(key, entry);
+    }
+    return [...groups.entries()]
+      .filter(([, group]) => group.versions.size >= 2)
+      .map(([key, group]) => ({
+        key,
+        inst: group.inst,
+        bar: group.bar,
+        start: group.start,
+        end: group.end,
+        // 组内按当前排序键从优到劣排列，行号即名次，扫读时不必自己找最优
+        versions: sortCompareVersions(
+          [...group.versions.entries()].map(([signature, run]) => ({
+            signature,
+            run,
+          })),
+          compareSort
+        ),
+      }));
+  }, [recentRuns, compareSort]);
+
+  /**
+   * M3-18 曲线形态懒加载：只有展开分组时才逐条取权益曲线，且最多 3 个版本、
+   * 每条只取 60 个降采样点，避免一次性打出几十个请求。
+   *
+   * 用 run_id 串做依赖而不是 paramGroups 对象：轮询每 5 秒都会重建 recentRuns，
+   * 若直接依赖数组会重复拉取同一批曲线。
+   */
+  const curveKey = useMemo(() => {
+    const group = curveGroup
+      ? paramGroups.find((item) => item.key === curveGroup)
+      : null;
+    return group
+      ? group.versions
+          .slice(0, CURVE_VERSION_LIMIT)
+          .map((item) => item.run.run_id)
+          .join(",")
+      : "";
+  }, [curveGroup, paramGroups]);
+
+  useEffect(() => {
+    const runIds = curveKey ? curveKey.split(",") : [];
+    if (runIds.length === 0) {
+      setCurves({});
+      setCurveLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setCurves({});
+    setCurveLoading(true);
+    Promise.all(
+      runIds.map((runId) =>
+        fetchBacktestEquity(controller.signal, runId, CURVE_POINTS)
+          .then((res) => {
+            const values = res.points
+              .map((point) => Number(point.equity))
+              .filter((value) => Number.isFinite(value));
+            return [runId, values] as const;
+          })
+          // 产物被清理或读取失败时留空，其余版本照常展示
+          .catch(() => [runId, null] as const)
+      )
+    ).then((entries) => {
+      if (cancelled) return;
+      setCurves(Object.fromEntries(entries));
+      setCurveLoading(false);
+    });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [curveKey]);
 
   const loadBindings = useCallback(
     async (signal?: AbortSignal) => {
@@ -2667,28 +2887,82 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
             >
               {busy ? "保存中…" : "保存覆盖"}
             </button>
-            {error && <div className="kill-msg kill-msg-bad">保存失败：{error}</div>}
-            {!error && notice && <div className="kill-msg">{notice}</div>}
             <p className="kill-note">
               保存后写入 strategy_params 并记变更历史，下一轮引擎 tick 生效，
               无需重启。
             </p>
-            {changes.length > 0 && (
-              <ul className="param-history">
-                {changes.map((row) => (
-                  <li key={row.id}>
-                    <span>{clock(row.changed_at)}</span>
-                    <span>
-                      {row.param}：{row.old_value ?? "—"} → {row.new_value}
-                    </span>
-                    <span>{row.changed_by}</span>
-                    {row.reason && <span className="param-reason">{row.reason}</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
         )}
+      </div>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            参数变更历史（最近 {changes.length} 条）· 回滚会追加新记录，不删历史
+          </span>
+        </div>
+        {changes.length === 0 ? (
+          <p className="kill-note">暂无变更记录。</p>
+        ) : (
+          <ul className="param-history">
+            {changes.map((row) => (
+              <li key={row.id}>
+                <span>{clock(row.changed_at)}</span>
+                <span>
+                  {row.param}：{row.old_value ?? "—"} → {row.new_value}
+                </span>
+                <span>{row.changed_by}</span>
+                {row.reason && <span className="param-reason">{row.reason}</span>}
+                <button
+                  type="button"
+                  className="kill-btn kill-btn-sm"
+                  disabled={rollbackBusy === row.id || row.old_value === null}
+                  title={
+                    row.old_value === null
+                      ? "该变更前使用 toml 默认值，没有可恢复的数据库覆盖"
+                      : `恢复为 ${row.old_value}`
+                  }
+                  onClick={async () => {
+                    if (!strategyId || row.old_value === null) return;
+                    const confirmed = window.confirm(
+                      `确定要回滚 ${row.param} 到 ${row.old_value} 吗？`
+                    );
+                    if (!confirmed) return;
+                    setRollbackBusy(row.id);
+                    setError("");
+                    try {
+                      await rollbackParam(
+                        strategyId,
+                        row.id,
+                        {
+                          reason: `回滚到 ${stamp(row.changed_at)}`,
+                          changed_by: "owner",
+                        },
+                        token
+                      );
+                      if (token)
+                        window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+                      setNotice(`已回滚 ${row.param} → ${row.old_value}`);
+                      await loadInfo();
+                      const res = await fetchParamChanges(
+                        new AbortController().signal,
+                        strategyId
+                      );
+                      setChanges(res.changes);
+                    } catch (e) {
+                      setError((e as Error).message);
+                    } finally {
+                      setRollbackBusy(null);
+                    }
+                  }}
+                >
+                  {rollbackBusy === row.id ? "回滚中…" : "回滚"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {error && <div className="kill-msg kill-msg-bad">操作失败：{error}</div>}
+        {!error && notice && <div className="kill-msg">{notice}</div>}
       </div>
       <div className="param-panel">
         <div className="param-head">
@@ -2760,6 +3034,468 @@ function EnginePanel({ engine }: { engine?: EngineResponse }) {
         <p className="kill-note">
           写入后同步 SQLite 与 Redis 缓存，引擎下一轮（≤ 轮询周期）生效，
           无需重启；同一组合改周期须先解绑。
+        </p>
+      </div>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            最近 {evaluations.length} 次评估（含无信号轮次）
+          </span>
+          <button
+            type="button"
+            className="kill-btn"
+            disabled={!strategyId}
+            onClick={() =>
+              strategyId &&
+              onOpenBacktest?.({
+                strategy: strategyId,
+                inst: engine?.inst,
+                bar: engine?.bar,
+              })
+            }
+          >
+            用当前参数回测
+          </button>
+        </div>
+        {evaluations.length === 0 ? (
+          <p className="kill-note">
+            引擎尚未发布评估历史：worker 运行一轮后即出现。
+          </p>
+        ) : (
+          <ul className="param-history">
+            {evaluations.map((row, idx) => (
+              <li key={`${row.inst_id}-${row.bar_ts ?? "na"}-${idx}`}>
+                <span className="mono">{stamp(row.bar_ts)}</span>
+                <span className="mono">
+                  {row.inst_id} · {row.bar}
+                </span>
+                <span
+                  className={
+                    row.status === "signal"
+                      ? "tag-ok"
+                      : row.status === "error"
+                        ? "tag-bad"
+                        : "tag-muted"
+                  }
+                >
+                  {ENGINE_STATUS[row.status ?? ""] ?? row.status ?? "—"}
+                </span>
+                <span>{row.signal_count} 信号</span>
+                {row.reason && (
+                  <span className="param-reason">{row.reason}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="kill-note">
+          记录来自 engine 每轮心跳，最多保留 10 条；点上方按钮把该策略带入回测面板。
+        </p>
+      </div>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            最近 {Math.min(recentRuns.length, RECENT_RUN_LIMIT)} 次回测 ·
+            点「查看」载入曲线与成交
+          </span>
+        </div>
+        {recentRuns.length === 0 ? (
+          <p className="kill-note">
+            该策略还没有回测记录，点上方「用当前参数回测」跑一次。
+          </p>
+        ) : (
+          <ul className="param-history">
+            {recentRuns.slice(0, RECENT_RUN_LIMIT).map((row) => (
+              <li key={row.run_id}>
+                <button
+                  type="button"
+                  className="kill-btn kill-btn-sm"
+                  onClick={() =>
+                    onOpenBacktest?.({
+                      strategy: row.strategy,
+                      inst: row.inst,
+                      bar: row.bar,
+                      runId: row.run_id,
+                    })
+                  }
+                >
+                  查看
+                </button>
+                <span>{stamp(row.created_at)}</span>
+                <span className="mono">
+                  {row.inst} · {row.bar} · {row.start} ~ {row.end}
+                </span>
+                <span
+                  className={
+                    row.status === "done"
+                      ? "tag-ok"
+                      : row.status === "failed"
+                        ? "tag-bad"
+                        : "tag-muted"
+                  }
+                >
+                  {RUN_STATUS_TEXT[row.status] ?? row.status}
+                </span>
+                {row.status === "done" && (
+                  <>
+                    <span>收益 {pct(row.metrics.total_return)}</span>
+                    <span>回撤 {pct(row.metrics.max_drawdown)}</span>
+                    <span>夏普 {num(row.metrics.sharpe)}</span>
+                    <span>交易 {num(row.metrics.trade_count, 0)}</span>
+                  </>
+                )}
+                {row.status === "failed" && row.error && (
+                  <span className="param-reason">{row.error}</span>
+                )}
+                <span className="param-reason">
+                  {formatParams(row.params)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="kill-note">
+          结果来自 backtest_runs 持久化记录，点「查看」跳到回测页载入该次曲线与成交明细。
+        </p>
+      </div>
+      <div className="param-panel">
+        <div className="param-head">
+          <span className="card-note">
+            参数版本对比 · 同品种/同周期/同区间下不同参数的回测结果
+          </span>
+        </div>
+        {paramGroups.length === 0 ? (
+          <p className="kill-note">
+            暂无可比数据：需要「同品种 + 同周期 + 同区间」下至少 2 个不同参数的
+            已完成回测。改一版参数再回测一次即可出现对比。
+          </p>
+        ) : (
+          <div className="cmp-stack">
+            {paramGroups.map((group) => {
+              const metricValue = (run: BacktestRun, key: string) => {
+                const raw = run.metrics[key];
+                return typeof raw === "number" && Number.isFinite(raw)
+                  ? raw
+                  : null;
+              };
+              const extreme = (key: string, higherBetter: boolean) => {
+                const values = group.versions
+                  .map((v) => metricValue(v.run, key))
+                  .filter((v): v is number => v !== null);
+                if (values.length === 0) return null;
+                return higherBetter
+                  ? Math.max(...values)
+                  : Math.min(...values);
+              };
+              const bestReturn = extreme("total_return", true);
+              const bestDrawdown = extreme("max_drawdown", false);
+              const bestSharpe = extreme("sharpe", true);
+              const cellClass = (
+                value: number | null,
+                best: number | null
+              ) =>
+                value !== null && best !== null && value === best
+                  ? "cmp-num cmp-best"
+                  : "cmp-num";
+              /**
+               * 与最优值的差距：箭头表示原始数值方向（↑ 更高 / ↓ 更低），
+               * 收益与回撤用百分点（pp），夏普用绝对差。最优值本身不显示。
+               */
+              const gapText = (
+                value: number | null,
+                best: number | null,
+                unit: "pp" | "ratio"
+              ) => {
+                if (value === null || best === null || value === best) {
+                  return null;
+                }
+                const diff = Math.abs(value - best);
+                const arrow = value > best ? "↑" : "↓";
+                return unit === "pp"
+                  ? `${arrow}${(diff * 100).toFixed(1)}pp`
+                  : `${arrow}${diff.toFixed(2)}`;
+              };
+              // 曲线共用同一纵轴范围，不同版本的形态才具备可比性
+              const shownVersions = group.versions.slice(0, CURVE_VERSION_LIMIT);
+              const expanded = expandedGroups.has(group.key);
+              const visibleVersions = expanded
+                ? group.versions
+                : group.versions.slice(0, COMPARE_ROW_LIMIT);
+              const loadedSeries = shownVersions
+                .map((item) => curves[item.run.run_id])
+                .filter(
+                  (values): values is number[] =>
+                    Array.isArray(values) && values.length > 1
+                );
+              const flat = loadedSeries.flat();
+              const curveDomain =
+                flat.length > 0
+                  ? { min: Math.min(...flat), max: Math.max(...flat) }
+                  : { min: 0, max: 1 };
+              return (
+                <div key={group.key} className="cmp-group">
+                  <div className="cmp-group-head">
+                    <span className="cmp-slug">
+                      <span className="cmp-inst">{group.inst}</span>
+                      <span className="cmp-bar">{group.bar}</span>
+                      <span className="cmp-range">
+                        {group.start} ~ {group.end}
+                      </span>
+                    </span>
+                    <span className="cmp-actions">
+                      <span className="cmp-count">
+                        {group.versions.length} 个版本
+                      </span>
+                      <button
+                        type="button"
+                        className="cmp-ghost"
+                        aria-expanded={curveGroup === group.key}
+                        onClick={() =>
+                          setCurveGroup((prev) =>
+                            prev === group.key ? null : group.key
+                          )
+                        }
+                      >
+                        <span
+                          className={
+                            curveGroup === group.key
+                              ? "cmp-caret cmp-caret-open"
+                              : "cmp-caret"
+                          }
+                          aria-hidden="true"
+                        >
+                          ▸
+                        </span>
+                        曲线形态
+                      </button>
+                      <button
+                        type="button"
+                        className="cmp-primary"
+                        onClick={() =>
+                          onOpenBacktest?.({
+                            strategy: group.versions[0].run.strategy,
+                            inst: group.inst,
+                            bar: group.bar,
+                            pick: group.versions
+                              .slice(0, COMPARE_LIMIT)
+                              .map((v) => v.run.run_id),
+                          })
+                        }
+                      >
+                        在回测页对比 {Math.min(group.versions.length, COMPARE_LIMIT)}{" "}
+                        条
+                      </button>
+                    </span>
+                  </div>
+                  <div className="cmp-table">
+                    <div className="cmp-row cmp-row-head">
+                      <span className="cmp-rank" />
+                      <span>参数版本</span>
+                      {(
+                        [
+                          ["total_return", "收益", "↑优"],
+                          ["max_drawdown", "回撤", "↓优"],
+                          ["sharpe", "夏普", "↑优"],
+                        ] as const
+                      ).map(([key, label, hint]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          className={
+                            compareSort === key
+                              ? "cmp-num cmp-sort cmp-tip cmp-sort-on"
+                              : "cmp-num cmp-sort cmp-tip"
+                          }
+                          aria-pressed={compareSort === key}
+                          aria-label={`按${label}排序`}
+                          data-tip={
+                            compareSort === key
+                              ? `当前按${label}排序，最佳版本排最前`
+                              : `按${label}从${hint === "↓优" ? "低到高" : "高到低"}排序`
+                          }
+                          onClick={() => setCompareSort(key)}
+                        >
+                          {label}
+                          <em className="cmp-dir">{hint}</em>
+                        </button>
+                      ))}
+                      <span />
+                    </div>
+                    {visibleVersions.map(({ signature, run }, index) => {
+                      const ret = metricValue(run, "total_return");
+                      const dd = metricValue(run, "max_drawdown");
+                      const sharpe = metricValue(run, "sharpe");
+                      const retGap = gapText(ret, bestReturn, "pp");
+                      const ddGap = gapText(dd, bestDrawdown, "pp");
+                      const sharpeGap = gapText(sharpe, bestSharpe, "ratio");
+                      return (
+                        <div
+                          key={run.run_id}
+                          className={
+                            index === 0 ? "cmp-row cmp-row-leader" : "cmp-row"
+                          }
+                        >
+                          <span className="cmp-rank">
+                            {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <span className="cmp-param" title={signature}>
+                            {signature}
+                          </span>
+                          <span className={cellClass(ret, bestReturn)}>
+                            {pct(ret)}
+                            {retGap && (
+                              <em
+                                className="cmp-gap"
+                                title={`比最优收益低 ${retGap.replace(/[↑↓]/, "")}`}
+                              >
+                                {retGap}
+                              </em>
+                            )}
+                          </span>
+                          <span className={cellClass(dd, bestDrawdown)}>
+                            {pct(dd)}
+                            {ddGap && (
+                              <em
+                                className="cmp-gap"
+                                title={`比最优回撤深 ${ddGap.replace(/[↑↓]/, "")}`}
+                              >
+                                {ddGap}
+                              </em>
+                            )}
+                          </span>
+                          <span className={cellClass(sharpe, bestSharpe)}>
+                            {num(sharpe)}
+                            {sharpeGap && (
+                              <em
+                                className="cmp-gap"
+                                title={`与最优夏普相差 ${sharpeGap.replace(/[↑↓]/, "")}`}
+                              >
+                                {sharpeGap}
+                              </em>
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            className="cmp-open"
+                            onClick={() =>
+                              onOpenBacktest?.({
+                                strategy: run.strategy,
+                                inst: run.inst,
+                                bar: run.bar,
+                                runId: run.run_id,
+                              })
+                            }
+                          >
+                            查看
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {group.versions.length > COMPARE_ROW_LIMIT && (
+                      <button
+                        type="button"
+                        className="cmp-more cmp-tip cmp-tip-start"
+                        aria-expanded={expanded}
+                        data-tip={
+                          expanded
+                            ? `收起，只保留前 ${COMPARE_ROW_LIMIT} 名`
+                            : `展开其余 ${
+                                group.versions.length - COMPARE_ROW_LIMIT
+                              } 个版本（共 ${group.versions.length} 个）`
+                        }
+                        onClick={() =>
+                          setExpandedGroups((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(group.key)) next.delete(group.key);
+                            else next.add(group.key);
+                            return next;
+                          })
+                        }
+                      >
+                        {expanded
+                          ? `收起，只看前 ${COMPARE_ROW_LIMIT} 名`
+                          : `展开其余 ${
+                              group.versions.length - COMPARE_ROW_LIMIT
+                            } 个版本`}
+                      </button>
+                    )}
+                  </div>
+                  {curveGroup === group.key && (
+                    <div className="cmp-curves">
+                      {curveLoading ? (
+                        <span className="cmp-curves-note">
+                          加载权益曲线（{shownVersions.length} 条）…
+                        </span>
+                      ) : (
+                        <>
+                          {shownVersions.map(({ signature, run }, index) => {
+                            const series = curves[run.run_id];
+                            const usable =
+                              Array.isArray(series) && series.length > 1;
+                            const change = usable
+                              ? series[0] === 0
+                                ? 0
+                                : (series[series.length - 1] - series[0]) /
+                                  series[0]
+                              : null;
+                            return (
+                              <div key={run.run_id} className="cmp-curve">
+                                <div className="cmp-curve-head">
+                                  <span
+                                    className="cmp-curve-name"
+                                    title={signature}
+                                  >
+                                    <em className="cmp-rank">
+                                      {String(index + 1).padStart(2, "0")}
+                                    </em>
+                                    {signature}
+                                  </span>
+                                  {change !== null && (
+                                    <span
+                                      className={
+                                        change >= 0 ? "positive" : "negative"
+                                      }
+                                    >
+                                      {change >= 0 ? "+" : ""}
+                                      {(change * 100).toFixed(1)}%
+                                    </span>
+                                  )}
+                                </div>
+                                {usable ? (
+                                  <Sparkline
+                                    values={series}
+                                    domain={curveDomain}
+                                  />
+                                ) : (
+                                  <div className="cmp-curve-empty">
+                                    曲线不可用（产物可能已清理）
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {group.versions.length > CURVE_VERSION_LIMIT && (
+                            <span className="cmp-curves-note">
+                              仅显示前 {CURVE_VERSION_LIMIT} 个版本，其余版本可用
+                              「对比」在回测页查看
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <p className="kill-note">
+          点表头可切换排序键（收益 / 回撤 / 夏普），组内从优到劣排列，序号即名次，
+          首行为当前排序下的最优版本；超过 {COMPARE_ROW_LIMIT} 个版本默认折叠。
+          收益/回撤/夏普各自的最优值标绿，小字为该版本与最优的差距（收益、回撤为
+          pp 百分点，夏普为绝对差），箭头指向原始数值方向。「曲线形态」按需加载前{" "}
+          {CURVE_VERSION_LIMIT} 个版本的权益曲线（共用纵轴，可横向比形态）；
+          「在回测页对比」把同区间下的参数版本带入叠加曲线。
         </p>
       </div>
       <div className="orders-line">
@@ -2877,8 +3613,14 @@ function ChartPanel() {
   );
 }
 
-function BacktestPanel() {
-  const [mode, setMode] = useState<"backtest" | "optimize">("backtest");
+function BacktestPanel({
+  preset,
+  onPresetConsumed,
+}: {
+  preset?: BacktestPreset | null;
+  onPresetConsumed?: () => void;
+}) {
+  const [mode, setMode] = useState<"backtest" | "optimize" | "batch">("backtest");
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [strategy, setStrategy] = useState("sma_cross");
   const [inst, setInst] = useState("BTC-USDT");
@@ -2888,6 +3630,11 @@ function BacktestPanel() {
   const [warmup, setWarmup] = useState("200");
   const [params, setParams] = useState("");
   const [grid, setGrid] = useState("fast_len=5,10,20;slow_len=20,50,80");
+  // 批量回测（M4-7）：品种/周期都是列表，网格可留空（只跑当前参数）
+  const [batchInsts, setBatchInsts] = useState("BTC-USDT,ETH-USDT");
+  const [batchBars, setBatchBars] = useState("1H,4H");
+  const [batchGrid, setBatchGrid] = useState("");
+  const [batchRows, setBatchRows] = useState<BatchCellRow[]>([]);
   const [metric, setMetric] = useState("sharpe");
   const [top, setTop] = useState("10");
   const [jobs, setJobs] = useState("1");
@@ -2917,6 +3664,8 @@ function BacktestPanel() {
   const [compareError, setCompareError] = useState<string | null>(null);
   const submitAbort = useRef<AbortController | null>(null);
   const followAbort = useRef<AbortController | null>(null);
+  // StrictMode 下 effect 会跑两次，用 nonce 去重避免重复提交同一请求
+  const consumedNonce = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2980,6 +3729,24 @@ function BacktestPanel() {
   const current = strategies.find((item) => item.id === strategy);
   const configHint = current ? formatParams(current.params) : "";
 
+  /** 按任务类型取产物：批量回测读逐格表，其余读权益曲线与成交。 */
+  const loadArtifacts = async (
+    signal: AbortSignal,
+    detail: BacktestRunDetail,
+  ) => {
+    if (detail.kind === "batch") {
+      const res = await fetchBacktestBatch(signal, detail.run_id);
+      setBatchRows(res.rows);
+      return;
+    }
+    const [eq, tr] = await Promise.all([
+      fetchBacktestEquity(signal, detail.run_id),
+      fetchBacktestTrades(signal, detail.run_id),
+    ]);
+    setEquity(eq.points);
+    setTrades(tr);
+  };
+
   /** 轮询任务直到终态；done 后再取权益与成交（产物走单独接口）。 */
   const followRun = async (runId: string) => {
     followAbort.current?.abort();
@@ -2988,18 +3755,14 @@ function BacktestPanel() {
     setBusy(true);
     setEquity([]);
     setTrades(null);
+    setBatchRows([]);
     try {
       for (;;) {
         const detail = await fetchBacktestRun(controller.signal, runId);
         setRun(detail);
         if (isTerminalStatus(detail.status)) {
           if (detail.status === "done") {
-            const [eq, tr] = await Promise.all([
-              fetchBacktestEquity(controller.signal, runId),
-              fetchBacktestTrades(controller.signal, runId),
-            ]);
-            setEquity(eq.points);
-            setTrades(tr);
+            await loadArtifacts(controller.signal, detail);
           }
           break;
         }
@@ -3023,16 +3786,12 @@ function BacktestPanel() {
     setError(null);
     setEquity([]);
     setTrades(null);
+    setBatchRows([]);
     try {
       const detail = await fetchBacktestRun(controller.signal, runId);
       setRun(detail);
       if (detail.status === "done") {
-        const [eq, tr] = await Promise.all([
-          fetchBacktestEquity(controller.signal, runId),
-          fetchBacktestTrades(controller.signal, runId),
-        ]);
-        setEquity(eq.points);
-        setTrades(tr);
+        await loadArtifacts(controller.signal, detail);
       }
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
@@ -3082,10 +3841,32 @@ function BacktestPanel() {
     });
   };
 
-  const submit = async () => {
+  /**
+   * 提交任务。`override` 供策略详情页的一键回测使用：此时表单状态还没来得及
+   * 更新，直接用传入值构造请求体，避免读到上一轮的 strategy/inst。
+   */
+  const submit = async (override?: {
+    strategy?: string;
+    inst?: string;
+    bar?: string;
+    params?: string;
+    mode?: "backtest" | "optimize" | "batch";
+  }) => {
+    const nextMode = override?.mode ?? mode;
+    const nextStrategy = override?.strategy ?? strategy;
+    const nextInst = override?.inst ?? inst;
+    const nextBar = override?.bar ?? bar;
+    const nextParams = override?.params ?? params;
     const warmupBars = Number(warmup);
     if (!Number.isInteger(warmupBars) || warmupBars < 0) {
       setError("预热根数必须是非负整数");
+      return;
+    }
+    // 批量回测的品种/周期是逗号分隔的列表，空列表直接拦在前端
+    const instList = splitList(batchInsts);
+    const barList = splitList(batchBars);
+    if (nextMode === "batch" && (instList.length === 0 || barList.length === 0)) {
+      setError("批量回测至少要一个品种和一个周期");
       return;
     }
     setError(null);
@@ -3093,16 +3874,35 @@ function BacktestPanel() {
     const controller = new AbortController();
     submitAbort.current = controller;
     const body = {
-      strategy,
-      inst,
-      bar,
+      strategy: nextStrategy,
+      inst: nextInst,
+      bar: nextBar,
       start,
       end,
-      params,
+      params: nextParams,
       warmup_bars: warmupBars,
     };
     try {
-      if (mode === "backtest") {
+      if (nextMode === "batch") {
+        setOptimize(null);
+        setRun(null);
+        setBatchRows([]);
+        const { run_id } = await submitBatch(controller.signal, {
+          strategy: nextStrategy,
+          insts: instList,
+          bars: barList,
+          start,
+          end,
+          params: nextParams,
+          grid: batchGrid,
+          metric,
+          warmup_bars: warmupBars,
+        });
+        setNotice(
+          `批量任务已提交（${run_id}）：${instList.length} 品种 × ${barList.length} 周期`,
+        );
+        await followRun(run_id);
+      } else if (nextMode === "backtest") {
         setOptimize(null);
         setRun(null);
         // 提交即返回 run_id（M4-12），页面轮询状态而不是同步等待
@@ -3129,6 +3929,42 @@ function BacktestPanel() {
     }
   };
 
+  // M3-16 一键回测：从策略详情页带过来的组合填入表单并立即提交。
+  // M3-17 若带 runId，则只载入该次历史结果，不重新提交。
+  // 参数留空表示「不额外覆盖」，后端按 toml 默认 + DB 覆盖合并，
+  // 即策略详情页展示的当前生效参数。
+  useEffect(() => {
+    if (!preset) return;
+    if (consumedNonce.current === preset.nonce) return;
+    consumedNonce.current = preset.nonce;
+    setMode("backtest");
+    setStrategy(preset.strategy);
+    if (preset.inst) setInst(preset.inst);
+    if (preset.bar) setBar(preset.bar);
+    setParams("");
+    setOptimize(null);
+    setPicked([]);
+    if (preset.runId) {
+      void openRun(preset.runId);
+    } else if (preset.pick && preset.pick.length >= 2) {
+      // M3-18：只把参数版本设为对比对象，不重复提交任务
+      setPicked(preset.pick.slice(0, COMPARE_LIMIT));
+      setRun(null);
+    } else {
+      void submit({
+        strategy: preset.strategy,
+        inst: preset.inst ?? inst,
+        bar: preset.bar ?? bar,
+        params: "",
+        mode: "backtest",
+      });
+    }
+    // 请求已发出，清掉预设，避免下次切回本页时重复提交
+    onPresetConsumed?.();
+    // 只在详情页发起新请求时触发；submit 依赖的表单值由 override 兜住
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset?.nonce]);
+
   return (
     <section className="card backtest reveal" style={{ animationDelay: "120ms" }}>
       <div className="card-head">
@@ -3150,6 +3986,13 @@ function BacktestPanel() {
             >
               参数寻优
             </button>
+            <button
+              type="button"
+              className={mode === "batch" ? "seg-btn seg-on" : "seg-btn"}
+              onClick={() => setMode("batch")}
+            >
+              批量回测
+            </button>
           </div>
         </div>
       </div>
@@ -3166,20 +4009,43 @@ function BacktestPanel() {
             ))}
           </select>
         </label>
-        <label className="bt-field">
-          <span>品种</span>
-          <input value={inst} onChange={(e) => setInst(e.target.value)} />
-        </label>
-        <label className="bt-field">
-          <span>周期</span>
-          <select value={bar} onChange={(e) => setBar(e.target.value)}>
-            {BAR_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
+        {mode === "batch" ? (
+          <>
+            <label className="bt-field">
+              <span>品种（逗号分隔）</span>
+              <input
+                value={batchInsts}
+                placeholder="BTC-USDT,ETH-USDT"
+                onChange={(e) => setBatchInsts(e.target.value)}
+              />
+            </label>
+            <label className="bt-field">
+              <span>周期（逗号分隔）</span>
+              <input
+                value={batchBars}
+                placeholder="1H,4H"
+                onChange={(e) => setBatchBars(e.target.value)}
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label className="bt-field">
+              <span>品种</span>
+              <input value={inst} onChange={(e) => setInst(e.target.value)} />
+            </label>
+            <label className="bt-field">
+              <span>周期</span>
+              <select value={bar} onChange={(e) => setBar(e.target.value)}>
+                {BAR_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <label className="bt-field">
           <span>开始</span>
           <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
@@ -3202,12 +4068,33 @@ function BacktestPanel() {
       {mode === "backtest" ? (
         <div className="bt-form">
           <label className="bt-field bt-span">
-            <span>参数覆盖（留空沿用策略配置）</span>
+            <span>参数覆盖（留空沿用策略当前生效参数：toml 默认 + DB 覆盖）</span>
             <input
               value={params}
               placeholder={configHint || "fast_len=10;slow_len=50"}
               onChange={(e) => setParams(e.target.value)}
             />
+          </label>
+        </div>
+      ) : mode === "batch" ? (
+        <div className="bt-form">
+          <label className="bt-field bt-span">
+            <span>参数网格（留空只跑当前生效参数）</span>
+            <input
+              value={batchGrid}
+              placeholder="fast_len=5,10;slow_len=20,50"
+              onChange={(e) => setBatchGrid(e.target.value)}
+            />
+          </label>
+          <label className="bt-field">
+            <span>排序指标</span>
+            <select value={metric} onChange={(e) => setMetric(e.target.value)}>
+              {METRIC_SELECT.map((key) => (
+                <option key={key} value={key}>
+                  {METRIC_LABELS[key]}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
       ) : (
@@ -3255,19 +4142,39 @@ function BacktestPanel() {
 
       <div className="bt-actions">
         <button type="button" className="bt-run" onClick={() => void submit()} disabled={busy}>
-          {busy ? "计算中…" : mode === "backtest" ? "运行回测" : "开始寻优"}
+          {busy
+            ? "计算中…"
+            : mode === "batch"
+              ? "运行批量回测"
+              : mode === "backtest"
+                ? "运行回测"
+                : "开始寻优"}
         </button>
         <span className="card-note">
           {mode === "backtest"
             ? "区间前仅预热：不成交、不计入指标"
-            : "组合上限取配置 backtest.max_combos，非法组合自动跳过"}
+            : mode === "batch"
+              ? "按品种 × 周期 × 参数逐格回测，单格失败不影响其它格"
+              : "组合上限取配置 backtest.max_combos，非法组合自动跳过"}
         </span>
       </div>
 
       {notice && <div className="bt-notice">{notice}</div>}
       {error && <div className="bt-error">{error}</div>}
 
-      {mode === "backtest" ? (
+      {mode === "batch" ? (
+        run ? (
+          <BatchResultView
+            run={run}
+            rows={batchRows}
+            onCancel={() => void cancelRun(run.run_id)}
+          />
+        ) : (
+          <div className="empty">
+            选好品种、周期与网格后点「运行批量回测」，汇总表会显示在这里
+          </div>
+        )
+      ) : mode === "backtest" ? (
         run ? (
           <BacktestRunView
             run={run}
@@ -3286,7 +4193,7 @@ function BacktestPanel() {
         <div className="empty">填好网格后点「开始寻优」，参数排名会显示在这里</div>
       )}
 
-      {mode === "backtest" && (
+      {(mode === "backtest" || mode === "batch") && (
         <BacktestHistory
           runs={history}
           total={historyTotal}
@@ -3334,6 +4241,97 @@ function RunStatusBar({
       )}
       {run.error && <span className="negative">{run.error}</span>}
     </div>
+  );
+}
+
+/** 批量回测结果（M4-7）：成功格按指标排成一张表，失败格单列原因。 */
+function BatchResultView({
+  run,
+  rows,
+  onCancel,
+}: {
+  run: BacktestRunDetail;
+  rows: BatchCellRow[];
+  onCancel: () => void;
+}) {
+  const ok = rows.filter((row) => !row.error);
+  const failed = rows.filter((row) => row.error);
+  const metric = typeof run.params.metric === "string" ? run.params.metric : "sharpe";
+  const metricLabel = METRIC_LABELS[metric] ?? metric;
+  // 参数列取成功格里出现过的键，不依赖提交时的网格快照
+  const paramKeys = Array.from(
+    new Set(ok.flatMap((row) => Object.keys(row.params))),
+  );
+  const extraKeys = ["total_return", "max_drawdown", "trade_count"].filter(
+    (key) => key !== metric,
+  );
+  const toneClass = (value: number | null | undefined) => {
+    const tone = metricTone(metric, value);
+    return tone === "good" ? "positive" : tone === "bad" ? "negative" : "";
+  };
+  const head = [
+    "#",
+    "品种",
+    "周期",
+    ...paramKeys,
+    metricLabel,
+    ...extraKeys.map((key) => METRIC_LABELS[key] ?? key),
+  ];
+  const body = ok.map((row, index) => [
+    <span className="dim mono">{index + 1}</span>,
+    <span className="mono">{row.inst}</span>,
+    row.bar,
+    ...paramKeys.map((key) => (
+      <span className="mono">{row.params[key] ?? "—"}</span>
+    )),
+    <b className={toneClass(row.metrics[metric])}>
+      {metricText(metric, row.metrics[metric])}
+    </b>,
+    ...extraKeys.map((key) => (
+      <span>{metricText(key, row.metrics[key])}</span>
+    )),
+  ]);
+
+  return (
+    <>
+      <RunStatusBar run={run} onCancel={onCancel} />
+      {run.status !== "done" ? (
+        <div className="empty">
+          {run.status === "failed"
+            ? "任务失败：见上方原因"
+            : "批量回测在后台逐格运行，完成后汇总表会出现在这里"}
+        </div>
+      ) : (
+        <>
+          <div className="bt-run-state">
+            <span>{run.strategy}</span>
+            <span className="dim">
+              {run.start} ~ {run.end} · {ok.length + failed.length} 格（失败{" "}
+              {failed.length}）· 按{metricLabel}排序
+            </span>
+          </div>
+          <Table
+            head={head}
+            rows={body}
+            empty={ok.length === 0}
+            emptyHint="所有格子都失败了，原因见下表"
+          />
+          {failed.length > 0 && (
+            <Table
+              head={["品种", "周期", "参数", "失败原因"]}
+              rows={failed.map((row) => [
+                <span className="mono">{row.inst}</span>,
+                row.bar,
+                <span className="mono">{formatParams(row.params)}</span>,
+                <span className="negative">{row.error}</span>,
+              ])}
+              empty={false}
+              emptyHint=""
+            />
+          )}
+        </>
+      )}
+    </>
   );
 }
 
@@ -3387,6 +4385,7 @@ function BacktestRunView({
           </div>
           <Curve values={values} emptyHint="回测区间内权益数据不足" />
           <MonthlyReturnsTable rows={monthly} />
+          <PineComparePanel run={run} />
           <Table
             empty={(trades?.trades.length ?? 0) === 0}
             emptyHint="区间内没有成交"
@@ -3432,6 +4431,99 @@ function MonthlyReturnsTable({ rows }: { rows: MonthlyReturn[] }) {
           </span>,
         ])}
       />
+    </>
+  );
+}
+
+/** Pine 结果导入对比（M4-16）：粘贴 metric,value 两列即逐项算偏离度。 */
+function PineComparePanel({ run }: { run: BacktestRunDetail }) {
+  const [csv, setCsv] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<PineCompareResponse | null>(null);
+
+  const submit = async () => {
+    if (!csv.trim()) {
+      setError("先粘贴 metric,value 两列内容");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(
+        await importPine(
+          run.run_id,
+          csv,
+          window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "",
+        ),
+      );
+    } catch (err) {
+      setResult(null);
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="bt-sub">
+        <span>Pine 结果对比</span>
+        <span className="dim">
+          指标名与内部字段同名；偏离度 &gt; 5% 标红且该参数集禁止启用
+        </span>
+      </div>
+      <textarea
+        className="bt-pine-input"
+        rows={4}
+        spellCheck={false}
+        placeholder={"metric,value\ntotal_return,-0.0617\nsharpe,-4.8\nmax_drawdown,0.0921"}
+        value={csv}
+        onChange={(e) => setCsv(e.target.value)}
+      />
+      <div className="bt-actions">
+        <button
+          type="button"
+          className="bt-run"
+          onClick={() => void submit()}
+          disabled={busy}
+        >
+          {busy ? "对比中…" : "导入并对比"}
+        </button>
+      </div>
+      {error && <div className="bt-error">{error}</div>}
+      {result && (
+        <>
+          <Table
+            empty={result.rows.length === 0}
+            emptyHint="没有可比对的指标"
+            head={["指标", "Pine", "Python", "偏离度"]}
+            rows={result.rows.map((row) => [
+              METRIC_LABELS[row.metric] ?? row.metric,
+              num(row.pine, 4),
+              row.python === null ? "—" : num(row.python, 4),
+              <span className={row.over_limit ? "negative" : ""}>
+                {row.deviation === null
+                  ? "无法计算"
+                  : `${(row.deviation * 100).toFixed(2)}%`}
+              </span>,
+            ])}
+          />
+          <div className="bt-note">
+            {result.over_limit
+              ? `最大偏离度 ${((result.max_deviation ?? 0) * 100).toFixed(2)}%，超过 5%，禁止启用该参数集`
+              : `全部指标在 5% 以内${
+                  result.max_deviation === null
+                    ? ""
+                    : `（最大 ${(result.max_deviation * 100).toFixed(2)}%）`
+                }`}
+            {result.unmatched.length > 0 &&
+              `；未匹配：${result.unmatched.join("、")}`}
+            {result.persisted.length > 0 &&
+              `；已落库：${result.persisted.join("、")}`}
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -3555,7 +4647,11 @@ function BacktestHistory({
                     <span className="hist-range">
                       {item.start} ~ {item.end} ·{" "}
                       {RUN_STATUS_TEXT[item.status] ?? item.status}
-                      {item.kind === "walkforward" ? " · walk-forward" : ""}
+                      {item.kind === "walkforward"
+                        ? " · walk-forward"
+                        : item.kind === "batch"
+                          ? " · 批量"
+                          : ""}
                     </span>
                     <span className="hist-params mono">
                       {formatParams(item.params)}
@@ -3739,6 +4835,43 @@ function EquityCurve({ points, label }: { points: EquityPoint[]; label: string }
   );
 }
 
+/** 迷你权益曲线：与同组其它版本共用纵轴范围，只比形态不重复标注数值。 */
+function Sparkline({
+  values,
+  domain,
+}: {
+  values: number[];
+  domain: { min: number; max: number };
+}) {
+  const W = 100;
+  const H = 28;
+  const span = domain.max - domain.min || 1;
+  const step = W / (values.length - 1);
+  const line = values
+    .map((value, index) => {
+      const x = (index * step).toFixed(2);
+      const y = (H - ((value - domain.min) / span) * H).toFixed(2);
+      return `${x},${y}`;
+    })
+    .join(" L");
+
+  return (
+    <svg
+      className="cmp-curve-svg"
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <path className="cmp-curve-area" d={`M${line} L${W},${H} L0,${H} Z`} />
+      <path
+        className="cmp-curve-line"
+        d={`M${line}`}
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
 function Curve({
   values,
   emptyHint,
@@ -3827,6 +4960,41 @@ function formatParams(params: Record<string, unknown>): string {
     .join("; ");
 }
 
+/** 逗号分隔的输入拆成去空白、去重的列表（批量回测的品种/周期）。 */
+function splitList(text: string): string[] {
+  return Array.from(
+    new Set(
+      text
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+/**
+ * 对比表排序：按当前排序键从优到劣，缺失值排末尾。
+ * 回撤越小越好，其余指标越大越好。
+ */
+function sortCompareVersions(
+  versions: { signature: string; run: BacktestRun }[],
+  key: CompareSort
+) {
+  const higherBetter = !LOWER_IS_BETTER.has(key);
+  return [...versions].sort((a, b) => {
+    const left = a.run.metrics[key];
+    const right = b.run.metrics[key];
+    const leftValue =
+      typeof left === "number" && Number.isFinite(left) ? left : null;
+    const rightValue =
+      typeof right === "number" && Number.isFinite(right) ? right : null;
+    if (leftValue === rightValue) return 0;
+    if (leftValue === null) return 1;
+    if (rightValue === null) return -1;
+    return higherBetter ? rightValue - leftValue : leftValue - rightValue;
+  });
+}
+
 function metricTone(
   key: string,
   value: number | null | undefined,
@@ -3850,6 +5018,9 @@ function metricTone(
     case "max_consecutive_losses":
     case "max_consecutive_loss_amount":
       return value > 0 ? "warn" : "good";
+    case "funding_cost":
+      // 正=付出（成本），负=收取（收益）
+      return value > 0 ? "warn" : value < 0 ? "good" : "neutral";
     default:
       return "neutral";
   }
@@ -5416,6 +6587,20 @@ function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
             pid {item.pid ?? "—"}
             {item.restarts !== null ? ` · 重启 ${item.restarts}` : ""}
           </span>
+          {item.ws && (
+            <span
+              className={`proc-meta mono proc-ws${item.ws.connected ? "" : " proc-ws-off"}`}
+              title={item.ws.last_error ?? undefined}
+            >
+              {item.ws.connected
+                ? "WS 已连接"
+                : `WS 断开 · 连续失败 ${item.ws.failures}${
+                    item.ws.next_delay !== null
+                      ? ` · ${item.ws.next_delay.toFixed(0)}s 后重连`
+                      : ""
+                  }`}
+            </span>
+          )}
         </div>
       ))}
     </div>

@@ -620,6 +620,16 @@ class TestStatusPublish:
             assert payload["catch_up_total"] == 10
             assert payload["skipped_total"] == 0
             assert payload["started_ts"] > 0
+
+            # M3-15：同一轮评估另外落一份定长历史，供策略详情页读取
+            history = await redis.lrange(
+                f"{settings.engine.status_key}:history:"
+                f"{settings.engine.strategy}:{settings.engine.inst}",
+                0,
+                -1,
+            )
+            assert len(history) == 1
+            assert json.loads(history[0])["bar_ts"] == bars[-1].ts
         finally:
             store.close()
             await redis.aclose()

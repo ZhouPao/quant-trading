@@ -345,6 +345,7 @@ async def _run(args, settings: Settings) -> int:
             redis=redis,
             price_provider=price_provider,
             heartbeat_interval=args.heartbeat_interval,
+            ws_client=ws,
             reconciler=reconciler,
             kill_switch=KillSwitch(redis),
             reconcile_interval=reconcile_interval,

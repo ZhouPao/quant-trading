@@ -875,6 +875,47 @@ class TestProcesses:
 
         worker = next(p for p in data["processes"] if p["name"] == "worker")
         assert worker["reason"] == "no_key"
+        # 未启用 --ws 时没有状态键，卡片上不该出现空的 WS 行
+        assert "ws" not in worker
+
+    async def test_worker_ws_status_attached(self, env) -> None:
+        service, _store, redis, _settings = env
+        await redis.set("quant:process:supervisor", self._table(["worker"]))
+        await self._beat(redis, "worker")
+        await redis.set(
+            "quant:ws:status:worker",
+            json.dumps(
+                {
+                    "ts": NOW,
+                    "connected": False,
+                    "failures": 3,
+                    "last_error": "ConnectionResetError: reset by peer",
+                    "last_error_ts": NOW - 1000,
+                    "connected_since": None,
+                    "next_delay": 8.0,
+                }
+            ),
+        )
+
+        data = await service.processes()
+
+        worker = next(p for p in data["processes"] if p["name"] == "worker")
+        assert worker["ws"]["connected"] is False
+        assert worker["ws"]["failures"] == 3
+        assert worker["ws"]["next_delay"] == 8.0
+        assert "reset by peer" in worker["ws"]["last_error"]
+
+    async def test_ws_status_dirty_value_is_ignored(self, env) -> None:
+        service, _store, redis, _settings = env
+        await redis.set("quant:process:supervisor", self._table(["worker"]))
+        await self._beat(redis, "worker")
+        await redis.set("quant:ws:status:worker", "not-json")
+
+        data = await service.processes()
+
+        worker = next(p for p in data["processes"] if p["name"] == "worker")
+        assert worker["online"] is True
+        assert "ws" not in worker
 
     async def test_unmanaged_process_is_not_managed(self, env) -> None:
         service, _store, redis, _settings = env
@@ -1131,6 +1172,86 @@ class TestEquity:
             unrealized_pnl=Decimal("0"),
             margin_ratio=None,
         )
+
+
+class TestEvaluations:
+    """M3-15：策略详情页的最近评估来自 engine 发布的 Redis 定长列表。"""
+
+    async def test_empty_history(self, engine_env) -> None:
+        service, _store, _settings, _redis = engine_env
+
+        data = await service.evaluations("sma_cross")
+
+        assert data["strategy_id"] == "sma_cross"
+        assert data["items"] == []
+        assert data["degraded"] == []
+
+    async def test_merges_bindings_newest_first(self, engine_env) -> None:
+        service, store, settings, redis = engine_env
+        store.upsert_binding("sma_cross", "BTC-USDT", "1H", True, 1000)
+        store.upsert_binding("sma_cross", "ETH-USDT", "1H", True, 1000)
+        prefix = f"{settings.engine.status_key}:history:sma_cross"
+        await redis.lpush(
+            f"{prefix}:BTC-USDT",
+            json.dumps(
+                {
+                    "inst": "BTC-USDT",
+                    "bar": "1H",
+                    "status": "signal",
+                    "bar_ts": 2000,
+                    "reason": "",
+                    "signal_count": 1,
+                    "ts": 2100,
+                }
+            ),
+        )
+        await redis.lpush(
+            f"{prefix}:ETH-USDT",
+            json.dumps(
+                {
+                    "inst": "ETH-USDT",
+                    "bar": "1H",
+                    "status": "no_signal",
+                    "bar_ts": 3000,
+                    "reason": "cross not found",
+                    "signal_count": 0,
+                    "ts": 3100,
+                }
+            ),
+        )
+
+        data = await service.evaluations("sma_cross")
+
+        assert [r["inst_id"] for r in data["items"]] == ["ETH-USDT", "BTC-USDT"]
+        assert data["items"][0]["status"] == "no_signal"
+        assert data["items"][0]["reason"] == "cross not found"
+        assert data["items"][1]["signal_count"] == 1
+
+    async def test_falls_back_to_configured_combo(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        key = (
+            f"{settings.engine.status_key}:history:"
+            f"{settings.engine.strategy}:{settings.engine.inst}"
+        )
+        await redis.lpush(
+            key,
+            json.dumps(
+                {
+                    "inst": settings.engine.inst,
+                    "bar": settings.engine.bar,
+                    "status": "duplicate",
+                    "bar_ts": 5000,
+                    "reason": "",
+                    "signal_count": 0,
+                    "ts": 5100,
+                }
+            ),
+        )
+
+        data = await service.evaluations("sma_cross")
+
+        assert len(data["items"]) == 1
+        assert data["items"][0]["status"] == "duplicate"
 
 
 class TestEngine:

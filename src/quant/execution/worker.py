@@ -22,6 +22,7 @@ from quant.execution.sizing import InstrumentSpec, PositionSizer, SizingResult
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.monitor.alert_service import AlertEvent, AlertService
+from quant.okx.ws_client import ws_status_key
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker, RiskDecision
 from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
@@ -74,6 +75,7 @@ class Worker:
         strategy_configs: dict[str, RiskConfig] | None = None,
         strategy_limits: dict[str, RiskLimits] | None = None,
         risk_limits_keys: dict[str, str] | None = None,
+        ws_client=None,
     ) -> None:
         self.queue = queue
         self.risk = risk
@@ -83,6 +85,8 @@ class Worker:
         self.price_provider = price_provider
         self.equity_provider = equity_provider
         self.heartbeat_interval = heartbeat_interval
+        # M2-2：WS 连接状态随心跳一起上报，未启用 --ws 时为 None
+        self.ws_client = ws_client
         self.reconciler = reconciler
         self.kill_switch = kill_switch
         self.reconcile_interval = reconcile_interval
@@ -492,9 +496,31 @@ class Worker:
                 int(time.time() * 1000),
                 ex=self.HEARTBEAT_TTL,
             )
+            await self._publish_ws_status()
             await self._refresh_limits()
             await self._publish_risk_limits()
             await asyncio.sleep(self.heartbeat_interval)
+
+    async def _publish_ws_status(self) -> None:
+        """M2-2：把 WS 连接状态写 Redis，供 M1-5 进程健康卡展示。
+
+        复用心跳周期与 TTL：worker 一停，状态键自然过期，不会留下
+        「最后一次是已连接」的假象。写失败只记日志，不影响交易主循环。
+        """
+        if self.ws_client is None:
+            return
+        payload = {
+            "ts": int(time.time() * 1000),
+            **self.ws_client.status(),
+        }
+        try:
+            await self.redis.set(
+                ws_status_key(),
+                json.dumps(payload),
+                ex=self.HEARTBEAT_TTL,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"ws status write failed: {e}")
 
     async def _refresh_limits(self) -> None:
         """从 Redis 覆盖层重算生效阈值（M7-8）。

@@ -17,6 +17,7 @@ from quant.backtest.runner import (
     build_matcher,
     format_metric,
     load_bars,
+    load_funding_schedule,
     parse_grid,
     parse_params,
     parse_range,
@@ -50,6 +51,9 @@ def main(args) -> int:
         )
         fixed_params = parse_params(args.params)
         grid = parse_grid(args.grid)
+        funding = load_funding_schedule(
+            settings, args.inst, enabled=args.funding or None
+        )
     except BacktestSetupError as e:
         log.error(str(e))
         return 1
@@ -69,6 +73,7 @@ def main(args) -> int:
         warmup_bars=warmup,
         base_params={**config_params, **fixed_params},
         strategy_cls=strategy_cls,
+        funding=funding,
     )
 
     combos = 1

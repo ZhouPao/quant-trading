@@ -709,6 +709,17 @@ code {
   color: var(--dimmer);
 }
 
+/* M2-2：WS 状态行；断线用 warn 色，错误详情放在 title 里避免撑破卡片 */
+.proc-ws {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-ws-off {
+  color: var(--warn);
+}
+
 .proc-engine {
   margin: 10px 0 0;
   font-size: 10px;
@@ -2051,6 +2062,464 @@ tbody tr.row-active td:first-child {
   color: var(--dimmer);
 }
 
+/* ---- 参数版本对比（M3-18）----
+   同一区间下的多个参数版本按「版本 / 收益 / 回撤 / 夏普 / 操作」对齐成表，
+   便于竖排扫读；每组是一张独立卡片，组头放区间与对比入口。 */
+.cmp-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.cmp-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0)
+  );
+  /* 表头 hover 提示朝上弹出，不能被分组容器的圆角裁掉 */
+  overflow: visible;
+}
+
+.cmp-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 10px 10px 0 0;
+  background: rgba(200, 242, 79, 0.035);
+}
+
+.cmp-slug {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.cmp-inst {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.cmp-bar {
+  padding: 1px 5px;
+  border: 1px solid rgba(200, 242, 79, 0.28);
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.cmp-range {
+  color: var(--dimmer);
+}
+
+.cmp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cmp-count {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+
+/* 组头两个动作分级：曲线形态是次要开关，回测页对比才是主操作 */
+.cmp-ghost,
+.cmp-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.cmp-ghost {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--dim);
+}
+
+.cmp-ghost:hover {
+  border-color: var(--dim);
+  color: var(--ink);
+}
+
+.cmp-caret {
+  display: inline-block;
+  font-size: 8px;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.cmp-caret-open {
+  transform: rotate(90deg);
+}
+
+.cmp-primary {
+  border: 1px solid rgba(200, 242, 79, 0.45);
+  background: rgba(200, 242, 79, 0.1);
+  color: var(--accent);
+}
+
+.cmp-primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.cmp-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.cmp-row {
+  display: grid;
+  grid-template-columns:
+    22px
+    minmax(120px, 1.8fr)
+    repeat(3, minmax(66px, 0.7fr))
+    52px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-top: 1px solid rgba(226, 240, 228, 0.05);
+}
+
+.cmp-row:first-child {
+  border-top: none;
+}
+
+/* 名次第一的版本用左侧亮线标出，视线不必横向对齐也能定位 */
+.cmp-row-leader {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.cmp-rank {
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  color: var(--dimmer);
+}
+
+.cmp-row-leader .cmp-rank,
+.cmp-curve:first-child .cmp-rank {
+  color: var(--accent);
+}
+
+.cmp-curve-name .cmp-rank {
+  margin-right: 5px;
+}
+
+.cmp-row-head {
+  padding-top: 6px;
+  padding-bottom: 5px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--dimmer);
+}
+
+/* 表头里的方向提示：说明「哪个方向更好」，与单元格里的差距箭头同一套语义 */
+.cmp-dir {
+  margin-left: 3px;
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: 0;
+  color: var(--dimmer);
+  opacity: 0.75;
+}
+
+/* 表头指标可点击切换排序键；未选中时保持表头的弱化层级 */
+.cmp-sort {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.cmp-sort:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.cmp-sort-on {
+  color: var(--ink);
+}
+
+.cmp-sort-on .cmp-dir {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* 版本数超过上限时的折叠开关，与行左内边距对齐 */
+.cmp-more {
+  align-self: flex-start;
+  padding: 6px 12px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--dimmer);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.cmp-more:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* hover 提示：排序与折叠按钮共用的轻量 tooltip，即时可见且不依赖原生 title */
+.cmp-tip {
+  position: relative;
+}
+
+.cmp-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 6;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--panel-2);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  /* 窄屏下过长的提示（折叠说明）限宽并允许折行，避免溢出视口 */
+  max-width: min(280px, calc(100vw - 32px));
+  text-align: left;
+  line-height: 1.45;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    visibility 120ms;
+  pointer-events: none;
+}
+
+.cmp-tip:hover::after,
+.cmp-tip:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+/* 靠左的触发点（折叠开关）提示改为左对齐，向右展开避免溢出卡片 */
+.cmp-tip-start::after {
+  right: auto;
+  left: 0;
+}
+
+.cmp-row:not(.cmp-row-head):hover {
+  background: rgba(226, 240, 228, 0.035);
+}
+
+.cmp-param {
+  overflow: hidden;
+  color: var(--dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-row:not(.cmp-row-head):hover .cmp-param {
+  color: var(--ink);
+}
+
+.cmp-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* 最优值：淡底 + accent 字色，不改变列的对齐基线 */
+.cmp-best {
+  margin-right: -6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(200, 242, 79, 0.12);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 与最优值的差距：主数值下方的第二行，弱化到不抢主数字的注意力 */
+.cmp-gap {
+  display: block;
+  margin-top: 1px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--dimmer);
+}
+
+/* 曲线形态：仅在展开分组时出现，共用纵轴范围便于横向比形状 */
+.cmp-curves {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 10px 12px 11px;
+  border-top: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.cmp-curve {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 8px 6px;
+  border: 1px solid rgba(226, 240, 228, 0.07);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.cmp-curve-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.cmp-curve-name {
+  overflow: hidden;
+  color: var(--dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-curve-svg {
+  display: block;
+  width: 100%;
+  height: 46px;
+}
+
+.cmp-curve-area {
+  fill: rgba(200, 242, 79, 0.09);
+}
+
+.cmp-curve-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+.cmp-curve-empty {
+  display: grid;
+  place-items: center;
+  height: 46px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+  text-align: center;
+}
+
+.cmp-curves-note {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
+.cmp-open {
+  justify-self: end;
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.cmp-open:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+}
+
+@media (max-width: 720px) {
+  .cmp-group-head {
+    padding: 8px 10px;
+  }
+
+  .cmp-actions {
+    flex-wrap: wrap;
+  }
+
+  .cmp-row {
+    grid-template-columns:
+      16px
+      minmax(0, 1fr)
+      repeat(3, minmax(42px, auto))
+      42px;
+    gap: 6px;
+    padding: 7px 10px;
+  }
+
+  .cmp-row-head {
+    font-size: 8px;
+    letter-spacing: 0.08em;
+  }
+
+  .cmp-dir {
+    display: none;
+  }
+
+  .cmp-open {
+    padding: 3px 6px;
+  }
+}
+
 @media (max-width: 720px) {
   .param-row {
     grid-template-columns: 1fr;
@@ -2165,6 +2634,25 @@ tbody tr.row-active td:first-child {
   font-size: 10px;
   color: var(--dimmer);
   letter-spacing: 0.05em;
+}
+
+.bt-pine-input {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.bt-pine-input:focus {
+  outline: none;
+  border-color: var(--line-strong);
 }
 
 .bt-notice {

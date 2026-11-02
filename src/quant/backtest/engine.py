@@ -8,6 +8,8 @@
   本根不再接受新信号
 - 最后一根产生的信号无法成交，记入 unfilled_signals
 - equity = cash + position.market_value(bar.close)，每根 bar 记录一次
+- 可选计入资金费率（M4-15）：传入 funding 时，每个结算点按当时的持仓与
+  本根开盘价结算，`cash -= rate * qty * price`
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from quant.backtest.context import Context
+from quant.backtest.funding import FundingSchedule
 from quant.backtest.matcher import Matcher
 from quant.backtest.metrics import compute_drawdown_curve, compute_metrics
 from quant.backtest.order import Fill
@@ -42,6 +45,8 @@ class BacktestResult:
     final_cash: Decimal
     drawdown_curve: list[tuple[int, Decimal]] = field(default_factory=list)
     metrics: dict[str, float] = field(default_factory=dict)
+    #: 资金费率净支出（正=付出，负=收取）；未启用资金费率时恒为 0
+    funding_cost: Decimal = Decimal("0")
 
 
 class Backtest:
@@ -54,6 +59,8 @@ class Backtest:
     warmup_bars 用于「只统计指定区间」的回测：预热段照常喂给策略
     （保证 RSI 等有内部状态的策略初始化正确），但产生的信号被丢弃、
     不成交也不计入权益曲线。
+
+    funding 为空表示不计资金费率；传入时预热段不结算（预热期不持仓）。
     """
 
     def __init__(
@@ -64,6 +71,7 @@ class Backtest:
         window_size: int = 200,
         params: dict[str, Any] | None = None,
         warmup_bars: list[Bar] | None = None,
+        funding: FundingSchedule | None = None,
     ) -> None:
         if initial_cash <= 0:
             raise ValueError(f"initial_cash must be positive, got {initial_cash}")
@@ -75,6 +83,7 @@ class Backtest:
         self.window_size = window_size
         self.params = dict(params) if params else {}
         self.warmup_bars = list(warmup_bars) if warmup_bars else []
+        self.funding = funding
 
     def run(
         self,
@@ -117,10 +126,23 @@ class Backtest:
         unfilled: list[Signal] = []
         cash = self.initial_cash
         pending: Signal | None = None
+        funding_cost = Decimal("0")
+        funding_cursor = 0
 
         for bar in bars:
             if should_stop is not None and should_stop():
                 break
+            # 资金费率结算：覆盖上一根 bar 之后到本根 bar 时间戳的结算点。
+            # 用带符号 qty 统一方向：rate>0 时长仓付、短仓收。
+            if self.funding is not None:
+                until = self.funding.index_until(bar.ts)
+                while funding_cursor < until:
+                    rate = self.funding.rates[funding_cursor]
+                    funding_cursor += 1
+                    cost = rate * position.qty * bar.open
+                    if cost != 0:
+                        cash -= cost
+                        funding_cost += cost
             # 上一根产生的信号在本根开盘时执行（避免未来数据）
             if pending is not None:
                 try:
@@ -173,6 +195,7 @@ class Backtest:
 
         drawdown_curve = compute_drawdown_curve(equity_curve)
         metrics = compute_metrics(trades, equity_curve, bars)
+        metrics["funding_cost"] = float(funding_cost)
 
         return BacktestResult(
             trades=trades,
@@ -183,6 +206,7 @@ class Backtest:
             final_cash=cash,
             drawdown_curve=drawdown_curve,
             metrics=metrics,
+            funding_cost=funding_cost,
         )
 
     def _advance(self, ctx: Context, bar: Bar) -> None:

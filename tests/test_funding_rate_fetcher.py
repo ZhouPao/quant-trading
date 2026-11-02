@@ -176,3 +176,163 @@ class TestFundingRateFetcherEdgeCases:
         assert isinstance(loaded[0], FundingRate)
         # Decimal 正确反序列化
         assert isinstance(loaded[0].rate, Decimal)
+
+
+# =====================================================================
+# M2-4 历史回补
+# =====================================================================
+
+H8 = 8 * 3600 * 1000
+
+
+def _history_client(pages: list[list[FundingRate]]) -> MagicMock:
+    """按调用顺序逐页返回预设记录；用完后返回空列表表示「没有更早的数据」。"""
+    client = MagicMock()
+    queue = iter(pages)
+    client.get_funding_rate_history.side_effect = lambda *a, **k: next(queue, [])
+    return client
+
+
+class TestFetchHistory:
+    """fetch_history：翻页、区间过滤与去重。"""
+
+    def test_backfills_multiple_pages_until_start(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        # 每页 2 条，模拟「从新到旧」返回
+        page1 = [_make_rate(ts=base + 3 * H8), _make_rate(ts=base + 2 * H8)]
+        page2 = [_make_rate(ts=base + H8), _make_rate(ts=base)]
+        fetcher = FundingRateFetcher(_history_client([page1, page2]), tmp_path)
+
+        added = fetcher.fetch_history(
+            "BTC-USDT-SWAP", start_ts=base, page_limit=2
+        )
+
+        assert added == 4
+        loaded = fetcher.load("BTC-USDT-SWAP")
+        assert [r.ts for r in loaded] == [
+            base,
+            base + H8,
+            base + 2 * H8,
+            base + 3 * H8,
+        ]
+
+    def test_after_cursor_uses_oldest_of_prev_page(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        page1 = [_make_rate(ts=base + 2 * H8), _make_rate(ts=base + H8)]
+        page2 = [_make_rate(ts=base)]
+        client = _history_client([page1, page2])
+        fetcher = FundingRateFetcher(client, tmp_path)
+
+        fetcher.fetch_history("BTC-USDT-SWAP", start_ts=base, page_limit=2)
+
+        calls = client.get_funding_rate_history.call_args_list
+        assert calls[0].kwargs["after"] is None
+        assert calls[1].kwargs["after"] == base + H8
+
+    def test_stops_when_page_has_no_more(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        # 只有 1 条但 page_limit=100，说明已到最早一条，不再翻页
+        client = _history_client([[_make_rate(ts=base)]])
+        fetcher = FundingRateFetcher(client, tmp_path)
+
+        assert fetcher.fetch_history("BTC-USDT-SWAP", start_ts=base) == 1
+        assert client.get_funding_rate_history.call_count == 1
+
+    def test_filters_by_end_ts(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        page = [
+            _make_rate(ts=base + 2 * H8),
+            _make_rate(ts=base + H8),
+            _make_rate(ts=base),
+        ]
+        # 不满 page_limit，避免继续翻页
+        fetcher = FundingRateFetcher(
+            _history_client([page]), tmp_path
+        )
+
+        added = fetcher.fetch_history(
+            "BTC-USDT-SWAP",
+            start_ts=base,
+            end_ts=base + H8,
+            page_limit=10,
+        )
+
+        assert added == 2
+        assert [r.ts for r in fetcher.load("BTC-USDT-SWAP")] == [
+            base,
+            base + H8,
+        ]
+
+    def test_dedup_with_existing_records(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        fetcher = FundingRateFetcher(_make_client(_make_rate(ts=base)), tmp_path)
+        fetcher.fetch("BTC-USDT-SWAP")
+
+        fetcher._client = _history_client(
+            [[_make_rate(ts=base + H8), _make_rate(ts=base)]]
+        )
+        added = fetcher.fetch_history(
+            "BTC-USDT-SWAP", start_ts=base, page_limit=10
+        )
+
+        assert added == 1
+        assert len(fetcher.load("BTC-USDT-SWAP")) == 2
+
+    def test_rerun_is_idempotent(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        page = [_make_rate(ts=base + H8), _make_rate(ts=base)]
+        fetcher = FundingRateFetcher(
+            _history_client([page, page]), tmp_path
+        )
+
+        assert fetcher.fetch_history(
+            "BTC-USDT-SWAP", start_ts=base, page_limit=10
+        ) == 2
+        assert fetcher.fetch_history(
+            "BTC-USDT-SWAP", start_ts=base, page_limit=10
+        ) == 0
+        assert len(fetcher.load("BTC-USDT-SWAP")) == 2
+
+    def test_respects_max_pages(self, tmp_path: Path) -> None:
+        base = 1_700_000_000_000
+        page = [_make_rate(ts=base + 10 * H8), _make_rate(ts=base + 9 * H8)]
+        client = _history_client([page, page, page])
+        fetcher = FundingRateFetcher(client, tmp_path)
+
+        fetcher.fetch_history(
+            "BTC-USDT-SWAP", start_ts=base, page_limit=2, max_pages=2
+        )
+
+        assert client.get_funding_rate_history.call_count == 2
+
+    def test_live_record_upgrades_next_funding_ts(self, tmp_path: Path) -> None:
+        """历史记录 next_funding_ts=0，随后的实时记录应补齐该字段。"""
+        base = 1_700_000_000_000
+        fetcher = FundingRateFetcher(
+            _history_client([[_make_rate(ts=base, next_funding_ts=0)]]),
+            tmp_path,
+        )
+        fetcher.fetch_history("BTC-USDT-SWAP", start_ts=base, page_limit=10)
+
+        fetcher._client = _make_client(
+            _make_rate(ts=base, next_funding_ts=base + H8)
+        )
+        added = fetcher.fetch("BTC-USDT-SWAP")
+
+        assert added == 0
+        loaded = fetcher.load("BTC-USDT-SWAP")
+        assert len(loaded) == 1
+        assert loaded[0].next_funding_ts == base + H8
+
+    def test_end_before_start_raises(self, tmp_path: Path) -> None:
+        fetcher = FundingRateFetcher(_history_client([]), tmp_path)
+        with pytest.raises(ValueError, match="start_ts must be before end_ts"):
+            fetcher.fetch_history(
+                "BTC-USDT-SWAP", start_ts=1_700_000_000_000,
+                end_ts=1_600_000_000_000,
+            )
+
+    def test_empty_inst_raises(self, tmp_path: Path) -> None:
+        fetcher = FundingRateFetcher(_history_client([]), tmp_path)
+        with pytest.raises(ValueError, match="inst_id must not be empty"):
+            fetcher.fetch_history("", start_ts=1_700_000_000_000)

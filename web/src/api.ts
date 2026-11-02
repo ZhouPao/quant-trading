@@ -700,6 +700,7 @@ export const METRIC_LABELS: Record<string, string> = {
   max_consecutive_loss_amount: "最大连亏金额",
   exposure_ratio: "持仓时间占比",
   turnover: "换手率",
+  funding_cost: "资金费率成本",
 };
 
 const PCT_METRICS = new Set([
@@ -719,12 +720,16 @@ const INT_METRICS = new Set([
   "total_oos_trades",
 ]);
 
+/** 金额类指标：4 位小数，避免几分钱的资金费被四舍五入成 0.00。 */
+const AMOUNT_METRICS = new Set(["funding_cost"]);
+
 /** 按指标语义格式化：比率转百分比，缺失显示占位符。 */
 export function metricText(key: string, value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   if (!Number.isFinite(value)) return "—";
   if (PCT_METRICS.has(key)) return pct(String(value));
   if (INT_METRICS.has(key)) return String(Math.round(value));
+  if (AMOUNT_METRICS.has(key)) return value.toFixed(4);
   return value.toFixed(2);
 }
 
@@ -903,6 +908,16 @@ export async function fetchRiskLimits(signal: AbortSignal) {
   return { ...data, circuits: data.circuits ?? [] };
 }
 
+export type WsStatus = {
+  ts: number | null;
+  connected: boolean;
+  failures: number;
+  last_error: string | null;
+  last_error_ts: number | null;
+  connected_since: number | null;
+  next_delay: number | null;
+};
+
 export type ProcessItem = {
   name: string;
   online: boolean;
@@ -914,6 +929,8 @@ export type ProcessItem = {
   interval_seconds: number;
   /** no_key / not_managed 等判定原因 */
   reason?: string | null;
+  /** M2-2：仅 worker 启用 --ws 时存在 */
+  ws?: WsStatus | null;
 };
 
 export type ProcessesResponse = {
@@ -1365,6 +1382,46 @@ export type OptimizeBody = BacktestBody & {
   n_jobs?: number;
 };
 
+/** 批量回测入参（M4-7）：品种与周期都是列表，网格可选。 */
+export type BatchBody = {
+  strategy: string;
+  insts: string[];
+  bars: string[];
+  start: string;
+  end: string;
+  params?: string;
+  grid?: string;
+  metric?: string;
+  warmup_bars?: number;
+};
+
+/** 批量回测的单格结果；失败行带 error、指标为空。 */
+export type BatchCellRow = {
+  inst: string;
+  bar: string;
+  params: Record<string, string>;
+  metrics: MetricMap;
+  error: string | null;
+};
+
+export type BatchResponse = {
+  kind: "batch";
+  strategy: string;
+  insts: string[];
+  bars: string[];
+  start: string;
+  end: string;
+  params: Record<string, unknown>;
+  grid: Record<string, (string | number)[]>;
+  metric: string;
+  combo_count: number;
+  cell_count: number;
+  failed_count: number;
+  rows: BatchCellRow[];
+  failed: BatchCellRow[];
+  elapsed_ms: number;
+};
+
 export async function fetchStrategies(signal: AbortSignal) {
   return getJson<StrategiesResponse>("/api/strategies", signal);
 }
@@ -1389,6 +1446,56 @@ export async function fetchParamChanges(
 ) {
   return getJson<ParamChangesResponse>(
     `/api/strategies/${encodeURIComponent(strategyId)}/param-changes?limit=5`,
+    signal
+  );
+}
+
+export type RollbackResult = {
+  ok: boolean;
+  message: string;
+  ts: number;
+};
+
+/** M3-14 参数回滚：从历史记录恢复参数值，产生新的变更记录。 */
+export async function rollbackParam(
+  strategyId: string,
+  changeId: number,
+  body: { reason?: string; changed_by?: string } = {},
+  token = ""
+) {
+  return postWrite<RollbackResult>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/param-changes/${changeId}/rollback`,
+    body,
+    token
+  );
+}
+
+export type StrategyEvaluation = {
+  inst_id: string;
+  bar: string;
+  /** signal / no_signal / duplicate / waiting_data / skipped / error */
+  status: string | null;
+  bar_ts: number | null;
+  reason: string | null;
+  signal_count: number;
+  ts: number | null;
+};
+
+export type StrategyEvaluationsResponse = {
+  ts: number;
+  strategy_id: string;
+  items: StrategyEvaluation[];
+  degraded: string[];
+};
+
+/** M3-15 策略详情页：最近 N 次评估（含无信号的轮次）。 */
+export async function fetchStrategyEvaluations(
+  signal: AbortSignal,
+  strategyId: string,
+  limit = 10
+) {
+  return getJson<StrategyEvaluationsResponse>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/evaluations?limit=${limit}`,
     signal
   );
 }
@@ -1460,9 +1567,13 @@ export async function fetchBacktestRun(signal: AbortSignal, runId: string) {
   );
 }
 
-export async function fetchBacktestEquity(signal: AbortSignal, runId: string) {
+export async function fetchBacktestEquity(
+  signal: AbortSignal,
+  runId: string,
+  limit = 2000,
+) {
   return getJson<{ points: BacktestEquityPoint[] }>(
-    `/api/backtest/${encodeURIComponent(runId)}/equity`,
+    `/api/backtest/${encodeURIComponent(runId)}/equity?limit=${limit}`,
     signal,
   );
 }
@@ -1488,6 +1599,26 @@ export async function fetchBacktestCompare(
   );
 }
 
+/** 提交批量回测任务（M4-7），立即返回 run_id。 */
+export async function submitBatch(signal: AbortSignal, body: BatchBody) {
+  return postJson<{ run_id: string; status: string }>(
+    "/api/backtest/batch",
+    body,
+    signal,
+  );
+}
+
+/** 批量回测逐格结果，来自产物 batch.parquet。 */
+export async function fetchBacktestBatch(
+  signal: AbortSignal,
+  runId: string,
+) {
+  return getJson<{ rows: BatchCellRow[] }>(
+    `/api/backtest/${encodeURIComponent(runId)}/batch`,
+    signal,
+  );
+}
+
 export async function cancelBacktest(runId: string, token = "") {
   return postWrite<{ run_id: string; status: string }>(
     `/api/backtest/${encodeURIComponent(runId)}/cancel`,
@@ -1500,6 +1631,37 @@ export async function rerunBacktest(runId: string, token = "") {
   return postWrite<{ run_id: string; status: string }>(
     `/api/backtest/${encodeURIComponent(runId)}/rerun`,
     {},
+    token,
+  );
+}
+
+/** Pine 对比单行（M4-16）；deviation 为 null 表示分母为 0 无法算比例 */
+export type PineCompareRow = {
+  metric: string;
+  pine: number;
+  python: number | null;
+  deviation: number | null;
+  over_limit: boolean;
+};
+
+export type PineCompareResponse = {
+  run_id: string;
+  limit: number;
+  rows: PineCompareRow[];
+  unmatched: string[];
+  max_deviation: number | null;
+  over_limit: boolean;
+  persisted: string[];
+};
+
+export async function importPine(
+  runId: string,
+  csv: string,
+  token = "",
+) {
+  return postWrite<PineCompareResponse>(
+    `/api/backtest/${encodeURIComponent(runId)}/pine`,
+    { csv },
     token,
   );
 }
@@ -1518,8 +1680,11 @@ export function num(value: string | number | null | undefined, digits = 2): stri
   });
 }
 
-export function pct(value: string | null | undefined, digits = 2): string {
-  if (value === null || value === undefined) return "—";
+export function pct(
+  value: string | number | null | undefined,
+  digits = 2
+): string {
+  if (value === null || value === undefined || value === "") return "—";
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "—";
   return `${(parsed * 100).toFixed(digits)}%`;

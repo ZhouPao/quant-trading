@@ -134,6 +134,8 @@ class TestSubmit:
         assert detail["inst"] == INST
         assert detail["params"]["fast_len"] == 5
         assert detail["metrics"]["sharpe"] is not None
+        # M4-15 收尾：资金费率成本随指标落库；默认开关关闭时恒为 0
+        assert detail["metrics"]["funding_cost"] == 0.0
         assert {item["kind"] for item in detail["artifacts"]} == {
             "equity",
             "trades",

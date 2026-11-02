@@ -1122,6 +1122,9 @@ class TestFetchFundingRatesMain:
         args = _ns(
             inst="BTC-USDT-SWAP",
             config="config/config.toml",
+            start=None,
+            end=None,
+            max_pages=100,
         )
 
         ret = fetch_funding_rates_main(args)
@@ -1151,6 +1154,9 @@ class TestFetchFundingRatesMain:
         args = _ns(
             inst="BTC-USDT-SWAP",
             config="config/config.toml",
+            start=None,
+            end=None,
+            max_pages=100,
         )
 
         ret = fetch_funding_rates_main(args)
@@ -1184,11 +1190,97 @@ class TestFetchFundingRatesMain:
         args = _ns(
             inst="BTC-USDT-SWAP",
             config="config/config.toml",
+            start=None,
+            end=None,
+            max_pages=100,
         )
 
         ret = fetch_funding_rates_main(args)
         assert ret == 1
         mock_client.close.assert_called_once()
+
+    @patch("quant.cli.fetch_funding_rates.FundingRateFetcher")
+    @patch("quant.cli.fetch_funding_rates.OKXClient")
+    @patch("quant.cli.fetch_funding_rates.Settings.load")
+    def test_history_mode_backfills_range(
+        self, mock_load, mock_client_cls, mock_fetcher_cls, tmp_path
+    ):
+        """传 --start 时应走 fetch_history，且区间换算成 UTC ms。"""
+        mock_load.return_value = _make_settings(tmp_path)
+        mock_client_cls.return_value = MagicMock()
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.fetch_history.return_value = 5
+
+        args = _ns(
+            inst="BTC-USDT-SWAP",
+            config="config/config.toml",
+            start="2024-01-01",
+            end="2024-02-01",
+            max_pages=10,
+        )
+
+        ret = fetch_funding_rates_main(args)
+
+        assert ret == 0
+        mock_fetcher.fetch.assert_not_called()
+        kwargs = mock_fetcher.fetch_history.call_args.kwargs
+        assert kwargs["inst_id"] == "BTC-USDT-SWAP"
+        assert kwargs["start_ts"] == parse_date_to_ms("2024-01-01")
+        assert kwargs["end_ts"] == parse_date_to_ms("2024-02-01")
+        assert kwargs["max_pages"] == 10
+
+    @patch("quant.cli.fetch_funding_rates.FundingRateFetcher")
+    @patch("quant.cli.fetch_funding_rates.OKXClient")
+    @patch("quant.cli.fetch_funding_rates.Settings.load")
+    def test_history_mode_without_end_covers_now(
+        self, mock_load, mock_client_cls, mock_fetcher_cls, tmp_path
+    ):
+        """只传 --start 时 end_ts 为 None（到最新）。"""
+        mock_load.return_value = _make_settings(tmp_path)
+        mock_client_cls.return_value = MagicMock()
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.fetch_history.return_value = 5
+
+        args = _ns(
+            inst="BTC-USDT-SWAP",
+            config="config/config.toml",
+            start="2024-01-01",
+            end=None,
+            max_pages=100,
+        )
+
+        assert fetch_funding_rates_main(args) == 0
+        assert mock_fetcher.fetch_history.call_args.kwargs["end_ts"] is None
+
+    @patch("quant.cli.fetch_funding_rates.Settings.load")
+    def test_end_without_start_returns_1(self, mock_load, tmp_path):
+        mock_load.return_value = _make_settings(tmp_path)
+
+        args = _ns(
+            inst="BTC-USDT-SWAP",
+            config="config/config.toml",
+            start=None,
+            end="2024-02-01",
+            max_pages=100,
+        )
+
+        assert fetch_funding_rates_main(args) == 1
+
+    @patch("quant.cli.fetch_funding_rates.Settings.load")
+    def test_start_after_end_returns_1(self, mock_load, tmp_path):
+        mock_load.return_value = _make_settings(tmp_path)
+
+        args = _ns(
+            inst="BTC-USDT-SWAP",
+            config="config/config.toml",
+            start="2024-02-01",
+            end="2024-01-01",
+            max_pages=100,
+        )
+
+        assert fetch_funding_rates_main(args) == 1
 
 
 # =====================================================================

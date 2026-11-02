@@ -108,6 +108,26 @@ class _AsyncCtx:
         return None
 
 
+class _HangingWS(FakeWS):
+    """保持连接不结束，直到 close()：用于在「已连接」状态下取快照。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._closed = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closed = True
+        self._closed.set()
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        await self._closed.wait()
+        return
+        yield  # pragma: no cover
+
+
 class TestWSClient:
     @pytest.mark.asyncio
     async def test_subscribe_sends_when_connected(self):
@@ -200,6 +220,53 @@ class TestWSClient:
         await client.close()
         await asyncio.wait_for(task, timeout=2)
         assert not client.is_connected
+
+    def test_jitter_stays_within_20_percent(self):
+        client = WSClient(reconnect_delay=5.0, max_reconnect_delay=60.0)
+        waits = [client._jitter(5.0) for _ in range(50)]
+        assert all(4.0 <= w <= 6.0 for w in waits)
+        # 有抖动才叫抖动：多进程同时断线不该落在同一秒
+        assert len(set(waits)) > 1
+
+    def test_jitter_capped_at_max_delay(self):
+        client = WSClient(reconnect_delay=5.0, max_reconnect_delay=60.0)
+        waits = [client._jitter(60.0) for _ in range(50)]
+        assert all(48.0 <= w <= 60.0 for w in waits)
+
+    @pytest.mark.asyncio
+    async def test_status_records_consecutive_failures(self):
+        class _BoomConnect:
+            def __call__(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        # 正数退避保证每轮都有 await 点，循环不会把事件循环卡死
+        client = WSClient(connect_fn=_BoomConnect(), reconnect_delay=0.001)
+        task = asyncio.create_task(client.run())
+        await asyncio.sleep(0.05)
+        await client.close()
+        await asyncio.wait_for(task, timeout=2)
+
+        status = client.status()
+        assert status["connected"] is False
+        assert status["failures"] >= 2
+        assert "boom" in (status["last_error"] or "")
+        assert status["last_error_ts"] is not None
+
+    @pytest.mark.asyncio
+    async def test_status_resets_failures_after_connect(self):
+        ws = _HangingWS()
+        client = WSClient(connect_fn=FakeConnect(ws), reconnect_delay=0.001)
+        task = asyncio.create_task(client.run())
+        assert await client.wait_connected(1.0)
+
+        status = client.status()
+        assert status["connected"] is True
+        assert status["failures"] == 0
+        assert status["connected_since"] is not None
+
+        await client.close()
+        await asyncio.wait_for(task, timeout=2)
+        assert client.status()["connected"] is False
 
 
 class TestLivePriceBook:

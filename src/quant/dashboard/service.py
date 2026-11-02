@@ -33,6 +33,7 @@ from quant.foundation.logger import get_logger
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.monitor.alerter import EmailAlerter
+from quant.okx.ws_client import ws_status_key
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.circuit_breaker import STATUS_AWAITING_RESUME, CircuitBreaker
 from quant.risk.config import RiskConfig
@@ -267,6 +268,29 @@ def _child_int(child: dict, field: str) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _ws_status(raw: dict | None) -> dict[str, object] | None:
+    """规范化 WS 状态（M2-2）。
+
+    字段缺失或类型不符时给安全默认值：卡片上少一行信息，好过整个
+    进程列表因一条脏数据解析失败。
+    """
+    if raw is None:
+        return None
+    next_delay = raw.get("next_delay")
+    last_error = raw.get("last_error")
+    return {
+        "ts": _child_int(raw, "ts"),
+        "connected": bool(raw.get("connected")),
+        "failures": _child_int(raw, "failures") or 0,
+        "last_error": last_error if isinstance(last_error, str) else None,
+        "last_error_ts": _child_int(raw, "last_error_ts"),
+        "connected_since": _child_int(raw, "connected_since"),
+        "next_delay": (
+            float(next_delay) if isinstance(next_delay, (int, float)) else None
+        ),
+    }
 
 
 def _process_item(
@@ -1006,6 +1030,72 @@ class DashboardService:
             "ticks": _field_int(status, "ticks"),
             "started_ts": _field_int(status, "started_ts"),
             "max_catchup_bars": cfg.max_catchup_bars,
+            "degraded": degraded,
+        }
+
+    async def evaluations(
+        self, strategy_id: str, limit: int = 10
+    ) -> dict[str, object]:
+        """M3-15 策略详情页：该策略最近 N 次评估（含无信号的轮次）。
+
+        数据来自 engine 每轮 `publish_status` 时写入 Redis 的定长列表，
+        按绑定的 `inst` 分别读取后合并，按 bar 时间倒序取前 N 条。
+        """
+        now = int(time.time() * 1000)
+        limit = max(1, min(limit, 10))
+        degraded: list[str] = []
+
+        try:
+            bindings = await asyncio.to_thread(
+                self._store.list_bindings, strategy_id
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"evaluations bindings read failed: {e}")
+            bindings = []
+            degraded.append("sqlite")
+
+        pairs = [
+            (str(b["inst_id"]), str(b.get("bar") or "")) for b in bindings
+        ]
+        if not pairs:
+            cfg = self._settings.engine
+            pairs = [(cfg.inst, cfg.bar)]
+
+        status_key = self._settings.engine.status_key
+        items: list[dict[str, object]] = []
+        for inst_id, bar in pairs:
+            key = f"{status_key}:history:{strategy_id}:{inst_id}"
+            try:
+                raw = await self._redis.lrange(key, 0, limit - 1)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"evaluations redis read failed: {e}")
+                if "redis" not in degraded:
+                    degraded.append("redis")
+                continue
+            for chunk in raw:
+                payload = _loads(chunk)
+                if payload is None:
+                    continue
+                items.append(
+                    {
+                        "inst_id": payload.get("inst") or inst_id,
+                        "bar": payload.get("bar") or bar,
+                        "status": payload.get("status"),
+                        "bar_ts": _as_int(payload.get("bar_ts")),
+                        "reason": payload.get("reason"),
+                        "signal_count": _as_int(
+                            payload.get("signal_count")
+                        )
+                        or 0,
+                        "ts": _as_int(payload.get("ts")),
+                    }
+                )
+
+        items.sort(key=lambda row: row["bar_ts"] or 0, reverse=True)
+        return {
+            "ts": now,
+            "strategy_id": strategy_id,
+            "items": items[:limit],
             "degraded": degraded,
         }
 
@@ -1776,6 +1866,18 @@ class DashboardService:
                 )
             )
 
+        # M2-2：worker 用 --ws 启动时会把连接状态随心跳写进来；未启用则无此键
+        try:
+            ws_raw = await self._redis.get(ws_status_key())
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"ws status read failed: {e}")
+            ws_raw = None
+        ws_status = _ws_status(_loads(ws_raw))
+        if ws_status is not None:
+            worker_item = next((i for i in items if i["name"] == "worker"), None)
+            if worker_item is not None:
+                worker_item["ws"] = ws_status
+
         online = sum(1 for i in items if i["online"])
         return {
             "ts": now,
@@ -1785,7 +1887,6 @@ class DashboardService:
             "offline": [i["name"] for i in items if not i["online"]],
             "degraded": degraded,
         }
-
     def _process_ttl(self, name: str, fallback: int) -> int:
         """优先用配置里的实际周期派生，避免与写入方的 TTL 不一致。"""
         monitor = self._settings.monitor
@@ -1917,6 +2018,42 @@ class DashboardService:
             "fills": fills,
             "position": position,
             "degraded": degraded,
+        }
+
+    # ------------------------------------------------------------------
+    # 参数回滚（M3-14）
+    # ------------------------------------------------------------------
+
+    async def rollback_param(
+        self,
+        strategy_id: str,
+        change_id: int,
+        *,
+        reason: str = "",
+        changed_by: str = "owner",
+    ) -> dict[str, object]:
+        """从历史记录恢复参数值，产生一条新的变更记录（不删历史）。"""
+        now_ms = int(time.time() * 1000)
+        try:
+            ok, message = await asyncio.to_thread(
+                self._store.rollback_param,
+                strategy_id,
+                change_id,
+                now_ms,
+                reason=reason,
+                changed_by=changed_by,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"rollback_param failed: {e}")
+            return {
+                "ok": False,
+                "error": str(e),
+                "ts": now_ms,
+            }
+        return {
+            "ok": ok,
+            "message": message,
+            "ts": now_ms,
         }
 
 

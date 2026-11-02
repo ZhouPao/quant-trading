@@ -311,6 +311,15 @@ _MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_rec_open
         ON reconciliations(resolved, ts DESC);
     """,
+    # v8 -> v9：回测指标补资金费率成本（M4-15 收尾）
+    #
+    # 这一列原先只在 `BacktestResult.metrics` 里存在（回测结束即丢），
+    # 历史列表与详情刷新后都看不到「这笔回测到底付了多少资金费」。
+    # 改走增量迁移而不是改 v5 的建表语句：v5 早已在用户库里执行过，
+    # 直接改它等于让存量库永远缺列；`user_version` 保证本迁移只跑一次。
+    """
+    ALTER TABLE backtest_metrics ADD COLUMN funding_cost TEXT;
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -1368,6 +1377,53 @@ class SQLiteStore:
         )
         return [dict(r) for r in rows], int(total["n"]) if total else 0
 
+    def rollback_param(
+        self,
+        strategy_id: str,
+        change_id: int,
+        now_ms: int,
+        *,
+        reason: str = "",
+        changed_by: str = "owner",
+        git_commit: str | None = None,
+    ) -> tuple[bool, str]:
+        """从历史记录恢复参数值（M3-14）。
+
+        Returns:
+            (success, message): success=False 表示找不到记录或值相同
+        """
+        row = self._query_one(
+            """
+            SELECT param, old_value
+              FROM strategy_param_changes
+             WHERE id = ? AND strategy_id = ?
+            """,
+            (change_id, strategy_id),
+        )
+        if not row:
+            return False, "change record not found"
+
+        param = row["param"]
+        target_value = row["old_value"]
+        # 首条变更的 old_value 为空：变更前用的是 toml 默认值，没有可恢复的
+        # 数据库覆盖值；删除覆盖不在本接口范围内，明确拒绝而不是写坏数据。
+        if target_value is None:
+            return False, "no previous override to restore (config default)"
+
+        # 调用 set_strategy_param 写入新变更（不删历史）
+        changed = self.set_strategy_param(
+            strategy_id,
+            param,
+            target_value,
+            now_ms,
+            reason=reason or f"rollback to change #{change_id}",
+            changed_by=changed_by,
+            git_commit=git_commit,
+        )
+        if not changed:
+            return False, "value unchanged (already at target)"
+        return True, param
+
     # ------------------------------------------------------------------
     # dead letters（MS4-B §10）
     # ------------------------------------------------------------------
@@ -1828,6 +1884,34 @@ class SQLiteStore:
         )
         return dict(row) if row else None
 
+    def worst_pine_deviation(
+        self, strategy_id: str, params_text: str
+    ) -> dict | None:
+        """同一策略 + 同一参数集已登记的最大 Pine 偏离度（M4-16）。
+
+        参数以 `backtest_runs.params` 的规范化 JSON 文本比对——同一份参数
+        只有一种序列化结果（提交时统一 `sort_keys=True`），无需额外哈希列。
+        只看 `done` 且已导入过 Pine 基线的回测。
+
+        Returns:
+            `{run_id, deviation}`；没有导入记录返回 None。
+        """
+        row = self._query_one(
+            """
+            SELECT r.run_id AS run_id, m.pine_deviation AS deviation
+              FROM backtest_runs r
+              JOIN backtest_metrics m ON m.run_id = r.run_id
+             WHERE r.strategy_id = ?
+               AND r.params = ?
+               AND r.status = 'done'
+               AND m.pine_deviation IS NOT NULL
+             ORDER BY CAST(m.pine_deviation AS REAL) DESC
+             LIMIT 1
+            """,
+            (strategy_id, params_text),
+        )
+        return dict(row) if row else None
+
     def add_backtest_artifact(
         self, run_id: str, kind: str, path: str, size: int | None, now_ms: int
     ) -> None:
@@ -2190,7 +2274,7 @@ def _run_filters(
     return where, tuple(params)
 
 
-#: `backtest_metrics` 的可写列（与迁移 v5 保持一致）。
+#: `backtest_metrics` 的可写列（与迁移 v5 建表 + v9 补列保持一致）。
 _METRIC_COLUMNS = frozenset(
     {
         "total_return",
@@ -2212,6 +2296,7 @@ _METRIC_COLUMNS = frozenset(
         "avg_oos_sharpe",
         "total_oos_trades",
         "modal_params",
+        "funding_cost",
         "pine_total_return",
         "pine_sharpe",
         "pine_max_drawdown",

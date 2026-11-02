@@ -386,6 +386,7 @@ class TestCliBacktest:
             config_dir=str(cfg_dir),
             out_dir=str(tmp_path / "reports"),
             no_report=False,
+            funding=False,
         )
         base.update(overrides)
         return SimpleNamespace(**base)
@@ -469,6 +470,7 @@ class TestCliOptimize:
             top=5,
             n_jobs=1,
             max_combos=None,
+            funding=False,
         )
         base.update(overrides)
         return SimpleNamespace(**base)

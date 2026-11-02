@@ -23,6 +23,7 @@ from typing import Any
 
 import pandas as pd
 
+from quant.backtest.batch import BatchResult
 from quant.backtest.engine import BacktestResult
 from quant.backtest.report import ReportGenerator
 from quant.backtest.runner import parse_grid, parse_range
@@ -31,6 +32,7 @@ from quant.dashboard.backtest import (
     BacktestRequest,
     BacktestRequestError,
     BacktestService,
+    BatchRequest,
     WalkforwardRequest,
 )
 from quant.foundation.config import Settings
@@ -173,10 +175,51 @@ class TaskRunner:
         self._ensure_worker()
         return run_id
 
+    async def submit_batch(self, req: BatchRequest) -> str:
+        """登记批量回测任务；params 存「基础参数 + 网格 + 品种/周期」。"""
+        base = await asyncio.to_thread(self._service.check_batch, req)
+        start_ts, end_ts = parse_range(req.start, req.end)
+        # 多品种共用一个 run_id：inst 列放不下组合，用 "batch" 占位，
+        # 具体品种与周期在 params 与产物里
+        now = _now_ms()
+        run_id = self._next_run_id(req.strategy, "batch", now)
+
+        self._store.create_backtest_run(
+            run_id,
+            strategy_id=req.strategy,
+            inst_id=",".join(_clean_list(req.insts)),
+            bar=",".join(_clean_list(req.bars)),
+            start_ts=start_ts,
+            end_ts=end_ts,
+            params=json.dumps(
+                {
+                    "base": _jsonable(base),
+                    "grid": (
+                        _grid_payload(parse_grid(req.grid))
+                        if req.grid.strip()
+                        else {}
+                    ),
+                    "insts": _clean_list(req.insts),
+                    "bars": _clean_list(req.bars),
+                    "metric": req.metric,
+                },
+                sort_keys=True,
+            ),
+            kind="batch",
+            status=PENDING,
+            created_at=now,
+            warmup_bars=req.warmup_bars,
+        )
+        await self._queue.put((run_id, req))
+        self._ensure_worker()
+        return run_id
+
     async def rerun(self, run_id: str) -> str:
         """按旧任务的参数与区间重跑，返回新 run_id（旧结果保留）。"""
         row = self._require(run_id)
         req = _request_from_row(row)
+        if isinstance(req, BatchRequest):
+            return await self.submit_batch(req)
         if isinstance(req, WalkforwardRequest):
             return await self.submit_walkforward(req)
         return await self.submit(req)
@@ -323,6 +366,21 @@ class TaskRunner:
             )
         return rows
 
+    def batches(self, run_id: str) -> list[dict[str, Any]]:
+        """读取批量回测逐格结果（非 batch 任务返回空列表）。"""
+        path = self._artifact_path(run_id, "batch")
+        if path is None:
+            return []
+        frame = _read_parquet(path)
+        return [
+            {
+                **item,
+                "params": json.loads(item["params"]),
+                "metrics": _metrics_payload(json.loads(item["metrics"])),
+            }
+            for item in frame.to_dict("records")
+        ]
+
     # ------------------------------------------------------------------
     # 执行
     # ------------------------------------------------------------------
@@ -354,9 +412,12 @@ class TaskRunner:
         self._store.update_run_status(run_id, RUNNING, started_at=_now_ms())
 
         should_stop = lambda: run_id in self._canceled  # noqa: E731
-        is_walkforward = isinstance(req, WalkforwardRequest)
         try:
-            if is_walkforward:
+            if isinstance(req, BatchRequest):
+                payload, result = await self._service.build_batch_async(
+                    req, should_stop
+                )
+            elif isinstance(req, WalkforwardRequest):
                 payload, result = await self._service.build_walkforward_async(
                     req, should_stop
                 )
@@ -421,8 +482,10 @@ class TaskRunner:
     def _write_artifacts(
         self,
         run_id: str,
-        result: BacktestResult | WalkForwardResult,
+        result: BacktestResult | WalkForwardResult | BatchResult,
     ) -> list[tuple[str, Path]]:
+        if isinstance(result, BatchResult):
+            return self._write_batch_artifacts(run_id, result)
         if isinstance(result, WalkForwardResult):
             return self._write_walkforward_artifacts(run_id, result)
         return self._write_backtest_artifacts(run_id, result)
@@ -461,6 +524,29 @@ class TaskRunner:
             ],
         ).to_parquet(segments_path, index=False)
         return [("segments", segments_path)]
+
+    def _write_batch_artifacts(
+        self, run_id: str, result: BatchResult
+    ) -> list[tuple[str, Path]]:
+        """逐格结果：成功行带指标，失败行带原因，同一张表便于页面直接渲染。"""
+        out_dir = Path(self._settings.backtest.artifacts_dir) / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        batch_path = out_dir / "batch.parquet"
+        pd.DataFrame(
+            [
+                {
+                    "inst": cell.inst,
+                    "bar": cell.bar,
+                    "params": json.dumps(_jsonable(cell.params), sort_keys=True),
+                    "metrics": json.dumps(_jsonable(dict(cell.metrics))),
+                    "error": cell.error,
+                }
+                for cell in (*result.cells, *result.failed)
+            ],
+            columns=["inst", "bar", "params", "metrics", "error"],
+        ).to_parquet(batch_path, index=False)
+        return [("batch", batch_path)]
 
     def _write_backtest_artifacts(
         self, run_id: str, result: BacktestResult
@@ -557,6 +643,19 @@ def _request_from_row(row: dict) -> BacktestRequest:
         "bar": row["bar"],
         "warmup_bars": row["warmup_bars"],
     }
+    if row["kind"] == "batch":
+        # batch 的 params 存的是「基础参数 + 网格 + 品种/周期」结构
+        return BatchRequest(
+            strategy=row["strategy_id"],
+            insts=list(data.get("insts") or []),
+            bars=list(data.get("bars") or []),
+            start=common["start"],
+            end=common["end"],
+            params=_params_text(data.get("base") or {}),
+            grid=_grid_text(data.get("grid") or {}),
+            metric=data.get("metric", "sharpe"),
+            warmup_bars=row["warmup_bars"],
+        )
     if row["kind"] == "walkforward":
         # walkforward 的 params 存的是「基础参数 + 网格 + 切分」结构
         return WalkforwardRequest(
@@ -584,6 +683,11 @@ def _grid_text(grid: dict) -> str:
 
 def _grid_payload(grid: dict) -> dict:
     return {name: list(values) for name, values in grid.items()}
+
+
+def _clean_list(values: list[str]) -> list[str]:
+    """去空白与重复、保持顺序（与 `batch.expand_cells` 的规则一致）。"""
+    return list(dict.fromkeys(item.strip() for item in values if item.strip()))
 
 
 def _date(ts: int) -> str:

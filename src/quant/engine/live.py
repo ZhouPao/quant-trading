@@ -64,6 +64,14 @@ TickStatus = Literal[
     "error",         # 策略配置或计算失败
 ]
 
+#: 策略详情页展示的「最近评估」条数（M3-15）
+EVAL_HISTORY_LIMIT = 10
+
+
+def _eval_history_key(status_key: str, strategy_id: str, inst_id: str) -> str:
+    """评估历史在 Redis 中的键；与看板读取端保持同一格式。"""
+    return f"{status_key}:history:{strategy_id}:{inst_id}"
+
 
 @dataclass(frozen=True, slots=True)
 class EngineTick:
@@ -553,6 +561,16 @@ class LiveSignalEngine:
             await self._redis.set(self._status_key_for(target), json.dumps(payload))
         except Exception as e:  # noqa: BLE001
             log.warning(f"write engine status failed: {e}")
+
+        # M3-15：保留最近 10 次评估，供策略详情页展示（不含信号的轮次也记录）
+        history_key = _eval_history_key(
+            self._cfg.status_key, target.strategy_id, target.inst_id
+        )
+        try:
+            await self._redis.lpush(history_key, json.dumps(payload))
+            await self._redis.ltrim(history_key, 0, EVAL_HISTORY_LIMIT - 1)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"write engine evaluation history failed: {e}")
 
     async def _available_cash(self) -> Decimal:
         """优先用 monitor 发布的账户可用 USDT，读不到则用配置兜底。"""

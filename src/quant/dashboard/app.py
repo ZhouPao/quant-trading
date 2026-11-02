@@ -29,17 +29,22 @@
 - GET /api/strategies/{id}/params 单个策略的生效参数与来源
 - PUT /api/strategies/{id}/params 保存参数覆盖并写审计（写操作）
 - GET /api/strategies/{id}/param-changes 参数变更历史（分页）
+- POST /api/strategies/{id}/param-changes/{change_id}/rollback 回滚到历史值（写操作）
+- GET /api/strategies/{id}/evaluations 最近 N 次评估（默认 10 条）
 - GET /api/strategies/{id}/bindings 启停矩阵（策略 × 品种）
 - PUT /api/strategies/{id}/bindings/{inst_id} 启用/停用或新增绑定（写操作）
 - POST /api/backtest  提交回测任务，立即返回 run_id（?sync=1 走旧同步路径）
+- POST /api/backtest/batch 提交批量回测（多品种 × 多周期 × 多参数），立即返回 run_id
 - GET /api/backtest/runs 回测历史（筛选 + 分页）
 - GET /api/backtest/compare 多组对比（同品种同周期）
 - GET /api/backtest/{run_id} 状态 + 指标 + 产物清单
 - GET /api/backtest/{run_id}/equity 降采样权益曲线
 - GET /api/backtest/{run_id}/trades 成交明细（分页）
 - GET /api/backtest/{run_id}/segments walk-forward 逐段 IS/OOS 明细
+- GET /api/backtest/{run_id}/batch 批量回测逐格结果
 - POST /api/backtest/{run_id}/cancel 取消任务（写操作）
 - POST /api/backtest/{run_id}/rerun  复制参数重跑（写操作）
+- POST /api/backtest/{run_id}/pine  导入 Pine 回测结果并算偏离度（写操作）
 - POST /api/optimize  参数网格寻优（只返回排名，不落盘）
 - POST /api/walkforward 滚动 IS/OOS 验证任务，立即返回 run_id（?sync=1 同步）
 - POST /api/kill-switch 切换紧急停止标志，激活时默认同时撤销交易所挂单（写操作）
@@ -70,9 +75,11 @@ from quant.dashboard.backtest import (
     BacktestRequest,
     BacktestRequestError,
     BacktestService,
+    BatchRequest,
     BindingUpdateRequest,
     OptimizeRequest,
     ParamUpdateRequest,
+    PineImportRequest,
     StrategyParamError,
     WalkforwardRequest,
 )
@@ -167,7 +174,15 @@ class RiskOverrideRequest(BaseModel):
     param: str
     value: str
     reason: str
+    # 操作人：看板提交时由前端带上，缺省记 dashboard；写入 risk_overrides 审计
     by: str = "dashboard"
+
+
+class RollbackRequest(BaseModel):
+    """参数回滚请求（M3-14）。"""
+
+    reason: str = ""
+    changed_by: str = "owner"
 
 
 def _host_only(raw: str) -> str:
@@ -541,6 +556,31 @@ def create_app(
         except StrategyParamError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
 
+    @app.get("/api/strategies/{strategy_id}/evaluations")
+    async def strategy_evaluations(
+        strategy_id: str,
+        limit: int = Query(10, ge=1, le=10),
+    ) -> JSONResponse:
+        return JSONResponse(await service.evaluations(strategy_id, limit))
+
+    @app.post("/api/strategies/{strategy_id}/param-changes/{change_id}/rollback")
+    async def rollback_strategy_param(
+        request: Request,
+        strategy_id: str,
+        change_id: int,
+        req: RollbackRequest | None = None,
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        result = await service.rollback_param(
+            strategy_id,
+            change_id,
+            reason=req.reason if req else "",
+            changed_by=req.changed_by if req else "owner",
+        )
+        if not result["ok"]:
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        return JSONResponse(result)
+
     @app.get("/api/strategies/{strategy_id}/bindings")
     async def strategy_bindings(strategy_id: str) -> JSONResponse:
         try:
@@ -590,6 +630,23 @@ def create_app(
                 raise HTTPException(status_code=400, detail=str(e)) from e
         try:
             run_id = await tasks.submit_walkforward(req)
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return JSONResponse({"run_id": run_id, "status": "pending"})
+
+    @app.post("/api/backtest/batch")
+    async def backtest_batch(
+        req: BatchRequest, sync: bool = Query(False)
+    ) -> JSONResponse:
+        """批量回测：多品种 × 多周期 × 多参数（M4-7）。"""
+        if sync:
+            try:
+                payload, _result = await backtests.build_batch_async(req)
+                return JSONResponse(payload)
+            except BacktestRequestError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+        try:
+            run_id = await tasks.submit_batch(req)
         except BacktestRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return JSONResponse({"run_id": run_id, "status": "pending"})
@@ -669,6 +726,15 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
         return JSONResponse({"segments": tasks.segments(run_id)})
 
+    @app.get("/api/backtest/{run_id}/batch")
+    async def backtest_batch_rows(run_id: str) -> JSONResponse:
+        """批量回测逐格结果（M4-7），按指标排序后的成功行 + 失败行。"""
+        try:
+            tasks.get(run_id)
+        except RunNotFound as e:
+            raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
+        return JSONResponse({"rows": tasks.batches(run_id)})
+
     @app.post("/api/backtest/{run_id}/cancel")
     async def backtest_cancel(request: Request, run_id: str) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
@@ -687,6 +753,17 @@ def create_app(
         except BacktestRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return JSONResponse({"run_id": new_id, "status": "pending"})
+
+    @app.post("/api/backtest/{run_id}/pine")
+    async def backtest_pine(
+        request: Request, run_id: str, req: PineImportRequest
+    ) -> JSONResponse:
+        """导入 Pine 回测结果并逐项算偏离度（M4-16，写操作）。"""
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse(await backtests.import_pine(run_id, req.csv))
+        except BacktestRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.post("/api/optimize")
     async def optimize(req: OptimizeRequest) -> JSONResponse:
@@ -876,6 +953,7 @@ def create_app(
                     "/api/strategies/{id}/param-changes",
                     "/api/strategies/{id}/bindings",
                     "/api/backtest",
+                    "/api/backtest/batch",
                     "/api/backtest/runs",
                     "/api/optimize",
                     "/api/walkforward",

@@ -21,6 +21,7 @@ from quant.dashboard.backtest import (
     BacktestRequest,
     BacktestRequestError,
     BacktestService,
+    BindingUpdateRequest,
     OptimizeRequest,
     ParamUpdateRequest,
     StrategyParamError,
@@ -168,6 +169,18 @@ class TestBacktest:
         payload = await service.run(_request(params="fast_len=8;slow_len=30"))
 
         assert payload["params"] == {"fast_len": 8, "slow_len": 30}
+
+    async def test_empty_params_uses_db_override(self, param_service) -> None:
+        """M3-16：不传 params 时按 toml + DB 覆盖合并，即策略当前生效参数。"""
+        service, store = param_service
+        _write_bars(service._settings)
+
+        store.set_strategy_param("sma_cross", "slow_len", "30", 1000)
+
+        payload = await service.run(_request())
+
+        assert payload["params"]["slow_len"] == 30
+        assert payload["params"]["fast_len"] == 5
 
     async def test_unknown_strategy(self, service) -> None:
         with pytest.raises(BacktestRequestError, match="not found"):
@@ -600,3 +613,175 @@ class TestApp:
         assert len(body["segments"]) == body["segment_count"]
         assert body["metrics"]["compounded_return"] is not None
         assert body["metrics"]["profitable_segments"] is not None
+
+
+PARAMS_TEXT = '{"fast_len": 5, "slow_len": 20}'
+
+
+class TestPineImport:
+    """M4-16：导入 Pine 指标逐项算偏离度，超 5% 禁止启用该参数集。"""
+
+    def _done_run(
+        self,
+        store: SQLiteStore,
+        run_id: str = "run1",
+        *,
+        params: str = PARAMS_TEXT,
+        status: str = "done",
+        metrics: dict | None = None,
+    ) -> None:
+        store.create_backtest_run(
+            run_id,
+            strategy_id="sma_cross",
+            inst_id=INST,
+            bar="1H",
+            start_ts=START,
+            end_ts=START + HOUR,
+            params=params,
+            kind="backtest",
+            status=status,
+            created_at=START,
+        )
+        if metrics:
+            store.save_backtest_metrics(run_id, metrics)
+
+    async def test_import_writes_pine_columns(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(
+            store,
+            metrics={
+                "total_return": "-0.0617",
+                "sharpe": "-4.8",
+                "max_drawdown": "0.0921",
+            },
+        )
+
+        result = await service.import_pine(
+            "run1", "metric,value\ntotal_return,-0.0617\nsharpe,-6.0"
+        )
+
+        rows = {row["metric"]: row for row in result["rows"]}
+        assert rows["total_return"]["deviation"] == 0.0
+        assert rows["sharpe"]["over_limit"] is True
+        assert result["over_limit"] is True
+        assert result["max_deviation"] == pytest.approx(1.2 / 4.8)
+        assert result["persisted"] == [
+            "pine_deviation",
+            "pine_sharpe",
+            "pine_total_return",
+        ]
+
+        saved = store.get_backtest_metrics("run1") or {}
+        assert saved["pine_total_return"] == "-0.0617"
+        assert saved["pine_sharpe"] == "-6.0"
+        # 没导入的指标不覆盖原值
+        assert saved["pine_max_drawdown"] is None
+        assert float(saved["pine_deviation"]) == pytest.approx(1.2 / 4.8)
+
+    async def test_import_rejects_unknown_run(self, param_service) -> None:
+        service, _store = param_service
+
+        with pytest.raises(BacktestRequestError, match="run not found"):
+            await service.import_pine("nope", "sharpe,1")
+
+    async def test_import_rejects_unfinished_run(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(store, status="running")
+
+        with pytest.raises(BacktestRequestError, match="只有 done"):
+            await service.import_pine("run1", "sharpe,1")
+
+    async def test_import_rejects_bad_csv(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(store, metrics={"sharpe": "-4.8"})
+
+        with pytest.raises(BacktestRequestError, match="两列"):
+            await service.import_pine("run1", "sharpe,1,extra")
+
+    async def test_blocked_when_deviation_over_limit(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(store, metrics={"pine_deviation": "0.2"})
+
+        block = service.pine_block("sma_cross")
+
+        assert block is not None
+        assert block["run_id"] == "run1"
+        with pytest.raises(StrategyParamError, match="超过 5%"):
+            await service.set_binding(
+                "sma_cross", INST, BindingUpdateRequest(enabled=True)
+            )
+
+    async def test_not_blocked_within_limit(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(store, metrics={"pine_deviation": "0.04"})
+
+        assert service.pine_block("sma_cross") is None
+        payload = await service.set_binding(
+            "sma_cross", INST, BindingUpdateRequest(enabled=True)
+        )
+        assert payload["binding"]["enabled"] is True
+
+    async def test_block_requires_same_param_set(self, param_service) -> None:
+        """别的参数集超限，不该牵连当前生效参数。"""
+        service, store = param_service
+        self._done_run(
+            store,
+            params='{"fast_len": 8, "slow_len": 30}',
+            metrics={"pine_deviation": "0.2"},
+        )
+
+        assert service.pine_block("sma_cross") is None
+        payload = await service.set_binding(
+            "sma_cross", INST, BindingUpdateRequest(enabled=True)
+        )
+        assert payload["binding"]["enabled"] is True
+
+    async def test_no_pine_record_does_not_block(self, param_service) -> None:
+        service, store = param_service
+        self._done_run(store, metrics={"sharpe": "-4.8"})
+
+        assert service.pine_block("sma_cross") is None
+
+
+class TestPineEndpoint:
+    async def test_import_endpoint(self, app) -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                created = await client.post(
+                    "/api/backtest",
+                    json={
+                        "strategy": "sma_cross",
+                        "start": "2026-09-05",
+                        "end": "2026-09-10",
+                        "warmup_bars": 50,
+                    },
+                )
+                run_id = created.json()["run_id"]
+                await _wait_done(client, run_id)
+
+                response = await client.post(
+                    f"/api/backtest/{run_id}/pine",
+                    json={"csv": "metric,value\nsharpe,999"},
+                    headers=LOCAL_WRITE,
+                )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["run_id"] == run_id
+        assert body["over_limit"] is True
+        assert body["rows"][0]["metric"] == "sharpe"
+
+    async def test_import_requires_write_headers(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/backtest/run1/pine",
+                json={"csv": "sharpe,1"},
+                headers={"host": "127.0.0.1:8080"},
+            )
+
+        assert response.status_code == 400
+        assert "X-Dashboard-Request" in response.json()["detail"]

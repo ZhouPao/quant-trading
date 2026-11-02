@@ -12,6 +12,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from quant.backtest.funding import (
+    FundingSchedule,
+    load_funding_rates,
+    swap_inst_id,
+)
 from quant.backtest.matcher import Matcher
 from quant.foundation.config import Settings
 from quant.models.bar import Bar
@@ -104,6 +109,33 @@ def build_matcher(settings: Settings) -> Matcher:
     )
 
 
+def load_funding_schedule(
+    settings: Settings,
+    inst: str,
+    *,
+    enabled: bool | None = None,
+) -> FundingSchedule | None:
+    """按配置返回资金费率结算表；未启用返回 None。
+
+    启用但本地没有数据时抛 BacktestSetupError：静默跳过会让「开关开了但
+    成本没算」变得难以察觉。
+
+    Args:
+        enabled: 显式开关（CLI 参数）；None 时取配置项
+    """
+    if enabled is None:
+        enabled = settings.backtest.funding_rate_enabled
+    if not enabled:
+        return None
+    rates = load_funding_rates(settings.storage.data_dir, inst)
+    if not rates:
+        raise BacktestSetupError(
+            f"no funding rate data for {swap_inst_id(inst)}; "
+            f"run: quant fetch-funding-rates --inst {swap_inst_id(inst)} --start YYYY-MM-DD"
+        )
+    return FundingSchedule.from_rates(rates)
+
+
 def parse_params(text: str | None) -> dict:
     """`fast_len=10;slow_len=50` -> {"fast_len": 10, "slow_len": 50}。"""
     if not text:
@@ -148,6 +180,7 @@ _METRIC_LABELS = {
     "profit_factor": "盈亏比",
     "trade_count": "交易次数",
     "avg_holding_bars": "平均持仓K线数",
+    "funding_cost": "资金费率成本",
 }
 
 _PCT_METRICS = {"total_return", "annual_return", "max_drawdown", "win_rate"}

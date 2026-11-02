@@ -235,6 +235,33 @@ class OKXClient:
             return None
         return _funding_rate_from_raw(data[0])
 
+    def get_funding_rate_history(
+        self,
+        inst_id: str,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int = 100,
+    ) -> list[FundingRate]:
+        """拉取历史资金费率（M2-4）。
+
+        端点：GET /api/v5/public/funding-rate-history
+        - after:  返回此 fundingTime 之前（更旧）的记录
+        - before: 返回此 fundingTime 之后（更新）的记录
+        - limit:  1-100，默认 100；结果按 time 从新到旧
+
+        该端点不返回 `nextFundingTime`，历史记录里该字段为 0；回补后由
+        实时 `get_funding_rate` 补齐。
+        """
+        params: dict[str, Any] = {"instId": inst_id, "limit": str(limit)}
+        if before is not None:
+            params["before"] = str(before)
+        if after is not None:
+            params["after"] = str(after)
+        data = self.get("/api/v5/public/funding-rate-history", params)
+        if not isinstance(data, list):
+            return []
+        return [_funding_rate_from_raw(r) for r in data]
+
     def get_open_interest(self, inst_id: str) -> dict | None:
         """拉取当前持仓量（M2-14）。
 

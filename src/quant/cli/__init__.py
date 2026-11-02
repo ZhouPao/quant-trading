@@ -71,6 +71,11 @@ def _add_backtest_args(sub, name: str) -> None:
         help="策略配置目录",
     )
     p.add_argument(
+        "--funding",
+        action="store_true",
+        help="计入永续资金费率成本（M4-15）；默认取配置 backtest.funding_rate_enabled",
+    )
+    p.add_argument(
         "--config", default="config/config.toml", help="配置文件路径"
     )
     if name == "backtest":
@@ -128,6 +133,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--inst",
         required=True,
         help="永续合约 ID, 如 BTC-USDT-SWAP",
+    )
+    p_funding.add_argument(
+        "--start",
+        default=None,
+        help="回补起点 YYYY-MM-DD（含）；不传则只拉最新一条",
+    )
+    p_funding.add_argument(
+        "--end",
+        default=None,
+        help="回补终点 YYYY-MM-DD（含）；默认到最新",
+    )
+    p_funding.add_argument(
+        "--max-pages",
+        type=int,
+        default=100,
+        help="回补时最多翻页数（每页 100 条 ≈ 33 天）",
     )
     p_funding.add_argument(
         "--config", default="config/config.toml", help="配置文件路径"

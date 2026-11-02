@@ -617,6 +617,44 @@ class TestOKXClientHighLevelMethods:
         assert result.rate == Decimal("0.00015")
         assert result.ts == 1700000000000
 
+    def test_get_funding_rate_history_passes_pagination(self):
+        """get_funding_rate_history 应把 after/limit 透传给 OKX。"""
+        c = _make_client_no_sync()
+        okx_data = [
+            {
+                "instId": "BTC-USDT-SWAP",
+                "fundingRate": "-0.00002",
+                "fundingTime": "1700000000000",
+                "realizedRate": "-0.00001",
+                "method": "current_period",
+            }
+        ]
+        mock_resp = httpx.Response(
+            200, json={"code": "0", "msg": "", "data": okx_data}
+        )
+        with patch.object(c._client, "get", return_value=mock_resp) as get:
+            rates = c.get_funding_rate_history(
+                "BTC-USDT-SWAP", after=1700600000000, limit=50
+            )
+        assert get.call_args.args[0].endswith(
+            "/api/v5/public/funding-rate-history"
+        )
+        assert get.call_args.kwargs["params"] == {
+            "instId": "BTC-USDT-SWAP",
+            "limit": "50",
+            "after": "1700600000000",
+        }
+        assert len(rates) == 1
+        assert rates[0].rate == Decimal("-0.00002")
+        # 历史端点不返回 nextFundingTime，解析为 0
+        assert rates[0].next_funding_ts == 0
+
+    def test_get_funding_rate_history_empty_data(self):
+        c = _make_client_no_sync()
+        mock_resp = httpx.Response(200, json={"code": "0", "msg": "", "data": []})
+        with patch.object(c._client, "get", return_value=mock_resp):
+            assert c.get_funding_rate_history("BTC-USDT-SWAP") == []
+
     def test_get_balance_returns_dict(self):
         """get_balance 应返回 data[0]。"""
         c = _make_client_no_sync()

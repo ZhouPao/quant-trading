@@ -19,6 +19,7 @@ from quant.foundation.config import MonitorSettings, SmtpSettings
 from quant.foundation.schedule import day_start_ms_utc8
 from quant.monitor.alert_service import AlertService
 from quant.monitor.alerter import EmailAlerter
+from quant.okx.ws_client import ws_status_key
 from quant.queue.signal_queue import SignalQueue
 from quant.risk.checker import RiskChecker
 from quant.risk.config import RiskConfig
@@ -69,6 +70,20 @@ class _RecordingAlerter(EmailAlerter):
     def send(self, subject: str, body: str) -> bool:
         self.sent.append((subject, body))
         return True
+
+
+class _StubWS:
+    """替身 WS 客户端：只提供 status() 快照。"""
+
+    def status(self) -> dict:
+        return {
+            "connected": False,
+            "failures": 3,
+            "last_error": "ConnectionResetError: reset by peer",
+            "last_error_ts": 1_700_000_000_000,
+            "connected_since": None,
+            "next_delay": 8.0,
+        }
 
 
 @pytest.fixture
@@ -480,6 +495,29 @@ class TestWorkerRecovery:
         await asyncio.wait_for(task, timeout=2)
 
         assert await redis.get(Worker.HEARTBEAT_KEY) is not None
+
+    async def test_heartbeat_publishes_ws_status(self, env) -> None:
+        worker, _, _, redis = env
+        worker.ws_client = _StubWS()
+        worker._running = True
+        task = asyncio.create_task(worker._heartbeat_loop())
+        await asyncio.sleep(0.1)
+        worker._running = False
+        await asyncio.wait_for(task, timeout=2)
+
+        raw = await redis.get(ws_status_key())
+        assert raw is not None
+        payload = json.loads(raw)
+        assert payload["connected"] is False
+        assert payload["failures"] == 3
+        assert payload["last_error"] == "ConnectionResetError: reset by peer"
+        assert payload["next_delay"] == 8.0
+        assert payload["ts"] > 0
+
+    async def test_ws_status_skipped_without_ws_client(self, env) -> None:
+        worker, _, _, redis = env
+        await worker._publish_ws_status()
+        assert await redis.get(ws_status_key()) is None
 
 
 class _StubReconciler:

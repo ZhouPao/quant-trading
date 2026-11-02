@@ -18,18 +18,37 @@ import math
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
+from quant.backtest.batch import (
+    BatchCell,
+    BatchResult,
+    BatchSweep,
+    CellSpec,
+    expand_cells,
+    sort_cells,
+)
 from quant.backtest.engine import Backtest, BacktestResult
+from quant.backtest.funding import FundingSchedule
 from quant.backtest.optimizer import GridOptimizer
+from quant.backtest.pine_compare import (
+    DEFAULT_DEVIATION_LIMIT,
+    PineCompareError,
+    PineRow,
+    parse_pine_csv,
+    to_metric_columns,
+)
+from quant.backtest.pine_compare import compare as compare_pine
 from quant.backtest.runner import (
     BacktestSetupError,
     build_matcher,
     load_bars,
+    load_funding_schedule,
     parse_grid,
     parse_params,
     parse_range,
@@ -56,6 +75,7 @@ log = get_logger("dashboard.backtest")
 MAX_EQUITY_POINTS = 2000  # 权益曲线降采样后最多点数
 MAX_TRADES = 300          # 单次回测返回的成交明细上限
 MAX_N_JOBS = 8            # 寻优并行度上限，避免小机器被进程池拖死
+MAX_BATCH_INSTS = 10      # 批量回测的品种数上限（组合数另有 max_combos 兜底）
 
 # 越小越好的指标，排序时反向
 ASCENDING_METRICS = frozenset(
@@ -142,6 +162,40 @@ class BindingUpdateRequest(BaseModel):
 
     enabled: bool | None = None
     bar: str | None = None
+
+
+class PineImportRequest(BaseModel):
+    """Pine 回测结果导入（M4-16）：`metric,value` 两列 CSV 文本。"""
+
+    csv: str = Field("", max_length=20_000)
+
+
+class BatchRequest(BaseModel):
+    """批量回测入参（M4-7）：多品种 × 多周期 × 可选参数网格。"""
+
+    strategy: str
+    insts: list[str] = Field(..., min_length=1, max_length=MAX_BATCH_INSTS)
+    bars: list[str] = Field(..., min_length=1)
+    start: str
+    end: str
+    params: str = ""
+    grid: str = ""
+    metric: str = "sharpe"
+    warmup_bars: int = Field(200, ge=0, le=5000)
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchPlan:
+    """批量回测的校验结果：格子、数据区间与基础参数一次定死。"""
+
+    strategy_cls: type
+    params: dict
+    insts: list[str]
+    bars: list[str]
+    grid: dict[str, list]
+    start_ts: int
+    end_ts: int
+    cells: list[CellSpec]
 
 
 class BacktestService:
@@ -247,6 +301,18 @@ class BacktestService:
             return await asyncio.to_thread(
                 self._walkforward_sync, req, should_stop
             )
+
+    def check_batch(self, req: BatchRequest) -> dict:
+        """提交前的廉价校验（策略、日期、网格、组合上限），返回基础参数。"""
+        return self._batch_inputs(req).params
+
+    async def build_batch_async(
+        self,
+        req: BatchRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], BatchResult]:
+        async with self._lock:
+            return await asyncio.to_thread(self._batch_sync, req, should_stop)
 
     # ------------------------------------------------------------------
     # 同步实现（在线程里跑）
@@ -383,6 +449,7 @@ class BacktestService:
                 raise StrategyParamError(f"bar {bar!r} invalid") from e
 
         existing = self._store.get_binding(strategy_id, inst)
+        was_enabled = bool(existing["enabled"]) if existing is not None else False
         if existing is None:
             bar = bar or self._settings.engine.bar
             enabled = True if req.enabled is None else req.enabled
@@ -395,6 +462,16 @@ class BacktestService:
             enabled = (
                 bool(existing["enabled"]) if req.enabled is None else req.enabled
             )
+
+        # M4-16：与 Pine 基线偏离度超限的参数集禁止上新（只拦「启用」这个动作）
+        if enabled and not was_enabled:
+            block = self.pine_block(strategy_id)
+            if block is not None:
+                raise StrategyParamError(
+                    f"当前参数集与 Pine 基线偏离度 {float(block['deviation']) * 100:.2f}% "
+                    f"超过 5%（对比回测 {block['run_id']}），禁止启用；"
+                    "请先修正 Python 策略或复核 Pine 结果后重新导入"
+                )
 
         self._store.upsert_binding(strategy_id, inst, bar, enabled, _now_ms())
         row = self._store.get_binding(strategy_id, inst)
@@ -424,6 +501,79 @@ class BacktestService:
             except Exception as err:  # noqa: BLE001
                 log.warning(f"invalidate bindings cache failed: {err}")
 
+    async def import_pine(self, run_id: str, csv_text: str) -> dict[str, object]:
+        """导入 Pine 结果并与该次回测逐项对比（M4-16）。"""
+        return await asyncio.to_thread(self._import_pine_sync, run_id, csv_text)
+
+    def _import_pine_sync(self, run_id: str, csv_text: str) -> dict[str, object]:
+        """解析 CSV → 对比 → 回写 `pine_*` 列；返回逐项偏离度。"""
+        if self._store is None:
+            raise BacktestRequestError("store not configured")
+        row = self._store.get_backtest_run(run_id)
+        if row is None:
+            raise BacktestRequestError(f"run not found: {run_id}")
+        if row["status"] != "done":
+            raise BacktestRequestError(
+                f"回测状态为 {row['status']}，只有 done 的回测才能导入 Pine 结果"
+            )
+        metrics = self._store.get_backtest_metrics(run_id) or {}
+        metrics.pop("run_id", None)
+        try:
+            pine = parse_pine_csv(csv_text)
+            result = compare_pine(pine, metrics)
+        except PineCompareError as e:
+            raise BacktestRequestError(str(e)) from e
+
+        columns = to_metric_columns(pine, result)
+        if columns:
+            self._store.save_backtest_metrics(run_id, columns)
+        return {
+            "run_id": run_id,
+            "limit": float(DEFAULT_DEVIATION_LIMIT),
+            "rows": [_pine_row_payload(item) for item in result["rows"]],
+            "unmatched": result["unmatched"],
+            "max_deviation": _optional_float(result["max_deviation"]),
+            "over_limit": result["over_limit"],
+            "persisted": sorted(columns),
+        }
+
+    def pine_block(self, strategy_id: str) -> dict[str, object] | None:
+        """当前生效参数集是否因偏离度超限被禁止启用（M4-16）。
+
+        只认同一策略 + 同一份参数（`backtest_runs.params` 规范化文本）且
+        `pine_deviation` 超过阈值的回测。没有导入过 Pine 基线就不拦——
+        没做过对比不等于对比不通过。
+        """
+        if self._store is None:
+            return None
+        try:
+            params, _sources = resolve_params(
+                strategy_id,
+                self._config_dir,
+                self._store,
+                resolve_from_db=self._settings.params.resolve_from_db,
+            )
+        except (StrategyConfigError, ParamError) as e:
+            raise StrategyParamError(str(e)) from e
+        params_text = json.dumps(_jsonable_params(params), sort_keys=True)
+        row = self._store.worst_pine_deviation(strategy_id, params_text)
+        if row is None:
+            return None
+        try:
+            deviation = float(row["deviation"])
+        except (TypeError, ValueError):
+            return None
+        if deviation <= float(DEFAULT_DEVIATION_LIMIT):
+            return None
+        return {"run_id": row["run_id"], "deviation": deviation}
+
+    def _funding(self, inst: str) -> FundingSchedule | None:
+        """按配置加载资金费率结算表；启用但缺数据视为请求错误。"""
+        try:
+            return load_funding_schedule(self._settings, inst)
+        except BacktestSetupError as e:
+            raise BacktestRequestError(str(e)) from e
+
     def check(self, req: BacktestRequest) -> dict:
         """提交任务前的廉价校验（配置存在、日期合法），返回合并后的参数。"""
         _cls, params, _start_ts, _end_ts = self._resolve(req)
@@ -441,6 +591,7 @@ class BacktestService:
         """
         inst = req.inst or self._settings.engine.inst
         warmup, bars, strategy_cls, params = self._prepare(req, inst)
+        funding = self._funding(inst)
         try:
             result = Backtest(
                 strategy_cls(),
@@ -449,6 +600,7 @@ class BacktestService:
                 window_size=self._settings.backtest.window_size,
                 params=params,
                 warmup_bars=warmup,
+                funding=funding,
             ).run(bars, should_stop=should_stop)
         except ValueError as e:
             raise BacktestRequestError(str(e)) from e
@@ -511,6 +663,7 @@ class BacktestService:
             warmup_bars=warmup,
             base_params=params,
             strategy_cls=strategy_cls,
+            funding=self._funding(inst),
         )
         try:
             results = optimizer.search(bars, metric=req.metric, n_jobs=req.n_jobs)
@@ -566,6 +719,7 @@ class BacktestService:
             warmup_bars=req.warmup_bars,
             base_params=params,
             metric=req.metric,
+            funding=self._funding(inst),
         )
         try:
             result = walker.run(
@@ -636,6 +790,99 @@ class BacktestService:
                 f"参数组合过多：{combos} 组 > 上限 {limit}，请缩小网格"
             )
         return inst, grid
+
+    def _batch_inputs(self, req: BatchRequest) -> _BatchPlan:
+        """校验批量入参并展开格子；组合上限与寻优共用 `backtest.max_combos`。"""
+        if req.metric not in METRIC_KEYS:
+            raise BacktestRequestError(
+                f"unknown metric {req.metric!r}; available: {list(METRIC_KEYS)}"
+            )
+        try:
+            grid = parse_grid(req.grid) if req.grid.strip() else {}
+            strategy_cls, params, _sources = resolve_strategy(
+                req.strategy,
+                self._config_dir,
+                self._store,
+                overrides=parse_params(req.params),
+                resolve_from_db=self._settings.params.resolve_from_db,
+            )
+            start_ts, end_ts = parse_range(req.start, req.end)
+            cells = expand_cells(req.insts, req.bars, grid)
+        except (BacktestSetupError, StrategyConfigError, ParamError, ValueError) as e:
+            raise BacktestRequestError(str(e)) from e
+
+        limit = self._settings.backtest.max_combos
+        if len(cells) > limit:
+            raise BacktestRequestError(
+                f"批量组合过多：{len(cells)} 组（品种 × 周期 × 参数）"
+                f" > 上限 {limit}，请减少品种/周期或缩小网格"
+            )
+        return _BatchPlan(
+            strategy_cls=strategy_cls,
+            params=params,
+            insts=list(dict.fromkeys(cell[0] for cell in cells)),
+            bars=list(dict.fromkeys(cell[1] for cell in cells)),
+            grid=grid,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cells=cells,
+        )
+
+    def _batch_sync(
+        self,
+        req: BatchRequest,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], BatchResult]:
+        plan = self._batch_inputs(req)
+        # 资金费率按品种预加载：任一品种缺数据都在开跑前失败，
+        # 而不是跑到一半才发现某个品种的成本是 0
+        funding = {inst: self._funding(inst) for inst in plan.insts}
+        sweep = BatchSweep(
+            lambda _params: plan.strategy_cls(),
+            initial_cash=self._settings.backtest.initial_cash,
+            matcher=build_matcher(self._settings),
+            window_size=self._settings.backtest.window_size,
+            base_params=plan.params,
+            funding=funding,
+        )
+
+        def load(inst: str, bar: str) -> tuple[list[Bar], list[Bar]]:
+            return load_bars(
+                self._settings, inst, bar, plan.start_ts, plan.end_ts,
+                req.warmup_bars,
+            )
+
+        try:
+            cells, failed = sweep.run(plan.cells, load, should_stop=should_stop)
+        except ValueError as e:
+            raise BacktestRequestError(str(e)) from e
+
+        cells = sort_cells(
+            cells, req.metric, ascending=req.metric in ASCENDING_METRICS
+        )
+        result = BatchResult(
+            metric=req.metric, cells=tuple(cells), failed=tuple(failed)
+        )
+        payload: dict[str, object] = {
+            "kind": "batch",
+            "strategy": req.strategy,
+            "insts": plan.insts,
+            "bars": plan.bars,
+            "start": req.start,
+            "end": req.end,
+            "params": _jsonable_params(plan.params),
+            "grid": plan.grid,
+            "metric": req.metric,
+            "combo_count": len(plan.cells),
+            "cell_count": len(cells),
+            "failed_count": len(failed),
+            # 批量没有「一个」指标口径：留空而不是挑某一行当代表，
+            # 免得历史列表里出现一个来路不明的数字
+            "metrics": {},
+            "rows": [_batch_row_payload(cell) for cell in cells],
+            "failed": [_batch_row_payload(cell) for cell in failed],
+        }
+        return payload, result
 
     def _resolve(self, req: BacktestRequest) -> tuple[type, dict, int, int]:
         """解析策略类、合并参数与回测区间；不加载 K 线。"""
@@ -749,6 +996,34 @@ def _clean_metrics(
     return cleaned
 
 
+def _batch_row_payload(cell: BatchCell) -> dict[str, object]:
+    """批量回测单格转 JSON（参数里可能有 Decimal）。"""
+    return {
+        "inst": cell.inst,
+        "bar": cell.bar,
+        "params": _jsonable_params(cell.params),
+        "metrics": _clean_metrics(cell.metrics),
+        "error": cell.error,
+    }
+
+
+def _pine_row_payload(row: PineRow) -> dict[str, object]:
+    """Pine 对比单行转 JSON（Decimal 不能直接序列化）。"""
+    return {
+        "metric": row.metric,
+        "pine": float(row.pine),
+        "python": _optional_float(row.python),
+        "deviation": _optional_float(row.deviation),
+        "over_limit": row.over_limit,
+    }
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)  # type: ignore[arg-type]
+
+
 def _equity_points(
     curve: list[tuple[int, object]], limit: int = MAX_EQUITY_POINTS
 ) -> list[dict[str, object]]:
@@ -770,10 +1045,12 @@ __all__ = [
     "BacktestRequest",
     "BacktestRequestError",
     "BacktestService",
+    "BatchRequest",
     "BindingUpdateRequest",
     "METRIC_KEYS",
     "OptimizeRequest",
     "ParamUpdateRequest",
+    "PineImportRequest",
     "StrategyParamError",
     "WalkforwardRequest",
 ]

@@ -440,6 +440,40 @@ class TestMigrations:
         finally:
             conn.close()
 
+    def test_v8_db_gains_funding_cost_column(self, tmp_path) -> None:
+        """存量库（v8）没有 funding_cost 列，升级后应补齐且不丢老列。"""
+        path = tmp_path / "quant.db"
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE backtest_metrics (
+                run_id TEXT PRIMARY KEY,
+                total_return TEXT
+            );
+            INSERT INTO backtest_metrics VALUES ('r-old', '0.12');
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+        conn.close()
+
+        SQLiteStore(path).close()
+
+        conn = sqlite3.connect(str(path))
+        try:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(backtest_metrics)")
+            }
+            row = conn.execute(
+                "SELECT total_return, funding_cost FROM backtest_metrics"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert "funding_cost" in columns
+        assert row == ("0.12", None)
+
 
 class TestRiskEvents:
     """risk_events 落库与查询（MS4-B §11.1）。"""
@@ -793,6 +827,47 @@ class TestStrategyParams:
         assert len(store.get_strategy_params("sma_cross")) == 1
         assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
 
+    def test_rollback_restores_old_value_and_keeps_history(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "12", 2000)
+        _, total_before = store.list_param_changes("sma_cross")
+
+        ok, param = store.rollback_param("sma_cross", 2, 3000)
+
+        assert ok is True
+        assert param == "fast_len"
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
+        rows, total = store.list_param_changes("sma_cross")
+        # 回滚产生新记录，历史不删
+        assert total == total_before + 1
+        assert rows[0]["new_value"] == "8"
+        assert "rollback" in rows[0]["reason"]
+
+    def test_rollback_unknown_change(self, store) -> None:
+        ok, message = store.rollback_param("sma_cross", 999, 1000)
+
+        assert ok is False
+        assert message == "change record not found"
+
+    def test_rollback_rejects_first_change_without_override(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+
+        ok, message = store.rollback_param("sma_cross", 1, 2000)
+
+        assert ok is False
+        assert "config default" in message
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
+
+    def test_rollback_to_same_value_is_rejected(self, store) -> None:
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "12", 2000)
+        store.rollback_param("sma_cross", 2, 3000)
+
+        ok, message = store.rollback_param("sma_cross", 2, 4000)
+
+        assert ok is False
+        assert "unchanged" in message
+
 
 class TestBacktestRuns:
     def _create(self, store, run_id: str = "r1", **kwargs) -> None:
@@ -888,6 +963,17 @@ class TestBacktestRuns:
         store.save_backtest_metrics("r1", {"unknown": 1})
 
         assert store.get_backtest_metrics("r1") is None
+
+    def test_funding_cost_roundtrip(self, store) -> None:
+        """M4-15 收尾：资金费率成本随指标落库，刷新页面后仍可查。"""
+        self._create(store)
+
+        store.save_backtest_metrics("r1", {"sharpe": "1.5", "funding_cost": "-84.51"})
+
+        row = store.get_backtest_metrics("r1")
+
+        assert row["funding_cost"] == "-84.51"
+        assert row["sharpe"] == "1.5"
 
     def test_artifacts(self, store) -> None:
         self._create(store)

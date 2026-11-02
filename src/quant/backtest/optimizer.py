@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 from quant.backtest.engine import Backtest
+from quant.backtest.funding import FundingSchedule
 from quant.backtest.matcher import Matcher
 from quant.backtest.strategy import Strategy
 from quant.models.bar import Bar
@@ -40,6 +41,7 @@ class GridOptimizer:
             与每组网格参数合并后再传给策略
         strategy_cls: 策略类，`n_jobs > 1` 时必需——并行要按类路径在子进程
             重建实例，闭包工厂过不了进程边界
+        funding: 资金费率结算表（M4-15），透传给 Backtest；None 表示不计
     """
 
     def __init__(
@@ -52,6 +54,7 @@ class GridOptimizer:
         warmup_bars: list[Bar] | None = None,
         base_params: dict[str, Any] | None = None,
         strategy_cls: type[Strategy] | None = None,
+        funding: FundingSchedule | None = None,
     ) -> None:
         if not callable(strategy_factory):
             raise ValueError("strategy_factory must be callable")
@@ -63,6 +66,7 @@ class GridOptimizer:
         self.window_size = window_size
         self.warmup_bars = list(warmup_bars) if warmup_bars else []
         self.strategy_cls = strategy_cls
+        self.funding = funding
 
         for name, values in self.param_grid.items():
             for value in values:
@@ -153,6 +157,7 @@ class GridOptimizer:
                     window_size=self.window_size,
                     params=params,
                     warmup_bars=self.warmup_bars,
+                    funding=self.funding,
                 )
                 result = backtest.run(bars)
             except ValueError as e:
@@ -194,6 +199,7 @@ class GridOptimizer:
                 self.warmup_bars,
                 bars,
                 self.base_params,
+                self.funding,
             ),
         ) as pool:
             futures = {
@@ -245,6 +251,7 @@ def _init_worker(
     warmup_bars: list[Bar],
     bars: list[Bar],
     base_params: dict[str, Any],
+    funding: FundingSchedule | None = None,
 ) -> None:
     """把每进程都一样的重数据（K 线、成交模拟器）注入一次。"""
     _WORKER.clear()
@@ -256,6 +263,7 @@ def _init_worker(
         warmup_bars=warmup_bars,
         bars=bars,
         base_params=base_params,
+        funding=funding,
     )
 
 
@@ -281,6 +289,7 @@ def _run_combo(
             window_size=_WORKER["window_size"],
             params=params,
             warmup_bars=_WORKER["warmup_bars"],
+            funding=_WORKER["funding"],
         ).run(_WORKER["bars"])
     except ValueError as e:
         return "skip", params, str(e)

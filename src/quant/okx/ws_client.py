@@ -3,7 +3,8 @@
 功能：
 - 公开/私有频道连接
 - 按 (channel, instId) 注册回调
-- 断线指数退避重连，重连后自动恢复订阅
+- 断线指数退避重连（带 ±20% 抖动，5s → 60s），重连后自动恢复订阅
+- 连接状态、连续失败次数与本轮退避时长可查（供 M2-2 上报 Redis）
 - tickers 频道 → Tick 模型
 
 使用：
@@ -17,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -26,6 +29,19 @@ from quant.models import Tick
 
 Callback = Callable[[dict[str, Any]], Awaitable[None]]
 ConnectFn = Callable[..., Any]
+
+#: WS 连接状态键前缀；worker 每次心跳把它写到 `quant:ws:status:worker`
+WS_STATUS_PREFIX = "quant:ws:status"
+#: 退避抖动比例：实际等待落在 base 的 80% ~ 120%
+JITTER_RATIO = 0.2
+
+
+def ws_status_key(name: str = "worker") -> str:
+    return f"{WS_STATUS_PREFIX}:{name}"
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def parse_ticker(item: dict[str, Any]) -> Tick | None:
@@ -86,9 +102,43 @@ class WSClient:
         self._connected = asyncio.Event()
         self._stop = asyncio.Event()
 
+        # M2-2 状态快照：连续失败次数、最后一次错误、连接起点
+        self._failures = 0
+        self._last_error: str | None = None
+        self._last_error_ts: int | None = None
+        self._connected_since: int | None = None
+        self._next_delay: float | None = None
+        # 当前退避基数（每失败一次翻倍，封顶 max_reconnect_delay）
+        self._current_delay = reconnect_delay
+
     @property
     def is_connected(self) -> bool:
         return self._connected.is_set()
+
+    def status(self) -> dict[str, Any]:
+        """当前连接状态快照（供 worker 心跳写入 Redis）。"""
+        return {
+            "connected": self.is_connected,
+            "failures": self._failures,
+            "last_error": self._last_error,
+            "last_error_ts": self._last_error_ts,
+            "connected_since": self._connected_since,
+            "next_delay": None if self._next_delay is None else round(self._next_delay, 1),
+        }
+
+    def _jitter(self, delay: float) -> float:
+        """给退避加 ±20% 抖动：多进程同时断线时避免同一秒一起重连。"""
+        if delay <= 0:
+            return 0.0
+        spread = delay * JITTER_RATIO
+        return min(random.uniform(delay - spread, delay + spread), self._max_reconnect_delay)
+
+    def _record_failure(self, error: str) -> float:
+        """记录一次断线并算出下一次等待时长（调用方负责 sleep）。"""
+        self._failures += 1
+        self._last_error = error[:200]
+        self._last_error_ts = _now_ms()
+        return self._jitter(self._current_delay)
 
     async def subscribe(
         self,
@@ -115,7 +165,7 @@ class WSClient:
         """连接并持续接收消息，直到 close()。断线自动重连。"""
         self._running = True
         self._stop.clear()
-        delay = self._reconnect_delay
+        self._current_delay = self._reconnect_delay
 
         while self._running:
             try:
@@ -127,7 +177,11 @@ class WSClient:
                     proxy=self._proxy,
                 ) as ws:
                     self._ws = ws
-                    delay = self._reconnect_delay
+                    # 连上即视为恢复：失败计数清零，退避回到起点
+                    self._current_delay = self._reconnect_delay
+                    self._next_delay = None
+                    self._failures = 0
+                    self._connected_since = _now_ms()
                     self._connected.set()
                     self._log.info(f"ws connected url={self._url}")
                     await self._restore_subscriptions(ws)
@@ -136,23 +190,35 @@ class WSClient:
 
                 # 连接被对端正常关闭：退避后重连，避免空转
                 self._connected.clear()
+                self._connected_since = None
                 self._ws = None
-                if await self._sleep_or_stop(delay):
+                wait = self._record_failure("connection closed by peer")
+                self._next_delay = wait
+                if await self._sleep_or_stop(wait):
                     break
-                delay = min(delay * 2, self._max_reconnect_delay)
+                self._current_delay = min(
+                    self._current_delay * 2, self._max_reconnect_delay
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 self._connected.clear()
+                self._connected_since = None
                 self._ws = None
+                wait = self._record_failure(f"{type(e).__name__}: {e}")
+                self._next_delay = wait
                 self._log.warning(
-                    f"ws disconnected: {e}, retry in {delay:.0f}s"
+                    f"ws disconnected: {e}, retry in {wait:.1f}s "
+                    f"(failures={self._failures})"
                 )
-                if await self._sleep_or_stop(delay):
+                if await self._sleep_or_stop(wait):
                     break
-                delay = min(delay * 2, self._max_reconnect_delay)
+                self._current_delay = min(
+                    self._current_delay * 2, self._max_reconnect_delay
+                )
 
         self._connected.clear()
+        self._connected_since = None
         self._ws = None
 
     async def _sleep_or_stop(self, delay: float) -> bool:
@@ -223,4 +289,4 @@ def _default_connect(*args: Any, **kwargs: Any) -> Any:
     return websockets.connect(*args, **kwargs)
 
 
-__all__ = ["WSClient", "parse_ticker"]
+__all__ = ["WSClient", "parse_ticker", "ws_status_key"]
