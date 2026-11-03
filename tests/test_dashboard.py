@@ -192,6 +192,36 @@ class TestOverview:
         assert overview["positions_count"] == 2
         assert overview["positions_count"] == len(positions["positions"])
 
+    async def test_positions_count_degraded_when_store_fails(
+        self, env, monkeypatch
+    ) -> None:
+        """持仓数读库失败必须显式降级：否则前端把「取不到」显示成 0，看起来像空仓。"""
+
+        def boom():
+            raise RuntimeError("store down")
+
+        service, store, _redis, _settings = env
+        monkeypatch.setattr(store, "get_all_positions", boom)
+
+        overview = await service.overview()
+
+        assert overview["positions_count"] is None
+        assert "sqlite:positions" in overview["degraded"]
+
+    async def test_thresholds_published_for_frontend(self, env) -> None:
+        """阈值由后端下发，避免前端再硬编码一份（口径单一来源）。"""
+        service, _store, _redis, settings = env
+
+        overview = await service.overview()
+
+        assert overview["thresholds"]["snapshot_stale_seconds"] == (
+            settings.risk.snapshot_max_age_ms // 1000
+        )
+        assert (
+            overview["thresholds"]["margin_ratio"]
+            == settings.monitor.margin_ratio_threshold
+        )
+
     async def test_heartbeat_online_and_offline(self, env) -> None:
         service, _store, redis, settings = env
         await redis.set(settings.monitor.worker_heartbeat_key, NOW)

@@ -1688,6 +1688,38 @@ P5（可选）Redis 实时轮询。M4-13 在看板可见进度仍待 P4 闭环�
 **说明**：浏览器内 UI 渲染（进度条实际显示）未做 e2e（无浏览器 harness），但数据层 / P4 契约已从
 前后端两侧闭环；如需真浏览器 e2e 需另搭 Playwright 等。
 
+### 8.57 首页总览缺陷审计与第一批修复（2026-11-03）
+
+**背景**：对「首页总览」（MS4-A）做前后端逐功能审计，发现 P0（会崩溃 / 误导）5 条、
+P1（口径不一致）若干、P2/P3（性能与体验）若干。本次只修第一批。
+
+**本批修复**：
+- **P0-1** `fetchTodayPnl` 无降级兜底 → 补 `instruments` / `degraded` 空值（渲染期不再崩）。
+- **P0-2** `fetchTimeline` / `fetchFreshness` 只补 `items` 不补 `degraded` → 一并补上。
+- **P0-3** 持仓数读库失败被显示成 0（看起来像空仓）→ 后端失败时写 `degraded:["sqlite:positions"]`，
+  前端 `positions_count` 为 null 时显示「—」（仅在持仓表确有数据时才兜底计数）。
+- **P0-4** `Promise.all` 一个失败拖垮整页 → 订单 / 成交 / 盈亏（仅「交易执行」页使用）改为
+  单点 `.catch` 降级为空数据并标 `degraded`；核心四项仍整体 reject（保留 abort 语义）。
+- **P0-5** `Sparkline` 单点时 `step=Infinity` 产生 NaN 路径 → 少于 2 点直接不画（与 `Curve` 同口径）。
+- **P1-6** 订单 pill 只列 filled/pending/canceled，漏掉「已报 / 部分成交」→ 改为按后端返回的
+  全状态渲染（`ORDER_STATUS_ORDER` 定序 + 中文名），不再漏计数。
+- **P1-7** 过期阈值 180s 前端硬编码 → 后端 `overview.thresholds.snapshot_stale_seconds` 下发
+  （源自 `risk.snapshot_max_age_ms`），前端只在缺失时兜底 180。
+- **P1-9** 保证金率无任何告警着色 → 按后端下发的 `margin_ratio_threshold` 着色（warn / bad）。
+
+**顺带发现并修复的遗留缺陷**：`tests/test_dead_letters.py` 断言 `SCHEMA_VERSION == 9`，
+A1 加了 v10（`optimize_jobs`）迁移后应为 10。**此前只按子集跑 pytest 一直没发现**，
+本次改为跑全量后暴露——已修正断言并注明迁移来源。
+
+**验证**：`pytest` **全量 1663 passed**；`npx tsc --noEmit` 通过；`npm test`（vitest）
+**18 passed**（新增 `dashboard.api.test.ts` 守护 `fetchAll` 降级语义）；`npm run build` 通过；
+本次改动文件 `ruff` 全过（`tests/test_open_interest_fetcher.py` 的 6 处 W293 为仓库预存，未触碰）。
+
+**未做（后续批次）**：P1 余项（`auth_required` 缺失、`reason` 空串非 null、时区口径、
+订单状态英文混排）；P2（Redis 单 try 包 8 处读、无 `socket_timeout`、串行无 pipeline、
+冗余请求、组件 memo 化）；P3（aria-live 噪音、表格行键盘不可达、新鲜度文案误导、
+其余阈值继续改为后端下发）。
+
 ---
 
 ## 9. 相关文档

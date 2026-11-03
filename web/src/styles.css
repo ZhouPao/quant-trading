@@ -3725,6 +3725,15 @@ tbody tr:hover {
   margin-top: 6px;
 }
 
+/* 账户概览 kv 的阈值着色（阈值由后端下发，前端只负责呈现） */
+.kv dd.tone-warn {
+  color: var(--warn);
+}
+
+.kv dd.tone-bad {
+  color: var(--bad);
+}
+
 /* ---------------- empty & footer ---------------- */
 
 .empty {

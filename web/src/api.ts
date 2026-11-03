@@ -32,6 +32,11 @@ export type Overview = {
   monitor: Heartbeat;
   queue: { pending: number | null; inflight: number | null; dead: number | null };
   orders: Record<string, number>;
+  /** 阈值由后端下发，避免前端硬编码第二份真相；旧后端缺失时前端用兜底值 */
+  thresholds?: {
+    snapshot_stale_seconds: number;
+    margin_ratio: number;
+  };
   degraded: string[];
 };
 
@@ -867,6 +872,34 @@ export type QualityDetailResponse = {
   degraded: string[];
 };
 
+// 「交易执行」页专用数据的空壳：单接口失败只降级该块，不拖垮整页
+const EMPTY_ORDERS: OrdersResponse = { ts: 0, orders: [], degraded: [] };
+const EMPTY_FILLS: FillsResponse = {
+  ts: 0,
+  fills: [],
+  total_fee: "0",
+  degraded: [],
+};
+const EMPTY_PNL: PnlResponse = {
+  ts: 0,
+  fill_count: 0,
+  first_ts: null,
+  last_ts: null,
+  turnover: "0",
+  fee: "0",
+  round_trips: 0,
+  wins: 0,
+  losses: 0,
+  win_rate: null,
+  profit_factor: null,
+  total_pnl: "0",
+  avg_win: null,
+  avg_loss: null,
+  best: null,
+  worst: null,
+  degraded: [],
+};
+
 export async function fetchAll(
   signal: AbortSignal,
   alertRange: AlertRange = { since: null, until: null },
@@ -879,9 +912,20 @@ export async function fetchAll(
     await Promise.all([
       getJson<Overview>("/api/overview", signal),
       getJson<PositionsResponse>("/api/positions", signal),
-      getJson<OrdersResponse>("/api/orders?limit=30", signal),
-      getJson<FillsResponse>("/api/fills?limit=30", signal),
-      getJson<PnlResponse>("/api/pnl", signal),
+      // 下面三个只在「交易执行」页使用：失败时降级为空数据并在 degraded 标注来源，
+      // 而不是让 Promise.all 整体 reject 把整页打成错误态（首页总览 P0）
+      getJson<OrdersResponse>("/api/orders?limit=30", signal).catch(() => ({
+        ...EMPTY_ORDERS,
+        degraded: ["orders"],
+      })),
+      getJson<FillsResponse>("/api/fills?limit=30", signal).catch(() => ({
+        ...EMPTY_FILLS,
+        degraded: ["fills"],
+      })),
+      getJson<PnlResponse>("/api/pnl", signal).catch(() => ({
+        ...EMPTY_PNL,
+        degraded: ["pnl"],
+      })),
       getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal),
       getJson<EngineResponse>("/api/engine", signal),
     ]);
@@ -975,7 +1019,7 @@ export type FreshnessResponse = {
 
 export async function fetchFreshness(signal: AbortSignal) {
   const data = await getJson<FreshnessResponse>("/api/freshness", signal);
-  return { ...data, items: data.items ?? [] };
+  return { ...data, items: data.items ?? [], degraded: data.degraded ?? [] };
 }
 
 /** M1-6 今日事件流：当天信号/下单/成交/告警四表合并后的一条 */
@@ -1010,7 +1054,7 @@ export async function fetchTimeline(
     `/api/timeline?${query.toString()}`,
     signal,
   );
-  return { ...data, items: data.items ?? [] };
+  return { ...data, items: data.items ?? [], degraded: data.degraded ?? [] };
 }
 
 export type RiskOverrideItem = {
@@ -1133,7 +1177,13 @@ export async function fetchEquity(signal: AbortSignal, hours: number) {
 
 /** M1-8 今日盈亏汇总：按品种拆分已实现 + 未实现 + 手续费。 */
 export async function fetchTodayPnl(signal: AbortSignal) {
-  return getJson<TodayPnlResponse>("/api/today-pnl", signal);
+  const data = await getJson<TodayPnlResponse>("/api/today-pnl", signal);
+  // 兜底：字段缺失时不能让渲染期 .length 崩溃（与 fetchAlertStats 等保持一致）
+  return {
+    ...data,
+    instruments: data.instruments ?? [],
+    degraded: data.degraded ?? [],
+  };
 }
 
 /** 日报变化很慢（每天一份），单独低频拉取。 */

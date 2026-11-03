@@ -516,6 +516,11 @@ class DashboardService:
             # 静默变成 —，必须和「读取失败」一样显式降级，否则界面看起来一切正常。
             degraded.append("snapshot")
 
+        positions_count = await self._position_count(snapshot)
+        if positions_count is None:
+            # 读库失败必须显式降级：否则前端把「取不到」显示成 0，看起来像没持仓
+            degraded.append("sqlite:positions")
+
         return {
             "ts": now,
             "snapshot_ts": snapshot_ts,
@@ -525,12 +530,19 @@ class DashboardService:
             "snapshot_age_seconds": _age_seconds(snapshot_ts, now),
             "account": snapshot.get("account") if snapshot else None,
             "metrics": snapshot.get("metrics") if snapshot else None,
-            "positions_count": await self._position_count(snapshot),
+            "positions_count": positions_count,
             "kill_switch": kill,
             "worker": worker,
             "monitor": monitor,
             "queue": queue,
             "orders": order_counts,
+            # 阈值由后端下发，避免前端再硬编码一份（口径单一来源）
+            "thresholds": {
+                "snapshot_stale_seconds": int(
+                    self._settings.risk.snapshot_max_age_ms / 1000
+                ),
+                "margin_ratio": self._settings.monitor.margin_ratio_threshold,
+            },
             "degraded": degraded,
         }
 

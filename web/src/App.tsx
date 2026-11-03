@@ -575,6 +575,9 @@ export default function App() {
         ...(overview?.degraded ?? []),
         ...(data?.alerts.degraded ?? []),
         ...(data?.pnl.degraded ?? []),
+        // 订单/成交是「交易执行」页专用数据：失败不拖垮整页，但要能被看见
+        ...(data?.orders.degraded ?? []),
+        ...(data?.fills.degraded ?? []),
         ...(risk?.degraded ?? []),
         ...(reports?.degraded ?? []),
         ...(quality?.degraded ?? []),
@@ -610,9 +613,16 @@ export default function App() {
     };
   }, [alerts]);
 
+  // 过期阈值由后端下发（risk.snapshot_max_age_ms），前端只在缺失时用兜底 180
+  const staleAfter = overview?.thresholds?.snapshot_stale_seconds ?? 180;
   const stale =
     overview !== undefined &&
-    (overview.snapshot_age_seconds === null || overview.snapshot_age_seconds > 180);
+    (overview.snapshot_age_seconds === null ||
+      overview.snapshot_age_seconds > staleAfter);
+  // 持仓数取不到时不能退回 0（那会把「读库失败」显示成空仓）；
+  // 只有在持仓表确实有数据时才用它兜底
+  const positionsCount =
+    overview?.positions_count ?? (positions.length > 0 ? positions.length : null);
   // 实盘/模拟盘来自配置（settings.okx.demo），与快照无关；拿不到时按未知处理
   const liveMode = overview?.trading_mode === "live";
 
@@ -800,19 +810,26 @@ export default function App() {
             </div>
             <div>
               <dt>保证金率</dt>
-              <dd>{overview?.account?.margin_ratio ? pct(overview.account.margin_ratio) : "—"}</dd>
+              <dd
+                className={marginTone(
+                  overview?.account?.margin_ratio,
+                  overview?.thresholds?.margin_ratio,
+                )}
+              >
+                {overview?.account?.margin_ratio ? pct(overview.account.margin_ratio) : "—"}
+              </dd>
             </div>
           </dl>
           <div className="orders-line">
-            {["filled", "pending", "canceled"].map((status) => (
+            {orderStatuses(overview?.orders).map((status) => (
               <span key={status} className="orders-pill">
-                <em>{status}</em>
+                <em>{ORDER_STATUS_LABELS[status] ?? status}</em>
                 <b>{overview?.orders[status] ?? 0}</b>
               </span>
             ))}
             <span className="orders-pill">
               <em>持仓数</em>
-              <b>{overview?.positions_count ?? positions.length}</b>
+              <b>{positionsCount ?? "—"}</b>
             </span>
           </div>
         </section>
@@ -1665,6 +1682,23 @@ const FEE_RATE = 0.001;
 
 // 未终结订单：只有这些状态允许撤单/改单（后端会再校验一次）
 const OPEN_ORDER_STATUSES = ["pending", "live", "partially_filled"];
+
+// 总览订单 pill：按后端返回的状态计数渲染，避免只列三态把「已报 / 部分成交」
+// 漏掉导致挂单数看起来偏少（后端 get_order_status_counts 是按库内全状态分组的）
+const ORDER_STATUS_ORDER = [
+  "pending",
+  "live",
+  "partially_filled",
+  "filled",
+  "canceled",
+];
+const ORDER_STATUS_LABELS: Record<string, string> = {
+  pending: "待成交",
+  live: "已报",
+  partially_filled: "部分成交",
+  filled: "已成交",
+  canceled: "已撤",
+};
 
 function writeToken(): string {
   return window.sessionStorage.getItem(KILL_TOKEN_KEY) ?? "";
@@ -4908,6 +4942,8 @@ function Sparkline({
 }) {
   const W = 100;
   const H = 28;
+  // 单点时 (len-1)=0 会让 step 变 Infinity、坐标成 NaN；与 Curve 同口径直接不画
+  if (values.length < 2) return null;
   const span = domain.max - domain.min || 1;
   const step = W / (values.length - 1);
   const line = values
@@ -6674,6 +6710,28 @@ function heartbeatNote(seconds: number | null | undefined): string {
   return seconds === null || seconds === undefined
     ? "无心跳记录"
     : `心跳 ${age(seconds)} 前`;
+}
+
+/** 保证金率越高越接近强平：阈值由后端下发（monitor.margin_ratio_threshold）。 */
+function marginTone(
+  value: string | null | undefined,
+  threshold: number | undefined,
+): string {
+  if (value === null || value === undefined) return "";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  const limit = threshold ?? 0.1;
+  if (parsed >= limit) return "tone-bad";
+  if (parsed >= limit * 0.6) return "tone-warn";
+  return "";
+}
+
+/** 按既定顺序排后端返回的订单状态；未知状态排在后面，保证一个都不漏。 */
+function orderStatuses(counts: Record<string, number> | undefined): string[] {
+  if (!counts) return [];
+  const known = ORDER_STATUS_ORDER.filter((status) => status in counts);
+  const extra = Object.keys(counts).filter((status) => !known.includes(status));
+  return [...known, ...extra.sort()];
 }
 
 function sign(value: string | null | undefined): string {
