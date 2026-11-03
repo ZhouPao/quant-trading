@@ -1779,6 +1779,16 @@ export function num(value: string | number | null | undefined, digits = 2): stri
   });
 }
 
+/** 带符号金额：正数显式加 `+`，同列扫读盈亏方向更容易。 */
+export function signed(
+  value: string | number | null | undefined,
+  digits = 2
+): string {
+  const text = num(value, digits);
+  if (text === "—") return text;
+  return Number(text.replace(/,/g, "")) > 0 ? `+${text}` : text;
+}
+
 export function pct(
   value: string | number | null | undefined,
   digits = 2

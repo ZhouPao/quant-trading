@@ -38,6 +38,7 @@ import {
   metricText,
   num,
   pct,
+  signed,
   placeManualOrder,
   reducePosition,
   replayDeadLetter,
@@ -887,44 +888,53 @@ export default function App() {
                 : "等待数据"}
             </span>
           </div>
-          {todayPnl && todayPnl.instruments.length > 0 ? (
+          {todayPnl && todayPnl.degraded.length > 0 && todayPnl.instruments.length === 0 ? (
+            // 「读不到」和「没交易」必须区分：否则数据库故障会显示成「今日暂无交易」
+            <div className="empty">
+              今日盈亏数据不可用（{todayPnl.degraded.join(" / ")}）
+            </div>
+          ) : todayPnl && todayPnl.instruments.length > 0 ? (
             <>
               <dl className="kv">
                 <div>
-                  <dt>已实现</dt>
+                  <dt>已实现(净)</dt>
                   <dd className={sign(todayPnl.total_realized)}>
-                    {num(todayPnl.total_realized, 2)}
+                    {signed(todayPnl.total_realized)}
                   </dd>
                 </div>
                 <div>
                   <dt>未实现</dt>
                   <dd className={sign(todayPnl.total_unrealized)}>
-                    {num(todayPnl.total_unrealized, 2)}
+                    {signed(todayPnl.total_unrealized)}
                   </dd>
                 </div>
                 <div>
                   <dt>手续费</dt>
-                  <dd>{num(todayPnl.total_fee, 2)}</dd>
+                  <dd className="dim">{num(todayPnl.total_fee, 2)}</dd>
                 </div>
                 <div>
                   <dt>总盈亏</dt>
                   <dd className={sign(todayPnl.total_pnl)}>
-                    {num(todayPnl.total_pnl, 2)}
+                    {signed(todayPnl.total_pnl)}
                   </dd>
                 </div>
               </dl>
               <Table
                 empty={false}
                 emptyHint=""
-                head={["品种", "已实现", "未实现", "手续费", "总盈亏"]}
+                head={["品种", "已实现(净)", "未实现", "手续费", "总盈亏"]}
                 rows={todayPnl.instruments.map((inst) => [
                   inst.inst_id,
-                  <span key="r" className={sign(inst.realized)}>{num(inst.realized, 2)}</span>,
-                  <span key="u" className={sign(inst.unrealized)}>{num(inst.unrealized, 2)}</span>,
-                  num(inst.fee, 2),
-                  <span key="p" className={sign(inst.pnl)}>{num(inst.pnl, 2)}</span>,
+                  <span key="r" className={sign(inst.realized)}>{signed(inst.realized)}</span>,
+                  <span key="u" className={sign(inst.unrealized)}>{signed(inst.unrealized)}</span>,
+                  <span key="f" className="dim">{num(inst.fee, 2)}</span>,
+                  <span key="p" className={sign(inst.pnl)}>{signed(inst.pnl)}</span>,
                 ])}
               />
+              {/* 口径说明：已实现已扣费，所以总盈亏 = 已实现 + 未实现，手续费不再重复扣 */}
+              <div className="pnl-note">
+                已实现盈亏已扣除手续费 · 总盈亏 = 已实现 + 未实现（手续费不重复扣减）
+              </div>
             </>
           ) : (
             <div className="empty">今日暂无交易</div>

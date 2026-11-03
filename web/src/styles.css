@@ -3725,6 +3725,19 @@ tbody tr:hover {
   margin-top: 6px;
 }
 
+/* 今日盈亏：数字列右对齐 + 等宽数字，正负号才好逐行扫读 */
+.today-pnl table th:nth-child(n + 2),
+.today-pnl table td:nth-child(n + 2) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pnl-note {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
 /* 账户概览 kv 的阈值着色（阈值由后端下发，前端只负责呈现） */
 .kv dd.tone-warn {
   color: var(--warn);
