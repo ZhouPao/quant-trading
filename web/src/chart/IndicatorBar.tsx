@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { parsePeriods, type ChartSettings } from "./types";
 
 type Props = { settings: ChartSettings; onChange: (next: ChartSettings) => void };
@@ -199,11 +199,28 @@ function NumberInput({
   onCommit: (value: number) => void;
 }) {
   const [text, setText] = useState(String(value));
+  const timer = useRef<number | null>(null);
 
   // 外部修改（如读取本地设置或重置）时同步输入框
   useEffect(() => {
     if (Number(text) !== value) setText(String(value));
   }, [value]);
+
+  // 卸载时丢弃未提交的防抖（极少发生：编辑中途切页）
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const commitSoon = (parsed: number) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      onCommit(parsed);
+    }, 300);
+  };
 
   return (
     <label className="ind-field">
@@ -217,7 +234,24 @@ function NumberInput({
           setText(next);
           const parsed = Number(next);
           if (next.trim() !== "" && Number.isFinite(parsed) && parsed >= min && parsed <= max) {
-            onCommit(parsed);
+            commitSoon(parsed);
+          }
+        }}
+        onBlur={() => {
+          if (timer.current !== null) {
+            window.clearTimeout(timer.current);
+            timer.current = null;
+          }
+          const parsed = Number(text);
+          if (
+            text.trim() !== "" &&
+            Number.isFinite(parsed) &&
+            parsed >= min &&
+            parsed <= max
+          ) {
+            if (parsed !== value) onCommit(parsed);
+          } else {
+            setText(String(value)); // 非法输入回弹到当前生效值
           }
         }}
       />
@@ -236,10 +270,26 @@ function ListInput({
 }) {
   const join = (items: number[]) => items.join(",");
   const [text, setText] = useState(join(value));
+  const timer = useRef<number | null>(null);
 
   useEffect(() => {
     if (join(parsePeriods(text)) !== join(value)) setText(join(value));
   }, [value]);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const commitSoon = (parsed: number[]) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      onCommit(parsed);
+    }, 300);
+  };
 
   return (
     <label className="ind-field ind-field-wide">
@@ -251,7 +301,19 @@ function ListInput({
           const next = event.target.value;
           setText(next);
           const parsed = parsePeriods(next);
-          if (parsed.length > 0) onCommit(parsed);
+          if (parsed.length > 0) commitSoon(parsed);
+        }}
+        onBlur={() => {
+          if (timer.current !== null) {
+            window.clearTimeout(timer.current);
+            timer.current = null;
+          }
+          const parsed = parsePeriods(text);
+          if (parsed.length > 0) {
+            if (join(parsed) !== join(value)) onCommit(parsed);
+          } else {
+            setText(join(value)); // 非法输入回弹到当前生效值
+          }
         }}
       />
     </label>

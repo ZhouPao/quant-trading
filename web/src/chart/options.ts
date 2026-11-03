@@ -47,14 +47,19 @@ export function defaultZoom(length: number): ZoomRange {
 export function toBars(
   rows: { ts: number; open: string; high: string; low: string; close: string; vol: string }[],
 ): Bar[] {
-  return rows.map((row) => ({
-    ts: row.ts,
-    open: Number(row.open),
-    high: Number(row.high),
-    low: Number(row.low),
-    close: Number(row.close),
-    vol: Number(row.vol),
-  }));
+  const out: Bar[] = [];
+  for (const row of rows) {
+    const open = Number(row.open);
+    const high = Number(row.high);
+    const low = Number(row.low);
+    const close = Number(row.close);
+    const vol = Number(row.vol);
+    // 一根脏 bar（NaN/Inf）会沿 sma 累加污染整段指标链，ECharts 静默断线；
+    // 直接剔除（fills/撑压按 ts 定位，不受剔除影响）（P2）
+    if (![open, high, low, close, vol].every(Number.isFinite)) continue;
+    out.push({ ts: row.ts, open, high, low, close, vol });
+  }
+  return out;
 }
 
 export function buildChartOption(input: BuildInput): EChartsOption {

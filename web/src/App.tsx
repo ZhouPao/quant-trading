@@ -3587,15 +3587,21 @@ function ChartPanel() {
     saveSettings(next);
   }, []);
 
+  const loadSeq = useRef(0);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
+      const seq = ++loadSeq.current;
       try {
         const next = await fetchCandles(controller.signal, bar);
+        // 慢响应后到不得覆盖新数据：本轮已不是最新请求时丢弃（P2）
+        if (seq !== loadSeq.current) return;
         setData(next);
         setError(null);
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
+        if (seq !== loadSeq.current) return;
         setError((err as Error).message);
       }
     };
@@ -5429,7 +5435,9 @@ function ReportTable({
 
 function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
   const [open, setOpen] = useState<string | null>(null);
-  const [detail, setDetail] = useState<Record<string, QualityReport | null>>({});
+  const [detail, setDetail] = useState<
+    Record<string, { ts: number; report: QualityReport | null }>
+  >({});
   const [error, setError] = useState<string | null>(null);
   const controller = useRef<AbortController | null>(null);
 
@@ -5447,6 +5455,7 @@ function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
     );
   }
 
+  const listTs = quality.ts; // 早退之后 quality 非空；闭包里保持收窄
   const toggle = (item: QualityItem) => {
     const key = `${item.inst_id}:${item.bar_size}`;
     if (open === key) {
@@ -5454,13 +5463,19 @@ function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
       return;
     }
     setOpen(key);
-    if (key in detail) return;
+    // 缓存带列表时间戳：列表每轮刷新（ts 变化）后旧明细作废——
+    // 原先缓存永不失效，缺口补齐后展开行仍显示旧 OPEN（P2）
+    const cached = detail[key];
+    if (cached && cached.ts === listTs) return;
     controller.current?.abort();
     const next = new AbortController();
     controller.current = next;
     fetchQualityReport(next.signal, item.inst_id, item.bar_size)
       .then((res) => {
-        setDetail((prev) => ({ ...prev, [key]: res.report }));
+        setDetail((prev) => ({
+          ...prev,
+          [key]: { ts: listTs, report: res.report },
+        }));
       })
       .catch((err) => {
         if ((err as Error).name === "AbortError") return;
@@ -5474,6 +5489,8 @@ function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
         {items.map((item) => {
           const key = `${item.inst_id}:${item.bar_size}`;
           const expanded = open === key;
+          const cached = detail[key];
+          const fresh = cached !== undefined && cached.ts === listTs;
           const gapsOpen = item.summary.gaps_open ?? 0;
           const gapsFixed = item.summary.gaps_repaired ?? 0;
           const expected = item.summary.expected;
@@ -5509,14 +5526,12 @@ function QualityPanel({ quality }: { quality?: QualityListResponse | null }) {
               </button>
               {expanded && (
                 <div className="quality-detail">
-                  {key in detail ? (
-                    detail[key] === null ? (
-                      <div className="empty">报告不存在或已被清理</div>
-                    ) : (
-                      <QualityDetail report={detail[key] as QualityReport} />
-                    )
-                  ) : (
+                  {!fresh ? (
                     <div className="empty">读取明细中…</div>
+                  ) : cached.report === null ? (
+                    <div className="empty">报告不存在或已被清理</div>
+                  ) : (
+                    <QualityDetail report={cached.report} />
                   )}
                 </div>
               )}

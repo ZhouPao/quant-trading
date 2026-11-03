@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { atr, boll, ema, kdj, macd, pivotLevels, rma, sma, supertrend } from "./indicators";
-import { buildChartOption, defaultZoom, formatTime } from "./options";
+import { buildChartOption, defaultZoom, formatTime, toBars } from "./options";
 import { mergeSettings, parsePeriods, type Bar } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -174,5 +174,16 @@ describe("图表时间轴与缩放", () => {
       expect(dz.start).toBeCloseTo(zoom.start);
       expect(dz.end).toBeCloseTo(zoom.end);
     }
+  });
+
+  it("toBars 剔除非有限值的脏 bar，阻断 NaN 污染链（P2）", () => {
+    const rows = [
+      { ts: 0, open: "1", high: "2", low: "0.5", close: "1.5", vol: "10" },
+      { ts: 1, open: "x", high: "2", low: "0.5", close: "1.5", vol: "10" }, // 脏
+      { ts: 2, open: "1.5", high: "2.5", low: "1", close: "2", vol: "12" },
+    ];
+    const bars = toBars(rows);
+    expect(bars.map((b) => b.ts)).toEqual([0, 2]);
+    expect(bars[1].close).toBe(2);
   });
 });

@@ -109,11 +109,19 @@ class BarStorage:
         dfs: list[pd.DataFrame] = []
         for y in years:
             path = self._path_for(inst_id, bar_size, y)
-            if path.exists():
-                df = pd.read_parquet(path)
-                df = df[(df["ts"] >= start_ts) & (df["ts"] <= end_ts)]
-                if not df.empty:
-                    dfs.append(df)
+            if not path.exists():
+                continue
+            # 谓词下推：只解码命中区间所在的 row group。看板每 5s 拉尾部
+            # ~300 根，1m 年文件 ~52 万行/64 组，无下推时每轮全量解码纯浪费
+            # （P2 性能）。filters 精确到行，结果与全量读一致。
+            df = pd.read_parquet(
+                path,
+                engine="pyarrow",
+                filters=[("ts", ">=", start_ts), ("ts", "<=", end_ts)],
+            )
+            df = df[(df["ts"] >= start_ts) & (df["ts"] <= end_ts)]
+            if not df.empty:
+                dfs.append(df)
         if not dfs:
             return []
         df = pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
