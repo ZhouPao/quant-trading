@@ -197,8 +197,11 @@ class TestCandleFetcherResume:
         ckpt = fetcher._load_checkpoint("BTC-USDT", "1H")
         assert ckpt.last_ts == 20 * 3_600_000
 
-    def test_resume_skip_already_downloaded(self, tmp_path: Path) -> None:
-        """断点 >= end_ts 时应直接跳过主循环。"""
+    def test_resume_skip_main_loop_but_backfill_older(self, tmp_path: Path) -> None:
+        """断点 >= end_ts 时跳过主循环，但请求区间早于断点的部分仍要回补。
+
+        （P1 修复：原先这种情况静默返回 0，早于断点的历史永远补不上。）
+        """
         ckpt_dir = tmp_path / ".checkpoints"
         ckpt_dir.mkdir()
         from quant.fetcher.checkpoint import Checkpoint
@@ -211,10 +214,14 @@ class TestCandleFetcherResume:
         total = fetcher.fetch(
             "BTC-USDT", "1H", 0, 50 * 3_600_000
         )
-        # 不应拉任何新数据（已有断点 >= end_ts）
-        assert total == 0
-        # 主循环 API 不应被调（断点跳过 + 校验阶段调 load_bars 而非 API）
-        assert client.get_history_candles.call_count == 0
+        # 回补 [0, 50h]：mock 返回的 10 根落盘（原先这里是静默 0）
+        assert total == 10
+        # 只调了回补这一次（主循环被跳过）：after = 50h + 1
+        assert client.get_history_candles.call_count == 1
+        assert (
+            client.get_history_candles.call_args.kwargs["after"]
+            == 50 * 3_600_000 + 1
+        )
 
 
 # =====================================================================
@@ -413,8 +420,94 @@ class TestSync:
         fetcher = CandleFetcher(client, tmp_path, page_size=100)
         fetcher.sync("BTC-USDT", "1H", now_ts=self.NOW, lookback_bars=3)
 
-        kwargs = client.get_history_candles.call_args.kwargs
+        # 前导缺口补拉会多一次 API 调用，这里只断言主循环的第一页
+        kwargs = client.get_history_candles.call_args_list[0].kwargs
         assert kwargs["after"] == 99 * self.HOUR + 1
         # 断点回退到最后一个已收盘 bar，之后每次都能继续前进
         assert fetcher._load_checkpoint("BTC-USDT", "1H").last_ts == 99 * self.HOUR
+
+
+# =====================================================================
+# P1 回归：断点只向前导致向早回补静默失效
+# =====================================================================
+
+
+class TestBackfillBeforeCheckpoint:
+    def test_backfills_history_before_checkpoint(self, tmp_path: Path) -> None:
+        """已有断点后再拉更早区间，必须真的补到数据而不是静默返回 0。"""
+        bar = 3_600_000
+        # 第一次拉 [10h, 14h]，断点停在 14h
+        fetcher = CandleFetcher(
+            _make_client([_make_bar_sequence(10 * bar, 5)]), tmp_path
+        )
+        assert fetcher.fetch("BTC-USDT", "1H", 10 * bar, 14 * bar) == 5
+
+        # 第二次拉 [0h, 14h]：0h~9h 早于断点，原先会被静默丢弃
+        fetcher2 = CandleFetcher(
+            _make_client([list(reversed(_make_bar_sequence(0, 10)))]), tmp_path
+        )
+        total = fetcher2.fetch("BTC-USDT", "1H", 0, 14 * bar)
+
+        assert total == 10
+        # 断点保持最新 ts，不被回补拉低
+        assert fetcher2._load_checkpoint("BTC-USDT", "1H").last_ts == 14 * bar
+
+    def test_backfill_respects_end_ts(self, tmp_path: Path) -> None:
+        """请求区间整体早于断点时，回补不得越过 end_ts。"""
+        bar = 3_600_000
+        fetcher = CandleFetcher(
+            _make_client([_make_bar_sequence(20 * bar, 3)]), tmp_path
+        )
+        fetcher.fetch("BTC-USDT", "1H", 20 * bar, 22 * bar)
+
+        # 再拉 [0h, 5h]（整体早于断点 22h）：older_end 必须 clamp 到 5h
+        fetcher2 = CandleFetcher(
+            _make_client([list(reversed(_make_bar_sequence(0, 6)))]), tmp_path
+        )
+        total = fetcher2.fetch("BTC-USDT", "1H", 0, 5 * bar)
+
+        assert total == 6
+        assert fetcher2._load_checkpoint("BTC-USDT", "1H").last_ts == 22 * bar
+
+
+class TestValidatorLeadingGap:
+    def test_detects_leading_gap(self) -> None:
+        """expected_start_ts 传入时，首根之前的前导缺口计入 missing。"""
+        from quant.storage.validator import DataValidator
+
+        bars = _make_bar_sequence(10 * 3_600_000, 3)  # [10h, 12h]
+        report = DataValidator().validate(bars, expected_start_ts=0)
+        assert len(report.missing) == 1
+        m = report.missing[0]
+        # 缺口从期望起点开始（prev_ts 是起点前一根虚拟 bar）
+        assert m.prev_ts + 3_600_000 == 0
+        assert m.next_ts == 10 * 3_600_000
+        assert m.missing_count == 10
+
+    def test_no_leading_gap_when_aligned(self) -> None:
+        from quant.storage.validator import DataValidator
+
+        report = DataValidator().validate(
+            _make_bar_sequence(0, 3), expected_start_ts=0
+        )
+        assert report.missing == []
+
+    def test_errors_surface_as_warning(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """整段拉空时错误必须以 WARNING 显式暴露（原先失败伪装成净增 0）。"""
+        warnings_logged: list[str] = []
+
+        class _FakeLog:
+            def __getattr__(self, name: str):
+                def _record(msg: str, *args, **kwargs) -> None:
+                    if name == "warning":
+                        warnings_logged.append(msg)
+                return _record
+
+        monkeypatch.setattr("quant.fetcher.candle_fetcher._log", _FakeLog())
+
+        fetcher = CandleFetcher(_make_client([[]]), tmp_path)
+        assert fetcher.fetch("BTC-USDT", "1H", 0, 10 * 3_600_000) == 0
+        assert any("empty bars" in m for m in warnings_logged)
 

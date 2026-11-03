@@ -68,9 +68,11 @@ class CandleFetcher:
         """拉取 [start_ts, end_ts] 区间 K线，返回净增根数。
 
         流程：
-        1. 读断点 ckpt，cursor = max(start_ts, ckpt.last_ts + bar_size_ms)
-        2. 翻页拉数据，每页落盘 + 更新断点
-        3. 校验已落盘数据，对 missing_ranges 翻页补拉（最多 max_attempts 次）
+        1. 读断点 ckpt，主循环只拉 cursor 之后的新增段
+        2. 若请求起点早于断点（向更早历史回补），先显式补拉更早段
+           （原先这段会被静默丢弃，返回「净增 0」）
+        3. 校验已落盘数据（含前导缺口），对 missing_ranges 翻页补拉
+           （最多 max_attempts 次）
         """
         if start_ts < 0 or end_ts < 0:
             raise ValueError(
@@ -89,6 +91,9 @@ class CandleFetcher:
         )
 
         ckpt = self._load_checkpoint(inst_id, bar_size)
+        total = 0
+
+        # ① 主拉取循环：只拉断点之后的新增段
         # 断点续：从 last_ts+1 个 bar 开始；首次拉：从 start_ts 开始
         cursor = (
             max(start_ts, ckpt.last_ts + bar_size_ms)
@@ -99,68 +104,81 @@ class CandleFetcher:
             f"({'resume' if ckpt.last_ts > 0 else 'fresh'})"
         )
 
-        # 断点已超过 end_ts，直接跳过主循环（仅做校验）
+        max_saved_ts = 0
         if cursor > end_ts:
+            # 断点已超过 end_ts，跳过主循环（仅回补 + 校验）
             _log.info(
                 f"cursor={cursor} > end_ts={end_ts}, skip main loop, "
                 f"only validate"
             )
-            self._validate_and_fill(
-                inst_id, bar_size, start_ts, end_ts, bar_size_ms
-            )
-            return 0
-
-        # 1. 主拉取循环：用 after 推进向旧方向翻页
-        # OKX history-candles: after=N 返回 ts < N（更旧），返回 ts 倒序
-        # 策略：第一页 after=end_ts+1（拿 <= end_ts 的最新 page_size 根）
-        # 后续页 after=oldest-1（拿比上次更旧的）
-        # 停止：返回空，或 oldest <= cursor（已覆盖到 start）
-        total = 0
-        max_saved_ts = 0
-        next_after = end_ts + 1  # 第一页拿 ts <= end_ts
-        while True:
-            batch = self._client.get_history_candles(
-                inst_id=inst_id,
-                bar=bar_size,
-                after=next_after,
-                limit=self._page_size,
-            )
-            if not batch:
-                _log.info(f"page empty, stop main loop at total={total}")
-                break
-            # OKX 返回按 ts 倒序（新→旧），转正序
-            bars = sorted(batch, key=lambda b: b.ts)
-            # 过滤：只保留 [cursor, end_ts] 区间
-            in_range = [b for b in bars if cursor <= b.ts <= end_ts]
-            oldest = bars[0].ts
-            newest = bars[-1].ts
-            if in_range:
-                saved = self._storage.save_bars(in_range)
-                total += saved
-                max_saved_ts = max(max_saved_ts, newest)
-                # 断点：更新到已落盘的最新 ts
-                self._save_checkpoint(inst_id, bar_size, newest)
-                _log.info(
-                    f"page saved={saved} oldest={oldest} newest={newest} "
-                    f"ckpt={newest}"
+        else:
+            # 主拉取循环：用 after 推进向旧方向翻页
+            # OKX history-candles: after=N 返回 ts < N（更旧），返回 ts 倒序
+            # 策略：第一页 after=end_ts+1（拿 <= end_ts 的最新 page_size 根）
+            # 后续页 after=oldest-1（拿比上次更旧的）
+            # 停止：返回空，或 oldest <= cursor（已覆盖到 start）
+            next_after = end_ts + 1  # 第一页拿 ts <= end_ts
+            while True:
+                batch = self._client.get_history_candles(
+                    inst_id=inst_id,
+                    bar=bar_size,
+                    after=next_after,
+                    limit=self._page_size,
                 )
-            # 推进：下一页拿比 oldest 更旧的（ts < oldest）
-            next_after = oldest
-            # oldest 已 <= cursor，说明已覆盖到起点
-            if oldest <= cursor:
-                break
-            # 不足 page_size，说明没有更旧数据
-            if len(bars) < self._page_size:
-                break
+                if not batch:
+                    _log.info(f"page empty, stop main loop at total={total}")
+                    break
+                # OKX 返回按 ts 倒序（新→旧），转正序
+                bars = sorted(batch, key=lambda b: b.ts)
+                # 过滤：只保留 [cursor, end_ts] 区间
+                in_range = [b for b in bars if cursor <= b.ts <= end_ts]
+                oldest = bars[0].ts
+                newest = bars[-1].ts
+                if in_range:
+                    saved = self._storage.save_bars(in_range)
+                    total += saved
+                    max_saved_ts = max(max_saved_ts, newest)
+                    # 断点：更新到已落盘的最新 ts
+                    self._save_checkpoint(inst_id, bar_size, newest)
+                    _log.info(
+                        f"page saved={saved} oldest={oldest} newest={newest} "
+                        f"ckpt={newest}"
+                    )
+                # 推进：下一页拿比 oldest 更旧的（ts < oldest）
+                next_after = oldest
+                # oldest 已 <= cursor，说明已覆盖到起点
+                if oldest <= cursor:
+                    break
+                # 不足 page_size，说明没有更旧数据
+                if len(bars) < self._page_size:
+                    break
 
-        # 翻页是从新到旧，循环结束时断点会停在最旧那一页；
-        # 这里统一推回已落盘的最新 ts，否则下一轮会把整段历史重拉一遍。
-        if max_saved_ts:
-            self._save_checkpoint(inst_id, bar_size, max_saved_ts)
+            # 翻页是从新到旧，循环结束时断点会停在最旧那一页；
+            # 这里统一推回已落盘的最新 ts，否则下一轮会把整段历史重拉一遍。
+            if max_saved_ts:
+                self._save_checkpoint(inst_id, bar_size, max_saved_ts)
 
-        _log.info(f"main loop done, total={total}, start validation+fill")
+            _log.info(f"main loop done, total={total}, start validation+fill")
 
-        # 2. 校验 + 补拉缺失
+        # ② 向早回补：断点只记录「已落盘的最新 ts」。请求起点早于断点（想补
+        # 更早历史）时，原先 cursor = ckpt.last_ts + bar_ms 会把早于断点的
+        # bar 全部过滤、validator 又只查相邻缺口 → 静默返回「净增 0」（必须
+        # 手删 checkpoint 才能回补）。这里显式补拉更早段；与已有数据重叠的
+        # 部分由 save_bars 按 ts 去重，幂等。
+        if ckpt.last_ts > 0 and start_ts < ckpt.last_ts:
+            older_end = min(ckpt.last_ts - bar_size_ms, end_ts)
+            if older_end >= start_ts:
+                _log.info(
+                    f"backfill before checkpoint: [{start_ts}, {older_end}] "
+                    f"(ckpt={ckpt.last_ts})"
+                )
+                older = self._fetch_page_range(
+                    inst_id, bar_size, start_ts, older_end
+                )
+                if older:
+                    total += self._storage.save_bars(older)
+
+        # ③ 校验（含前导缺口）+ 补拉缺失
         self._validate_and_fill(inst_id, bar_size, start_ts, end_ts, bar_size_ms)
 
         _log.info(f"fetch done inst={inst_id} bar={bar_size} total={total}")
@@ -281,11 +299,16 @@ class CandleFetcher:
         """校验已落盘数据，对每个 missing_range 翻页补拉，最多 max_attempts 次。"""
         for attempt in range(self._max_attempts):
             bars = self._storage.load_bars(inst_id, bar_size, start_ts, end_ts)
-            report = self._validator.validate(bars)
+            report = self._validator.validate(bars, expected_start_ts=start_ts)
             _log.info(
                 f"validate attempt={attempt + 1}/{self._max_attempts} "
                 f"{report.summary()}"
             )
+            # 校验器层错误（如整段为空）必须显式暴露：原先只藏在 info 级
+            # summary 里，失败被伪装成「净增 0」无人察觉（P1）。提到 WARNING
+            # 后会进 monitor 的日志告警体系。
+            for err in report.errors:
+                _log.warning(f"validate error: {err}")
             if not report.missing:
                 return
             # 对每个缺失段补拉

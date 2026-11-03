@@ -198,6 +198,88 @@ class TestMergeReport:
 
         assert merged["invalid_ohlc"] == [{"ts": T0, "reason": "high<low"}]
 
+    def test_gap_left_edge_filled_updates_instead_of_duplicating(self) -> None:
+        """缺口左端被补上一根后 from 位移：按区间相交配对，不再重复累积（P1）。"""
+        prev = {
+            "gaps": [
+                {
+                    "from": T0 + BAR_MS,
+                    "to": T0 + 2 * BAR_MS,
+                    "bars": 2,
+                    "status": "open",
+                }
+            ],
+        }
+        # 本次只剩右半根：missing (prev=T0+BAR, next=T0+3BAR) → from=to=T0+2BAR
+        merged = merge_report(
+            prev,
+            _report((T0 + BAR_MS, T0 + 3 * BAR_MS)),
+            inst_id="BTC-USDT",
+            bar_size="1H",
+            checked_range=(T0, T0 + 3 * BAR_MS),
+            now=NOW + 1,
+            present=2,
+        )
+
+        opens = [g for g in merged["gaps"] if g["status"] == "open"]
+        assert len(opens) == 1
+        assert opens[0]["from"] == T0 + 2 * BAR_MS
+        assert opens[0]["bars"] == 1
+        assert merged["summary"]["gaps_open"] == 1
+
+    def test_one_old_gap_split_into_two_keeps_both(self) -> None:
+        """旧缺口中段被填、两端仍缺：两段都要保留，不能丢。"""
+        prev = {
+            "gaps": [
+                {
+                    "from": T0 + BAR_MS,
+                    "to": T0 + 4 * BAR_MS,
+                    "bars": 4,
+                    "status": "open",
+                }
+            ],
+        }
+        merged = merge_report(
+            prev,
+            _report((T0, T0 + 2 * BAR_MS), (T0 + 3 * BAR_MS, T0 + 5 * BAR_MS)),
+            inst_id="BTC-USDT",
+            bar_size="1H",
+            checked_range=(T0, T0 + 5 * BAR_MS),
+            now=NOW + 1,
+            present=1,
+        )
+
+        opens = [g for g in merged["gaps"] if g["status"] == "open"]
+        assert {g["from"] for g in opens} == {T0 + BAR_MS, T0 + 4 * BAR_MS}
+        assert merged["summary"]["gaps_open"] == 2
+
+    def test_straddling_gap_not_marked_repaired(self) -> None:
+        """缺口跨出窗口且本次无重叠：窗口外部分无法判定，保持 open 不误标 repaired。"""
+        prev = {
+            "gaps": [
+                {
+                    "from": T0,
+                    "to": T0 + 10 * BAR_MS,
+                    "bars": 10,
+                    "status": "open",
+                }
+            ],
+        }
+        merged = merge_report(
+            prev,
+            _report(),
+            inst_id="BTC-USDT",
+            bar_size="1H",
+            checked_range=(T0, T0 + 2 * BAR_MS),
+            now=NOW + 1,
+            present=2,
+        )
+
+        gap = merged["gaps"][0]
+        assert gap["status"] == "open"
+        assert "repaired_at" not in gap
+        assert merged["summary"]["gaps_repaired"] == 0
+
 
 # =====================================================================
 # latest.json 读写

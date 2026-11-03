@@ -75,7 +75,7 @@ def merge_report(
         present: 本次窗口内实际存在的已收盘 K 线根数
     """
     start, end = checked_range
-    prev_gaps = {g["from"]: g for g in (prev or {}).get("gaps", [])}
+    prev_gaps: list[dict] = list((prev or {}).get("gaps", []))
     current = {
         m.prev_ts + m.expected_ms: {
             "from": m.prev_ts + m.expected_ms,
@@ -85,17 +85,39 @@ def merge_report(
         for m in report.missing
     }
 
+    # 配对用「区间相交」而不是 from 精确相等：缺口左端被补上一根后 from
+    # 会整体右移，精确匹配失效 → 旧 open 永远挂着 + 新增一条，重复累积、
+    # gaps_open 虚高（P1）。相交即视为同一个洞，区间/根数以本次校验为准。
     gaps: list[dict] = []
-    for from_ts, gap in prev_gaps.items():
-        if from_ts in current:
-            # 仍缺：用本次的区间/根数覆盖（缺口可能被补了一部分）
-            gaps.append({**gap, **current[from_ts], "status": "open"})
-        elif gap.get("status") == "open" and start <= from_ts <= end:
+    matched_current: set[int] = set()
+    for gap in prev_gaps:
+        g_from = int(gap.get("from", 0))
+        g_to = int(gap.get("to", g_from))
+        hit = next(
+            (
+                c for c_from, c in current.items()
+                if c_from <= g_to and g_from <= c["to"]
+            ),
+            None,
+        )
+        if hit is not None:
+            # 仍缺：以本次校验的剩余缺口为准覆盖（缺口可能只剩一部分）
+            matched_current.add(int(hit["from"]))
+            gaps.append({**gap, **hit, "status": "open"})
+            continue
+        if g_from < start or g_to > end:
+            # 与窗口相交但本次没扫到它（或只有部分落在窗口内）：窗口外
+            # 部分无法判定，保持原样——不能因为「没看它」就当成修好了
+            gaps.append(gap)
+            continue
+        if gap.get("status") == "open":
             gaps.append({**gap, "status": "repaired", "repaired_at": now})
         else:
             gaps.append(gap)
     for from_ts, gap in current.items():
-        if from_ts not in prev_gaps:
+        if from_ts not in matched_current:
+            # 未与任何旧缺口配对的本次缺口：全新缺口，或一个旧洞中段被填、
+            # 两端仍缺时剩下的另一段——补上，避免丢缺口
             gaps.append({**gap, "status": "open"})
     gaps.sort(key=lambda g: g["from"])
 

@@ -1837,6 +1837,42 @@ client 关闭；补 CLI 回归测试（此前 0 覆盖）。
   WS 应用层 ping / 订阅被拒重试；`inst` 路径穿越校验；前端轮询 seq 守卫 / NaN 防御 /
   质量明细缓存失效 / 输入 debounce
 
+### 8.62 M2 批次二：K 线管道「静默失败」族修复（P1×4）（2026-11-03）
+
+四项同属「失败了却装作成功 / 丢了数据不报告」，全部修在 M2-1/M2-7/M2-15 管道：
+
+**P1-2 断点只向前，向早回补静默失效**：断点只记录「已落盘的最新 ts」，请求起点早于
+断点时 `cursor = ckpt.last_ts + bar_ms` 会把早于断点的 bar 全部过滤、validator 又只查
+相邻缺口 → 静默返回「净增 0」，必须手删 checkpoint 才能补早期历史。修复：`fetch` 在
+主循环后显式回补 `[start_ts, min(ckpt.last_ts - bar, end_ts)]`（与已有数据重叠部分由
+`save_bars` 按 ts 去重，幂等；`sync` 每轮自行回退断点，不受影响）。
+
+**P1-3 整段拉空时错误被吞**：`_validate_and_fill` 只看 `missing` 不看 `errors`，
+"empty bars" 只留在 info 级 summary 里，失败伪装成「净增 0」。修复：`report.errors`
+逐条提到 **WARNING** 级（进 monitor 日志告警体系）。
+
+**P1-4 validator 前导缺口盲区**：只查相邻 bar 之间的缺口，「年文件被删/损坏 + 断点
+残留」导致的前缀丢失完全不可见。修复：`DataValidator.validate` 新增可选
+`expected_start_ts`，首根之前的缺口计入 missing（`prev_ts` 为起点前一根虚拟 bar，
+补拉区间算术与相邻缺口完全一致）；`CandleFetcher` 传入请求起点。quality 的滚动窗口
+起点不是真实数据起点（新上市品种会误报），**有意不传**，已在 docstring 说明。
+
+**P1-5 quality 缺口 key 位移**：`merge_report` 按 `from` 精确匹配新旧缺口，缺口左端
+补上一根后 `from` 右移 → 旧 open 永远挂着 + 新增一条，重复累积、`gaps_open` 虚高。
+修复：改**区间相交**配对——相交即同一个洞（区间/根数以本次校验为准）；跨出窗口的
+缺口无重叠时保持原样（窗口外无法判定，不误标 repaired）；一个旧洞中段被填、两端仍缺
+时两段都保留。
+
+**测试**：新增 8 个回归用例（回补两条、前导缺口两条、errors 暴露一条、quality 配对
+三条）；更新 2 个受新行为影响的既有用例——`test_resume_skip_already_downloaded` 的
+前提正是被修的缺陷（改为断言回补生效 + 主循环确实被跳过）、
+`test_rewinds_when_checkpoint_ahead` 因前导缺口补拉多一次 API 调用（改断言首次调用）。
+
+**验证**：`pytest` 全量 **1676 passed**；改动文件 `ruff` 全过。纯后端，前端无改动。
+
+**M2 审计遗留**：批次三（P1 契约/显示族：quality API 异常形状、dataZoom、图表时区、
+WS 倒计时、candles confirm、SWAP vol 口径）→ 批次四/五（P2 可靠性与性能）。
+
 ---
 
 ## 9. 相关文档

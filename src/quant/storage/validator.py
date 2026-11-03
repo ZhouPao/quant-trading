@@ -83,8 +83,20 @@ class ValidationReport:
 class DataValidator:
     """K线列表数据校验器。"""
 
-    def validate(self, bars: list[Bar]) -> ValidationReport:
-        """校验 K线列表。返回详细报告。"""
+    def validate(
+        self,
+        bars: list[Bar],
+        expected_start_ts: int | None = None,
+    ) -> ValidationReport:
+        """校验 K线列表。返回详细报告。
+
+        Args:
+            expected_start_ts: 期望区间起点（开盘 ts，UTC ms）。传入时把
+                「首根之前的前导缺口」也计为 missing——原先只查相邻 bar 之间
+                的缺口，年文件被删/损坏而断点残留时前缀丢失完全不可见。
+                quality 的滚动窗口起点不是真实数据起点（新上市品种会误报），
+                因此只有明确知道请求起点的调用方（如 CandleFetcher）才传。
+        """
         report = ValidationReport()
         if not bars:
             report.add_error("empty bars")
@@ -105,8 +117,22 @@ class DataValidator:
             if b.ts not in seen_ts:
                 closed.append(b)
                 seen_ts.add(b.ts)
+        if not closed:
+            return report
+
+        bar_size_ms = self._bar_size_ms(closed[0].bar_size)
+
+        # 前导缺口：期望起点之前一根都没有。原先只查相邻 bar 之间的缺口，
+        # 「文件前缀丢失 + 断点残留」这类情况完全不可见（P1 盲区）
+        if expected_start_ts is not None and closed[0].ts > expected_start_ts:
+            report.add_missing(
+                prev_ts=expected_start_ts - bar_size_ms,
+                next_ts=closed[0].ts,
+                gap_ms=closed[0].ts - expected_start_ts + bar_size_ms,
+                expected_ms=bar_size_ms,
+            )
+
         if len(closed) >= 2:
-            bar_size_ms = self._bar_size_ms(closed[0].bar_size)
             for i in range(1, len(closed)):
                 gap = closed[i].ts - closed[i - 1].ts
                 if gap != bar_size_ms:
