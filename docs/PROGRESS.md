@@ -1622,6 +1622,28 @@ P5（可选）Redis 实时轮询。M4-13 在看板的可见进度仍待 P4 完�
 轮询（落库轮询即可，无需 Redis）；结果持久化 / optimize_jobs 重启恢复；（可选 P5）Redis 实时轮询。
 M4-13 在看板可见进度仍待 P4 闭环。
 
+### 8.54 A2 · P3：寻优进度查询 API（2026-11-03）
+
+**范围**：A2 第三期。新增 `GET /api/optimize/{job_id}`，把 P2 暂存内存的寻优结果/进度
+通过 HTTP 取回，闭合“提交→轮询进度→取回结果”的后端链路；同步 `web/src/api.ts` 契约
+（纪律 #4：前端契约先定，UI 消费留 P4）。
+
+**改动**：
+- `src/quant/dashboard/backtest.py`：新增 `get_optimize_job(job_id)`——读 store 行，把落库的
+  `grid` JSON 文本解析回对象；`done` 时附 `_optimize_results` 完整结果、`failed` 时附
+  `_optimize_errors` 错误信息；无 store / 不存在返回 None。
+- `src/quant/dashboard/app.py`：新增 `GET /api/optimize/{job_id}`，不存在返 404。
+- `web/src/api.ts`：新增 `OptimizeJobResponse` 类型（`result: OptimizeResponse | null` 直接复用
+  旧返回体）与 `getOptimizeJob(signal, jobId)`（走 `getJson`，带 `signal`，jobId 做
+  `encodeURIComponent`）。未改 `App.tsx`，UI 消费留 P4。
+
+**验证**：`ruff check` 全过；`pytest` 新增 `TestOptimizeJob.test_get_optimize_job_shape`（直接走
+service 断言 grid 解析 + result/error 形态）+ `test_optimize_job_get`（HTTP POST→轮询→GET 断言
+返回体 + 404），连同 P1/P2 套件全绿；`read_lints` 零告警；`api.ts` 经 `npm run typecheck` 通过。
+
+**未完成（后续期）**：P4 前端进度条 + 1s 轮询消费本接口、把 `runOptimize` 从同步改轮询；
+P5（可选）Redis 实时轮询。M4-13 在看板可见进度仍待 P4 闭环。
+
 ---
 
 ## 9. 相关文档

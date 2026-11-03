@@ -1670,6 +1670,28 @@ export async function runOptimize(signal: AbortSignal, body: OptimizeBody) {
   return postJson<OptimizeResponse>("/api/optimize", body, signal);
 }
 
+export type OptimizeJobResponse = {
+  job_id: string;
+  status: "running" | "done" | "failed";
+  total: number;
+  completed: number;
+  metric: string;
+  grid: Record<string, (string | number)[]>;
+  n_jobs: number;
+  created_at: number;
+  finished_at: number | null;
+  result: OptimizeResponse | null;
+  error: string | null;
+};
+
+/** M4-13 寻优进度查询（A2-P3）：按 job_id 拉取进度，done 时携带完整结果。 */
+export async function getOptimizeJob(signal: AbortSignal, jobId: string) {
+  return getJson<OptimizeJobResponse>(
+    `/api/optimize/${encodeURIComponent(jobId)}`,
+    signal,
+  );
+}
+
 export function num(value: string | number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || value === "") return "—";
   const parsed = typeof value === "number" ? value : Number(value);

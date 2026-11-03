@@ -467,6 +467,39 @@ class TestOptimizeJob:
         assert row["status"] == "done", row
         assert row["completed"] == 9
 
+    async def test_get_optimize_job_shape(self, param_service) -> None:
+        service, store = param_service
+        _write_bars(service._settings)
+
+        req = OptimizeRequest(
+            **_request().model_dump(),
+            grid="fast_len=3,5;slow_len=20,30",
+            metric="sharpe",
+            top=2,
+            n_jobs=1,
+        )
+        envelope = await service.start_optimize(req)
+        job_id = envelope["job_id"]
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            row = store.get_optimize_job(job_id)
+            if row["status"] in ("done", "failed"):
+                break
+            await asyncio.sleep(0.02)
+
+        job = service.get_optimize_job(job_id)
+        assert job is not None
+        assert job["job_id"] == job_id
+        assert job["status"] == "done"
+        assert job["total"] == 4 and job["completed"] == 4
+        assert job["metric"] == "sharpe"
+        assert job["grid"] == {"fast_len": [3, 5], "slow_len": [20, 30]}
+        assert job["result"] is not None and job["result"]["kind"] == "optimize"
+        assert job["error"] is None
+        # 未知 job 返回 None
+        assert service.get_optimize_job("nope") is None
+
 
 @pytest.fixture
 def app(tmp_path):
@@ -681,6 +714,45 @@ class TestApp:
         assert row is not None
         assert row["status"] == "done", row
         assert row["completed"] == 4
+
+    async def test_optimize_job_get(self, app) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/optimize",
+                json={
+                    "strategy": "sma_cross",
+                    "start": "2026-09-05",
+                    "end": "2026-09-10",
+                    "warmup_bars": 50,
+                    "grid": "fast_len=3,5;slow_len=20,30",
+                    "metric": "sharpe",
+                    "top": 2,
+                },
+            )
+            job_id = response.json()["job_id"]
+
+            store = app._test_store
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                row = store.get_optimize_job(job_id)
+                if row and row["status"] in ("done", "failed"):
+                    break
+                await asyncio.sleep(0.02)
+
+            get = await client.get(f"/api/optimize/{job_id}")
+            assert get.status_code == 200
+            body = get.json()
+            assert body["job_id"] == job_id
+            assert body["status"] == "done"
+            assert body["total"] == 4
+            assert body["completed"] == 4
+            assert body["result"]["kind"] == "optimize"
+            assert body["error"] is None
+
+            missing = await client.get("/api/optimize/does-not-exist")
+            assert missing.status_code == 404
 
     async def test_walkforward_endpoint_sync(self, app) -> None:
         async with httpx.AsyncClient(

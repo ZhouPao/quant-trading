@@ -373,6 +373,35 @@ class BacktestService:
         if status == "failed" and error is not None:
             self._optimize_errors[job_id] = error
 
+    def get_optimize_job(self, job_id: str) -> dict[str, object] | None:
+        """查询寻优任务进度（M4-13 / A2-P3）。
+
+        返回 SQLite 行（grid 由 JSON 文本解析回对象），并视状态附带：
+        - done：内存中的完整结果（`_optimize_results`，即原 optimize 返回体）
+        - failed：错误信息（`_optimize_errors`）
+        任务不存在或无 store 时返回 None。
+        """
+        if self._store is None:
+            return None
+        row = self._store.get_optimize_job(job_id)
+        if row is None:
+            return None
+        job: dict[str, object] = dict(row)
+        if isinstance(job.get("grid"), str):
+            try:
+                job["grid"] = json.loads(job["grid"])
+            except json.JSONDecodeError:
+                pass
+        result: object | None = None
+        error: str | None = None
+        if job.get("status") == "done":
+            result = self._optimize_results.get(job_id)
+        elif job.get("status") == "failed":
+            error = self._optimize_errors.get(job_id)
+        job["result"] = result
+        job["error"] = error
+        return job
+
     async def walkforward(self, req: WalkforwardRequest) -> dict[str, object]:
         async with self._lock:
             started = time.monotonic()

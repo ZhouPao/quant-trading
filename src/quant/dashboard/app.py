@@ -773,6 +773,14 @@ def create_app(
         except BacktestRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    @app.get("/api/optimize/{job_id}")
+    async def optimize_job(job_id: str) -> JSONResponse:
+        """寻优进度查询（M4-13 / A2-P3）：按 job_id 拉取进度，done 时带完整结果。"""
+        job = backtests.get_optimize_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="optimize job not found")
+        return JSONResponse(job)
+
     @app.post("/api/kill-switch")
     async def kill_switch(
         request: Request, req: KillSwitchRequest
