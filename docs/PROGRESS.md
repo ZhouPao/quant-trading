@@ -1668,6 +1668,26 @@ P5（可选）Redis 实时轮询。M4-13 在看板可见进度仍待 P4 闭环�
 **闭环说明**：M4-13 至此在看板可见实时进度，状态由 🟡 转 🟢。仍可增强（未做）：取消按钮、
 结果持久化与重启恢复（`fail_interrupted_optimize_jobs`）、（可选 P5）Redis 实时轮询。
 
+### 8.56 A2 收尾：P1–P4 跨期联调测试（2026-11-03）
+
+**目的**：分期单元测试各自通过后，补齐“各期联手”的端到端联调，防止契约漂移与边界缺陷遗留。
+
+**新增测试**：
+- `tests/test_optimize_integration.py`（后端，真实 SQLite + 真实 ASGI HTTP）：
+  - `test_submit_poll_fetch_contract`：POST 登记 → 轮询 GET → 取回结果，逐字段校验 P4 的
+    `OptimizeJobResponse` 契约（job_id/status/total/completed/metric/n_jobs/grid 解析/result/error）；
+  - `test_large_grid_full_chain`：3×3=9 组合，total/completed/grid/top 全链校验；
+  - `test_unknown_job_returns_404` / `test_invalid_metric_rejected_without_row`（400 且不登记僵尸任务）；
+  - `test_result_lost_after_restart`：锁定“P2 内存结果 + P3 GET 在进程重启后优雅降级为 result=null”的已知边界。
+- `web/src/api/optimize.api.test.ts`（前端，mock fetch 契约测试）：校验 `submitOptimize`（POST + job_id 信封）
+  与 `getOptimizeJob`（GET + encodeURIComponent + 全覆盖 `OptimizeJobResponse`，含 failed/error 分支）。
+
+**验证**：`pytest` **134 passed**（含 5 新用例）；`npm test`（vitest）**16 passed**（含 3 新用例）；
+`ruff` / `tsc --noEmit` 零告警；`npm run build`（tsc -b + vite build）590 模块通过。
+
+**说明**：浏览器内 UI 渲染（进度条实际显示）未做 e2e（无浏览器 harness），但数据层 / P4 契约已从
+前后端两侧闭环；如需真浏览器 e2e 需另搭 Playwright 等。
+
 ---
 
 ## 9. 相关文档

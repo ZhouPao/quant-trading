@@ -333,6 +333,7 @@
 | 2026-11-03 | 寻优仍同步、无进度上报（M4-13） | A2-P2：`start_optimize` 登记式任务 + `optimize_jobs.completed` 按 10 组合/2s 节流落 SQLite，`/api/optimize` 立即返回 job_id；复用 `asyncio.Semaphore(1)` 保持单消费者 | 进度跨重启可查（结果暂存内存待 P3 取回）；取消按钮 / Redis 实时轮询留后续期 |
 | 2026-11-03 | 寻优结果无法按 job 取回（M4-13 闭环缺口）| A2-P3：`BacktestService.get_optimize_job` 读 optimize_jobs 并解析 grid、附结果/错误；新增 `GET /api/optimize/{job_id}`（done 带完整结果，404 未知）；同步 `api.ts` 的 `OptimizeJobResponse`/`getOptimizeJob` | 后端进度查询契约就绪，前端轮询 UI（P4）待做 |
 | 2026-11-03 | 前端仍同步等寻优结果、页面无反馈（M4-13 最后一环）| A2-P4：`runOptimize`→`submitOptimize`（返 job_id）；新增 `followOptimizeJob` 1s 轮询 GET（照抄 `followRun` 模式）+ `OptimizeProgress` 进度条；`styles.css` 加进度条样式 | 看板可见实时进度（completed/total + 百分比），M4-13 闭环；`web/dist` 被 .gitignore 忽略，产物不入仓 |
+| 2026-11-03 | 分期各自通过但缺跨期联调（P1–P4 联手缺陷风险）| 新增 `tests/test_optimize_integration.py`（真实 SQLite+HTTP 全链 + 重启降级守卫）+ `web/src/api/optimize.api.test.ts`（mock fetch 契约，前后端两侧） | P1–P4 契约与边界已从前后端两侧闭环；浏览器 UI e2e 未做 |
 
 ---
 
