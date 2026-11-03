@@ -390,6 +390,84 @@ class TestStrategyParamWrites:
         assert [row["new_value"] for row in page["changes"]] == ["9", "8"]
 
 
+class TestOptimizeJob:
+    """A2-P2：登记式寻优——后台跑、进度落 optimize_jobs、结果暂存内存。"""
+
+    async def test_registers_and_completes(self, param_service) -> None:
+        service, store = param_service
+        _write_bars(service._settings)  # param_service 不含 bars，补上
+
+        req = OptimizeRequest(
+            **_request().model_dump(),
+            grid="fast_len=3,5;slow_len=20,30",
+            metric="sharpe",
+            top=2,
+            n_jobs=1,
+        )
+        envelope = await service.start_optimize(req)
+        job_id = envelope["job_id"]
+        assert envelope["status"] == "running"
+        assert envelope["total"] == 4
+
+        row = store.get_optimize_job(job_id)
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["total"] == 4
+        assert row["completed"] == 0
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            row = store.get_optimize_job(job_id)
+            if row["status"] in ("done", "failed"):
+                break
+            await asyncio.sleep(0.02)
+        assert row["status"] == "done", row
+        assert row["completed"] == 4
+        # 结果暂存内存，待 P3 的 GET 接口取回
+        result = service._optimize_results[job_id]
+        assert result["kind"] == "optimize"
+        assert len(result["results"]) == 2
+
+    async def test_invalid_metric_rejected_without_job(self, param_service) -> None:
+        service, store = param_service
+        _write_bars(service._settings)
+
+        req = OptimizeRequest(
+            **_request().model_dump(),
+            grid="fast_len=3,5;slow_len=20,30",
+            metric="bogus",
+        )
+        with pytest.raises(BacktestRequestError, match="unknown metric"):
+            await service.start_optimize(req)
+        # 入参非法时不登记任何任务
+        assert store._query_all("SELECT job_id FROM optimize_jobs") == []
+
+    async def test_large_grid_reports_full_progress(self, param_service) -> None:
+        service, store = param_service
+        _write_bars(service._settings)
+
+        # 3 × 3 = 9 组，验证进度单调写满到 total
+        req = OptimizeRequest(
+            **_request().model_dump(),
+            grid="fast_len=3,5,8;slow_len=20,30,40",
+            metric="sharpe",
+            top=3,
+            n_jobs=1,
+        )
+        envelope = await service.start_optimize(req)
+        job_id = envelope["job_id"]
+        assert envelope["total"] == 9
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            row = store.get_optimize_job(job_id)
+            if row["status"] in ("done", "failed"):
+                break
+            await asyncio.sleep(0.02)
+        assert row["status"] == "done", row
+        assert row["completed"] == 9
+
+
 @pytest.fixture
 def app(tmp_path):
     settings = _settings(tmp_path)
@@ -398,6 +476,7 @@ def app(tmp_path):
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     store = SQLiteStore(settings.state.db_path)
     dashboard = create_app(DashboardService(store, redis, settings), tmp_path / "dist")
+    dashboard._test_store = store  # 测试用：便于轮询 optimize_jobs
     yield dashboard
     store.close()
 
@@ -584,9 +663,24 @@ class TestApp:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["kind"] == "optimize"
-        assert len(body["results"]) == 2
-        assert body["combo_count"] == 4
+        # 登记式：立即返回 job_id，而非同步的排名结果
+        job_id = body["job_id"]
+        assert isinstance(job_id, str) and job_id
+        assert body["status"] == "running"
+        assert body["total"] == 4
+
+        # 后台任务跑完后，进度应落库到 optimize_jobs 且 completed == total
+        store = app._test_store
+        deadline = time.monotonic() + 5.0
+        row = None
+        while time.monotonic() < deadline:
+            row = store.get_optimize_job(job_id)
+            if row and row["status"] in ("done", "failed"):
+                break
+            await asyncio.sleep(0.02)
+        assert row is not None
+        assert row["status"] == "done", row
+        assert row["completed"] == 4
 
     async def test_walkforward_endpoint_sync(self, app) -> None:
         async with httpx.AsyncClient(

@@ -1591,6 +1591,37 @@ vite5→6 / echarts5→6 / vitest 大版本），需 `build + typecheck + vitest
 **未完成（留待后续期）**：P2 后端登记式任务 + 进度落库、P3 进度查询 API、P4 前端进度条、
 P5（可选）Redis 实时轮询。M4-13 在看板的可见进度仍待 P4 完成才算闭环。
 
+### 8.53 A2 · P2：后端登记式寻优 + 进度落库（2026-11-03）
+
+**范围**：A2 第二期。把 dashboard 的 optimize 从“同步跑完返回排名”改为“登记式任务”——收请求先插
+`optimize_jobs(status=running, total=N)`，用 `asyncio.to_thread` 跑 `GridOptimizer.search`，`progress`
+回调每 10 组合/2s 节流写 `optimize_jobs.completed`（SQLite，跨重启可查），结束置 `done/failed` +
+`finished_at`。第一版只落 SQLite，不碰 Redis（P5 可选）。
+
+**改动**：
+- `src/quant/dashboard/backtest.py`：
+  - 保留原 `optimize`（同步，供现有 TestOptimize 与内部复用）；**新增** `start_optimize`：入参校验后
+    `save_optimize_job` 登记、`asyncio.create_task` 后台跑、`_run_optimize_job` 在 worker 线程跑搜索并把
+    progress 落库、结束 `_finish_optimize` 置终态；结果暂存 `self._optimize_results`（内存，待 P3 取回），
+    错误入 `self._optimize_errors`。
+  - `_optimize_sync` 增加可选 `progress` 参数并透传给 `GridOptimizer.search`（cli 版早已这么传，dashboard 版之前漏了）。
+  - 复用既有 `self._lock = asyncio.Semaphore(1)`：后台任务也走同一把锁，与 backtest 任务互斥，
+    **保持单消费者、不并发打满 CPU**，未改动 `tasks.py`。
+- `src/quant/dashboard/app.py`：`POST /api/optimize` 切到 `start_optimize`，立即返回 `{job_id, status, total, ...}`（登记式）。
+- `tests/test_dashboard_backtest.py`：新增 `TestOptimizeJob`（注册+完成+进度写满、非法 metric 不登记、大网格进度写满 3 例）；
+  `test_optimize_endpoint` 改为断言新契约（返回 job_id、后台跑完进度落库）。
+
+**关键决策 / 边界**：
+- `run_id` 用 `job_id` 占位（optimize 无对应 backtest_run）；确认 SQLite 未启用 `PRAGMA foreign_keys`，占位不触发外键报错。
+- 结果暂存内存而非落库：P2 保持最小改动；结果持久化 + 重启恢复（`fail_interrupted_optimize_jobs`）留待后续期。
+- 取消按钮（M4-13 字面含“取消”）未做——按你“先只做进度展示”的范围，取消属 P4 可选或单独排期。
+
+**验证**：`ruff check` 全过；`pytest` 127（test_dashboard_backtest）+ 26（test_backtest_batch）passed，零回归；`read_lints` 零告警。
+
+**未完成（后续期）**：P3 进度查询 API（`GET /api/optimize/{job_id}`，返回进度 + 内存结果）；P4 前端进度条 +
+轮询（落库轮询即可，无需 Redis）；结果持久化 / optimize_jobs 重启恢复；（可选 P5）Redis 实时轮询。
+M4-13 在看板可见进度仍待 P4 闭环。
+
 ---
 
 ## 9. 相关文档

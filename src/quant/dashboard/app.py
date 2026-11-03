@@ -45,7 +45,7 @@
 - POST /api/backtest/{run_id}/cancel 取消任务（写操作）
 - POST /api/backtest/{run_id}/rerun  复制参数重跑（写操作）
 - POST /api/backtest/{run_id}/pine  导入 Pine 回测结果并算偏离度（写操作）
-- POST /api/optimize  参数网格寻优（只返回排名，不落盘）
+- POST /api/optimize  参数网格寻优：登记式任务，立即返回 job_id，进度落 optimize_jobs
 - POST /api/walkforward 滚动 IS/OOS 验证任务，立即返回 run_id（?sync=1 同步）
 - POST /api/kill-switch 切换紧急停止标志，激活时默认同时撤销交易所挂单（写操作）
 - POST /api/risk/circuits/{inst_id}/resume 人工确认恢复熔断中的品种（写操作）
@@ -767,8 +767,9 @@ def create_app(
 
     @app.post("/api/optimize")
     async def optimize(req: OptimizeRequest) -> JSONResponse:
+        """登记式寻优：立即返回 job_id，后台跑搜索并落进度（M4-13 / A2-P2）。"""
         try:
-            return JSONResponse(await backtests.optimize(req))
+            return JSONResponse(await backtests.start_optimize(req))
         except BacktestRequestError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 

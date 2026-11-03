@@ -8,7 +8,8 @@
 - 用信号量串行化，避免多个请求同时打满 CPU
 - 把结果裁成适合页面渲染的 JSON（权益曲线降采样、成交条数上限）
 
-不写 CSV/HTML、不写 SQLite、不改 Redis，保持 dashboard 只读。
+看板默认只读数据源；但参数寻优会把自己跑批的进度登记进 SQLite 的
+optimize_jobs（跨重启可查、供前端轮询），不改 Redis、不写 CSV/HTML。
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import json
 import math
 import subprocess
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -212,6 +214,11 @@ class BacktestService:
         self._redis = redis
         self._config_dir = Path(settings.engine.config_dir)
         self._lock = asyncio.Semaphore(1)
+        # 寻优任务（M4-13 进度上报，A2-P2）：结果/错误暂存内存，进度落 SQLite；
+        # 结果持久化与重启恢复留待后续期。
+        self._optimize_results: dict[str, dict[str, object]] = {}
+        self._optimize_errors: dict[str, str] = {}
+        self._optimize_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # 公开 API
@@ -278,6 +285,93 @@ class BacktestService:
             payload = await asyncio.to_thread(self._optimize_sync, req)
         payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return payload
+
+    async def start_optimize(self, req: OptimizeRequest) -> dict[str, object]:
+        """登记式寻优（M4-13 进度上报，A2-P2）：立即返回 job_id，后台跑搜索并落进度。
+
+        与 backtest 的注册式一致——前端拿到 job_id 后轮询进度，而非同步等待。
+        进度按每 10 组合 / 2s 节流写 `optimize_jobs.completed`（SQLite，重启可查）；
+        最终结果暂存内存（`_optimize_results`），待 P3 的 GET 接口返回。
+        入参非法时直接抛 BacktestRequestError（不登记僵尸任务）。
+        """
+        if req.metric not in METRIC_KEYS:
+            raise BacktestRequestError(
+                f"unknown metric {req.metric!r}; available: {list(METRIC_KEYS)}"
+            )
+        try:
+            grid = parse_grid(req.grid)
+        except BacktestSetupError as e:
+            raise BacktestRequestError(str(e)) from e
+        combos = math.prod(len(values) for values in grid.values())
+        if combos > self._settings.backtest.max_combos:
+            raise BacktestRequestError(
+                f"参数组合过多：{combos} 组 > 上限 "
+                f"{self._settings.backtest.max_combos}，请缩小网格"
+            )
+
+        job_id = uuid.uuid4().hex
+        now = _now_ms()
+        if self._store is not None:
+            self._store.save_optimize_job(
+                job_id,
+                run_id=job_id,  # 寻优没有对应 backtest_run，用 job_id 占位（FK 默认不强制）
+                grid=grid,
+                metric=req.metric,
+                n_jobs=req.n_jobs,
+                total=combos,
+                created_at=now,
+            )
+
+        task = asyncio.create_task(self._run_optimize_job(job_id, req))
+        task.add_done_callback(self._optimize_tasks.discard)
+        self._optimize_tasks.add(task)
+
+        return {
+            "job_id": job_id,
+            "status": "running",
+            "total": combos,
+            "strategy": req.strategy,
+            "inst": req.inst or self._settings.engine.inst,
+            "bar": req.bar,
+            "metric": req.metric,
+        }
+
+    async def _run_optimize_job(self, job_id: str, req: OptimizeRequest) -> None:
+        """后台执行寻优：worker 线程跑搜索，progress 回调写 SQLite，结束置终态。"""
+        last: dict[str, float] = {"done": -1.0, "ts": 0.0}
+
+        def on_progress(done: int, prog_total: int) -> None:
+            # 节流：每 10 组合 / 2s / 收尾 写一次；保证 done==total 必落库
+            now = time.monotonic()
+            if done % 10 == 0 or done == prog_total or now - last["ts"] >= 2.0:
+                if self._store is not None:
+                    self._store.update_optimize_progress(job_id, done)
+                last["done"] = float(done)
+                last["ts"] = now
+
+        try:
+            async with self._lock:
+                payload = await asyncio.to_thread(
+                    self._optimize_sync, req, on_progress
+                )
+        except BacktestRequestError as e:
+            self._finish_optimize(job_id, "failed", error=str(e))
+            return
+        except Exception as e:  # noqa: BLE001 - 单任务失败不能污染事件循环
+            log.exception(f"optimize job {job_id} failed: {e}")
+            self._finish_optimize(job_id, "failed", error=str(e))
+            return
+
+        self._optimize_results[job_id] = payload
+        self._finish_optimize(job_id, "done")
+
+    def _finish_optimize(
+        self, job_id: str, status: str, *, error: str | None = None
+    ) -> None:
+        if self._store is not None:
+            self._store.finish_optimize_job(job_id, status, finished_at=_now_ms())
+        if status == "failed" and error is not None:
+            self._optimize_errors[job_id] = error
 
     async def walkforward(self, req: WalkforwardRequest) -> dict[str, object]:
         async with self._lock:
@@ -635,7 +729,11 @@ class BacktestService:
         }
         return payload, result
 
-    def _optimize_sync(self, req: OptimizeRequest) -> dict[str, object]:
+    def _optimize_sync(
+        self,
+        req: OptimizeRequest,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, object]:
         if req.metric not in METRIC_KEYS:
             raise BacktestRequestError(
                 f"unknown metric {req.metric!r}; available: {list(METRIC_KEYS)}"
@@ -666,7 +764,9 @@ class BacktestService:
             funding=self._funding(inst),
         )
         try:
-            results = optimizer.search(bars, metric=req.metric, n_jobs=req.n_jobs)
+            results = optimizer.search(
+                bars, metric=req.metric, n_jobs=req.n_jobs, progress=progress
+            )
         except ValueError as e:
             raise BacktestRequestError(str(e)) from e
 
