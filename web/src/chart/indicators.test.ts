@@ -116,4 +116,27 @@ describe("设置解析", () => {
   it("mergeSettings 忽略非对象输入", () => {
     expect(mergeSettings(DEFAULT_SETTINGS, null)).toBe(DEFAULT_SETTINGS);
   });
+
+  it("mergeSettings 坏类型字段回落默认，不让渲染期抛错（P0 防白屏）", () => {
+    const merged = mergeSettings(DEFAULT_SETTINGS, {
+      ma: { enabled: true, periods: 5 }, // periods 应为数组
+      boll: { enabled: "yes", period: null, mult: 2 }, // 类型错的回落、合法的保留
+      vol: { maPeriods: null },
+      macd: "fast", // 整组非对象 → 整组回落
+      kdj: { n: [1, 2] }, // 数字字段给了数组
+    });
+    expect(merged.ma.periods).toEqual(DEFAULT_SETTINGS.ma.periods);
+    expect(merged.boll.enabled).toBe(DEFAULT_SETTINGS.boll.enabled);
+    expect(merged.boll.period).toBe(DEFAULT_SETTINGS.boll.period);
+    expect(merged.boll.mult).toBe(2);
+    expect(merged.vol.maPeriods).toEqual(DEFAULT_SETTINGS.vol.maPeriods);
+    expect(merged.macd).toEqual(DEFAULT_SETTINGS.macd);
+    expect(merged.kdj.n).toBe(DEFAULT_SETTINGS.kdj.n);
+
+    // 数组内的非法元素被过滤而不是整体放弃
+    const partial = mergeSettings(DEFAULT_SETTINGS, {
+      ma: { periods: [5, "x", 20, 0, -1] },
+    });
+    expect(partial.ma.periods).toEqual([5, 20]);
+  });
 });

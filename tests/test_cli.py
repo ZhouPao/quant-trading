@@ -26,6 +26,7 @@ from quant.cli.fetch_candles import main as fetch_main
 from quant.cli.fetch_candles import parse_date_to_ms
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
 from quant.cli.fetch_instruments import main as fetch_instruments_main
+from quant.cli.fetch_open_interest import main as fetch_open_interest_main
 from quant.cli.run_worker import _apply_paper_mode, _parse_strategies
 from quant.cli.serve_webhook import needs_auth
 from quant.cli.sync_candles import _sync_once
@@ -1281,6 +1282,57 @@ class TestFetchFundingRatesMain:
         )
 
         assert fetch_funding_rates_main(args) == 1
+
+
+# =====================================================================
+# fetch-open-interest CLI（P0 回归：settings.data 不存在曾致一调即崩）
+# =====================================================================
+
+
+class TestFetchOpenInterestCli:
+    @patch("quant.cli.fetch_open_interest.OpenInterestFetcher")
+    @patch("quant.cli.fetch_open_interest.OKXClient")
+    @patch("quant.cli.fetch_open_interest.Settings.load")
+    def test_uses_storage_data_dir_and_respects_config(
+        self, mock_load, mock_client_cls, mock_fetcher_cls, tmp_path
+    ):
+        """数据目录取 settings.storage.data_dir，配置路径尊重 --config。"""
+        settings = _make_settings(tmp_path)
+        mock_load.return_value = settings
+        mock_client_cls.return_value = MagicMock()
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.fetch.side_effect = [1, 0]
+
+        args = _ns(inst=["BTC-USDT-SWAP", "ETH-USDT-SWAP"], config="other.toml")
+
+        ret = fetch_open_interest_main(args)
+
+        assert ret == 0
+        # 数据目录来自 settings.storage.data_dir（原先的 settings.data 不存在）
+        assert mock_fetcher_cls.call_args.args[1] == settings.storage.data_dir
+        # 配置路径尊重 --config（原先写死 config/config.toml）
+        mock_load.assert_called_once_with("other.toml")
+        assert mock_fetcher.fetch.call_count == 2
+
+    @patch("quant.cli.fetch_open_interest.OpenInterestFetcher")
+    @patch("quant.cli.fetch_open_interest.OKXClient")
+    @patch("quant.cli.fetch_open_interest.Settings.load")
+    def test_fetch_error_returns_1_and_closes_client(
+        self, mock_load, mock_client_cls, mock_fetcher_cls, tmp_path
+    ):
+        """单品种拉取失败要返回 1，且 client 必须被关闭。"""
+        mock_load.return_value = _make_settings(tmp_path)
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.fetch.side_effect = RuntimeError("api error")
+
+        args = _ns(inst=["BTC-USDT-SWAP"], config="config/config.toml")
+
+        assert fetch_open_interest_main(args) == 1
+        mock_client.close.assert_called_once()
 
 
 # =====================================================================

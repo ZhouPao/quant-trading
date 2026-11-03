@@ -1803,6 +1803,40 @@ overview 不再 EXISTS+GET 两次往返（中间标志若被切换会产生 acti
 
 **未做**：P2-16 的 ETag / HTTP 缓存（本地看板收益小，暂不做）；P3 全部 8 项（体验/可访问性）。
 
+### 8.61 M2「市场监控」存量审计 + 批次一修复（P0×2）（2026-11-03）
+
+**背景**：转入存量审计——对已完成的九大模块（除首页总览）逐一复核前后端，从 M2 开始。
+三个只读子代理并行深查（后端数据管道 / 看板 API / 前端图表），覆盖 M2 全部 14 个已实现功能，
+分级汇总：P0×2、P1×12、P2×14、P3×12（均核对到 file:line）。本批先修 2 个 P0。
+
+**P0-1 `fetch-open-interest` 一调即崩**：CLI 用了不存在的 `settings.data.data_dir`
+（正确为 `settings.storage.data_dir`），且 `--config` 参数被无视（写死 `config/config.toml`）。
+修复：改用 `settings.storage.data_dir`、`Settings.load(args.config)`、失败返回 1 并确保
+client 关闭；补 CLI 回归测试（此前 0 覆盖）。
+
+**P0-2 指标设置坏结构 → 图表页整页白屏**：`mergeSettings` 只补「缺失字段」不校验「已存在
+字段的类型」，localStorage 旧版本/手改坏结构（如 `periods: 5`、`maPeriods: null`）会让
+渲染期 `.map` 抛 TypeError，且 `main.tsx` 无 ErrorBoundary → React 整树卸载。
+修复：`mergeSettings` 逐字段按默认值类型校验（数组过滤非法元素、标量类型不符回落默认、
+整组非对象整组回落）；新增全局 `ErrorBoundary`，渲染异常落可读兜底页而非白屏。
+
+**验证**：`pytest` 全量 **1668 passed**（+2 CLI 回归）；`npx tsc --noEmit` 通过；
+`npm test` **23 passed**（+1 坏结构用例）；`npm run build` 通过；改动文件 `ruff` 全过。
+
+**顺带**：更新 `AGENTS.md` 已知问题 #1——`optimize_jobs` 表已由 v10 迁移闭环，原条目过时。
+
+**M2 审计遗留（后续批次，待确认后继续）**：
+- 批次二（P1 静默丢数据族）：断点只向前、向早回补静默失效；`_validate_and_fill` 吞
+  `errors`（失败伪装成功）；validator 前导缺口盲区（年文件损坏+断点残留永不重补）；
+  quality 缺口 key 位移导致重复累积
+- 批次三（P1 契约/显示族）：quality API 异常分支形状（前端 TypeError）；dataZoom 被
+  spread 覆盖（副图不跟随缩放）；图表时区改 UTC+8；WS「重连倒计时」为静态快照；
+  candles 缺 `confirm`；SWAP vol 口径（张数误当基础币，潜伏）
+- 批次四/五（P2）：限频器惩罚后整桶回满（含 `test_okx` 固化断言修正）+ 持锁 sleep；
+  K 线翻页停滞保护；parquet 原子写 + mtime 缓存（1m 年文件 52 万行每 5s 全量解码）；
+  WS 应用层 ping / 订阅被拒重试；`inst` 路径穿越校验；前端轮询 seq 守卫 / NaN 防御 /
+  质量明细缓存失效 / 输入 debounce
+
 ---
 
 ## 9. 相关文档

@@ -79,7 +79,7 @@ cd web && npm run typecheck && npm run build        # 或 npx tsc --noEmit
 
 | 问题 | 事实 | 处理建议 |
 |---|---|---|
-| `optimize_jobs` 表不存在 | PRD 有模型，代码只有注释「留到各自切片再加迁移」 | 做 M4-13 寻优进度前先加迁移 |
+| `optimize_jobs` 表不存在（已闭环 2026-11-03） | v10 幂等迁移已补齐，`SCHEMA_VERSION=10`，存量库打开即自动补表 | 无需处理；寻优进度已落库（M4-13 🟢） |
 | ruff 全仓 6 条 W293 | `tests/test_open_interest_fetcher.py` 空白行含空格，属既有问题 | 只 lint 你改的文件，不要顺手格式化全仓 |
 | 前端 build 有 chunk > 500 kB 警告 | ECharts 体积，既有 | 可忽略 |
 | `.env` 里的 OKX 三件套为空时启动即报错 | `_expand_env` 把空字符串视为未设置（`env var OKX_API_KEY not set`） | 属预期行为：必须填模拟盘 Key 才能启动 |
