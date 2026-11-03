@@ -387,6 +387,12 @@ export type AlertStatsResponse = {
   /** 区间内告警总数（各规则之和） */
   total: number;
   rules: AlertStatsRule[];
+  /** 未读总数（open/silenced，全量不带时间窗）；旧后端缺失时前端回退 0 */
+  unread?: number;
+  /** 未读按级别计数（全量） */
+  by_level?: Record<string, number>;
+  /** 全部告警数（含已读，全量） */
+  total_all?: number;
   degraded: string[];
 };
 
@@ -900,16 +906,31 @@ const EMPTY_PNL: PnlResponse = {
   worst: null,
   degraded: [],
 };
+const EMPTY_ALERTS: AlertsResponse = {
+  ts: 0,
+  total: null,
+  alerts: [],
+  silences: [],
+  disabled_rules: [],
+  degraded: [],
+};
 
 export async function fetchAll(
   signal: AbortSignal,
   alertRange: AlertRange = { since: null, until: null },
   includeExecution = true,
+  includeAlerts = true,
 ) {
   const alertsQuery = new URLSearchParams({ limit: "200" });
   // M9-5 时间区间筛选走服务端：前端只截 200 条时按时间过滤会漏掉区间内的行
   if (alertRange.since !== null) alertsQuery.set("since", String(alertRange.since));
   if (alertRange.until !== null) alertsQuery.set("until", String(alertRange.until));
+
+  // 告警明细只在「告警日志」页渲染：摘要卡的未读/级别计数改由
+  // /api/alerts/stats 后端聚合提供，总览不必每 5s 拉 200 条（P2-20）
+  const alertsJob = includeAlerts
+    ? getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal)
+    : Promise.resolve(EMPTY_ALERTS);
 
   // 订单 / 成交 / 盈亏只在「交易执行」页使用：其它页直接返回空壳，
   // 每轮轮询省掉三个用不到的请求（首页总览 P2）
@@ -917,7 +938,7 @@ export async function fetchAll(
     const [overview, positions, alerts, engine] = await Promise.all([
       getJson<Overview>("/api/overview", signal),
       getJson<PositionsResponse>("/api/positions", signal),
-      getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal),
+      alertsJob,
       getJson<EngineResponse>("/api/engine", signal),
     ]);
     return {
@@ -949,7 +970,7 @@ export async function fetchAll(
         ...EMPTY_PNL,
         degraded: ["pnl"],
       })),
-      getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal),
+      alertsJob,
       getJson<EngineResponse>("/api/engine", signal),
     ]);
   return { overview, positions, orders, fills, pnl, alerts, engine };

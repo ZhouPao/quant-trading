@@ -173,6 +173,32 @@ class TestOverview:
         assert overview["snapshot_ts"] == NOW
         assert overview["snapshot_age_seconds"] is not None
 
+    async def test_malformed_snapshot_is_flagged(self, env) -> None:
+        """快照在但缺关键字段（monitor 恒写 ts+account）：必须显式降级。"""
+        service, _store, redis, settings = env
+        await redis.set(
+            settings.monitor.dashboard_snapshot_key,
+            json.dumps({"ts": NOW}),  # 缺 account
+        )
+
+        overview = await service.overview()
+
+        assert overview["account"] is None
+        assert "snapshot:malformed" in overview["degraded"]
+
+    async def test_future_snapshot_ts_flags_clock_skew(self, env) -> None:
+        """快照时间在未来 = 跨机时钟漂移：年龄按 0 显示但要显式暴露。"""
+        service, _store, redis, settings = env
+        await redis.set(
+            settings.monitor.dashboard_snapshot_key,
+            json.dumps({**_snapshot(), "ts": NOW + 60_000}),
+        )
+
+        overview = await service.overview()
+
+        assert overview["snapshot_age_seconds"] == 0
+        assert "clock-skew" in overview["degraded"]
+
     async def test_positions_count_matches_positions_table(self, env) -> None:
         """持仓数与持仓表同口径：本地记账 ∪ 快照，不能只数快照。"""
         from quant.backtest.position import Position
@@ -1112,6 +1138,11 @@ class TestAlertsApi:
             "warnings": 0,
             "infos": 0,
         }
+        # 未读汇总不带时间窗（open/silenced 算未读），与窗口内 total 区分：
+        # 40 天前的 old 不在 days=7 的 total=4 里，但仍是未读
+        assert body["unread"] == 5
+        assert body["by_level"] == {"ERROR": 4, "WARNING": 1, "INFO": 0}
+        assert body["total_all"] == 5
         assert month.json()["total"] == 4
         assert quarter.json()["total"] == 5
 

@@ -357,6 +357,8 @@ export default function App() {
   // M9-14 告警趋势变化慢，单独低频拉取
   const [alertTrend, setAlertTrend] = useState<AlertStatsResponse | null>(null);
   const [alertTrendDays, setAlertTrendDays] = useState(7);
+  // ack/静音等写操作后立刻刷新统计，不让未读数等 60s
+  const [alertTrendVersion, setAlertTrendVersion] = useState(0);
   // M1-8 今日盈亏汇总：按品种拆分，变化频率与持仓相同
   const [todayPnl, setTodayPnl] = useState<TodayPnlResponse | null>(null);
   const timer = useRef<number | null>(null);
@@ -373,8 +375,14 @@ export default function App() {
   const load = useCallback(
     async (signal: AbortSignal) => {
       try {
-        // 订单 / 成交 / 盈亏只在「交易执行」页用到：其它页不必每轮都拉
-        const bundle = await fetchAll(signal, alertRange, tab === "execution");
+        // 订单/成交/盈亏只在「交易执行」页、告警明细只在「告警日志」页用到；
+        // 总览的摘要卡改用 /api/alerts/stats 的后端聚合
+        const bundle = await fetchAll(
+          signal,
+          alertRange,
+          tab === "execution",
+          tab === "logs",
+        );
         setData(bundle);
         setError(null);
         setUpdatedAt(Date.now());
@@ -390,6 +398,8 @@ export default function App() {
   // 告警已读/静音是写操作，成功后立刻重取，不等下一轮轮询
   const refresh = useCallback(async () => {
     await load(new AbortController().signal);
+    // 写操作会改未读统计，立即重拉 /api/alerts/stats
+    setAlertTrendVersion((n) => n + 1);
   }, [load]);
 
   useEffect(() => {
@@ -543,7 +553,8 @@ export default function App() {
       controller.abort();
       window.clearInterval(id);
     };
-  }, [alertTrendDays]);
+    // tab 入 deps：切回总览时立刻拿最新统计，别带着旧未读数渲染
+  }, [alertTrendDays, alertTrendVersion, tab]);
 
   // M1-8 今日盈亏汇总：按品种拆分，变化频率与持仓相同
   useEffect(() => {
@@ -591,30 +602,8 @@ export default function App() {
       ]),
     [overview, data, risk, equity, reports, quality, timeline, alertTrend, todayPnl],
   );
-  const alertStats = useMemo(() => {
-    const byLevel: Record<string, number> = {};
-    const byRule = new Map<string, number>();
-    let unreadCount = 0;
-    for (const alert of alerts) {
-      const state = alert.state ?? "open";
-      // M1-9：只统计未读告警（open 或 silenced）
-      if (state === "open" || state === "silenced") {
-        unreadCount++;
-        const level = alert.level.toUpperCase();
-        byLevel[level] = (byLevel[level] ?? 0) + 1;
-        byRule.set(alert.rule, (byRule.get(alert.rule) ?? 0) + 1);
-      }
-    }
-    const rules = [...byRule.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
-    return {
-      total: unreadCount,
-      error: byLevel.ERROR ?? 0,
-      byLevel,
-      rules,
-    };
-  }, [alerts]);
+  // 告警摘要的未读/级别计数改由 /api/alerts/stats 后端聚合（全量口径）：
+  // 原先从最近 200 条里前端自己数，截断会让「未读」偏小（P2-20/P3-24）
 
   // 过期阈值由后端下发（risk.snapshot_max_age_ms），前端只在缺失时用兜底 180
   const staleAfter = overview?.thresholds?.snapshot_stale_seconds ?? 180;
@@ -710,9 +699,16 @@ export default function App() {
         />
         <Chip
           label="ALERTS"
-          value={alertStats.error > 0 ? `${alertStats.error} ERROR` : "无 ERROR"}
-          tone={alertStats.error > 0 ? "bad" : "ok"}
-          note={`共 ${alertStats.total} 条`}
+          value={
+            alertTrend
+              ? (alertTrend.by_level?.ERROR ?? 0) > 0
+                ? `${alertTrend.by_level?.ERROR ?? 0} ERROR`
+                : "无 ERROR"
+              : "—"
+          }
+          tone={(alertTrend?.by_level?.ERROR ?? 0) > 0 ? "bad" : "ok"}
+          // 原先写「共 N 条」但值是未读数，语义错位（P3-24）；现在明确「未读」
+          note={alertTrend ? `未读 ${alertTrend.unread ?? 0} 条` : undefined}
         />
         <Chip
           label="SOURCES"
@@ -976,7 +972,11 @@ export default function App() {
         <section className="card alert-summary reveal" style={{ animationDelay: "115ms" }}>
           <div className="card-head">
             <h2>告警摘要</h2>
-            <span className="card-note">未读 {alertStats.total} 条 · 共 {alerts.length} 条</span>
+            <span className="card-note">
+              {alertTrend
+                ? `未读 ${alertTrend.unread ?? 0} 条 · 共 ${alertTrend.total_all ?? 0} 条`
+                : "等待统计"}
+            </span>
             <button
               type="button"
               className="link-btn"
@@ -988,29 +988,29 @@ export default function App() {
           <div className="metric-grid">
             <Metric
               label="ERROR"
-              value={String(alertStats.byLevel.ERROR ?? 0)}
+              value={String(alertTrend?.by_level?.ERROR ?? 0)}
               hint="需立即处理"
-              tone={(alertStats.byLevel.ERROR ?? 0) > 0 ? "bad" : "good"}
+              tone={(alertTrend?.by_level?.ERROR ?? 0) > 0 ? "bad" : "good"}
             />
             <Metric
               label="WARNING"
-              value={String(alertStats.byLevel.WARNING ?? 0)}
+              value={String(alertTrend?.by_level?.WARNING ?? 0)}
               hint="待观察"
-              tone={(alertStats.byLevel.WARNING ?? 0) > 0 ? "warn" : "good"}
+              tone={(alertTrend?.by_level?.WARNING ?? 0) > 0 ? "warn" : "good"}
             />
             <Metric
               label="INFO"
-              value={String(alertStats.byLevel.INFO ?? 0)}
+              value={String(alertTrend?.by_level?.INFO ?? 0)}
               hint="仅记录"
               tone="neutral"
             />
           </div>
-          {alertStats.rules.length > 0 && (
+          {alertTrend && alertTrend.rules.length > 0 && (
             <ul className="alert-rules">
-              {alertStats.rules.map(([rule, count]) => (
-                <li key={rule}>
-                  <span className="mono">{rule}</span>
-                  <b>{count}</b>
+              {alertTrend.rules.slice(0, 5).map((item) => (
+                <li key={item.rule}>
+                  <span className="mono">{item.rule}</span>
+                  <b>{item.total}</b>
                 </li>
               ))}
             </ul>

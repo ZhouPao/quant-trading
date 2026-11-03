@@ -490,8 +490,7 @@ class DashboardService:
             pending,
             inflight,
             dead,
-            active,
-            reason,
+            kill_status,
         ) = await asyncio.gather(
             self._redis_read(
                 "snapshot", degraded, redis.get(mon.dashboard_snapshot_key)
@@ -511,8 +510,7 @@ class DashboardService:
             self._redis_read(
                 "queue", degraded, redis.llen(self._settings.redis.dead_key)
             ),
-            self._redis_read("kill", degraded, self._kill_switch.is_active()),
-            self._redis_read("kill", degraded, self._kill_switch.reason()),
+            self._redis_read("kill", degraded, self._kill_switch.status()),
         )
 
         snapshot = _loads(raw) if raw is not None else None
@@ -523,22 +521,30 @@ class DashboardService:
             "inflight": None if inflight is None else int(inflight),
             "dead": None if dead is None else int(dead),
         }
-        if active is not None:
+        if kill_status is not None:
+            k_active, k_reason = kill_status
             kill = {
-                "active": bool(active),
-                "reason": reason,
+                "active": k_active,
+                "reason": k_reason,
                 "auth_required": bool(self._settings.dashboard.token),
                 "known": True,
             }
 
-        order_counts: dict[str, int] = {}
-        try:
-            order_counts = await asyncio.to_thread(
-                self._store.get_order_status_counts
-            )
-        except Exception as e:  # noqa: BLE001
-            degraded.append("sqlite")
-            log.warning(f"overview sqlite read failed: {e}")
+        # 订单计数与持仓数是两次独立 SQLite 读：并发执行、各写各的降级标记
+        async def _order_counts_safe() -> dict[str, int]:
+            try:
+                return await asyncio.to_thread(
+                    self._store.get_order_status_counts
+                )
+            except Exception as e:  # noqa: BLE001
+                degraded.append("sqlite")
+                log.warning(f"overview sqlite read failed: {e}")
+                return {}
+
+        order_counts, positions_count = await asyncio.gather(
+            _order_counts_safe(),
+            self._position_count(snapshot),
+        )
 
         snapshot_ts = None
         if snapshot is not None:
@@ -546,17 +552,25 @@ class DashboardService:
                 snapshot_ts = int(snapshot.get("ts") or 0) or None
             except (TypeError, ValueError):
                 snapshot_ts = None
+            if snapshot_ts is None or snapshot.get("account") is None:
+                # 快照在但关键字段缺失（monitor 每轮都写 ts+account）：说明
+                # 发布方写坏/结构变更，不能静默显示成 —（P2-17）
+                degraded.append("snapshot:malformed")
+            if snapshot_ts is not None and snapshot_ts > now + 5_000:
+                # 快照时间在未来 = 跨机时钟漂移。年龄仍按 0 显示，但必须显式
+                # 暴露，否则「数据很新」的假象会掩盖时钟不可信（P2-18）
+                degraded.append("clock-skew")
+                log.warning(f"snapshot ts {snapshot_ts} ahead of now {now}")
         if snapshot is None and "redis:snapshot" not in degraded:
             # 键缺失或已过 TTL（monitor 每轮刷新，停机后自然过期）：账户列会
             # 静默变成 —，必须和「读取失败」一样显式降级，否则界面看起来一切正常。
             degraded.append("snapshot")
 
-        positions_count = await self._position_count(snapshot)
         if positions_count is None:
             # 读库失败必须显式降级：否则前端把「取不到」显示成 0，看起来像没持仓
             degraded.append("sqlite:positions")
 
-        # 同一来源的多次读取只保留一个标记（queue 读三个键、kill 读两次）
+        # 同一来源的多次读取只保留一个标记（queue 读三个键）
         degraded = list(dict.fromkeys(degraded))
 
         return {
@@ -1360,13 +1374,44 @@ class DashboardService:
         now = int(time.time() * 1000)
         day_start = day_start_ms_utc8(now)
 
-        # 1. 按品种统计今日已实现盈亏
-        try:
-            by_inst = await asyncio.to_thread(
-                self._store.get_today_pnl_by_inst, day_start
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"today_pnl sqlite read failed: {e}")
+        # 三路读取互不依赖，并发执行（原先串行三次 await，纯浪费延迟）
+        degraded: list[str] = []
+
+        async def _read_by_inst() -> dict | None:
+            try:
+                return await asyncio.to_thread(
+                    self._store.get_today_pnl_by_inst, day_start
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"today_pnl sqlite read failed: {e}")
+                degraded.append("sqlite")
+                return None
+
+        async def _read_positions() -> list:
+            try:
+                return await asyncio.to_thread(self._store.get_all_positions)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"today_pnl positions read failed: {e}")
+                # 静默返回 [] 会把浮动盈亏显示成 0、看起来没有风险，必须降级
+                degraded.append("sqlite:positions")
+                return []
+
+        async def _read_snapshot() -> dict | None:
+            try:
+                raw = await self._redis.get(
+                    self._settings.monitor.dashboard_snapshot_key
+                )
+                return _loads(raw)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"today_pnl snapshot read failed: {e}")
+                return None
+
+        by_inst, positions, snapshot = await asyncio.gather(
+            _read_by_inst(),
+            _read_positions(),
+            _read_snapshot(),
+        )
+        if by_inst is None:
             return {
                 "ts": now,
                 "day_start": day_start,
@@ -1376,25 +1421,8 @@ class DashboardService:
                 "total_fee": "0",
                 "total_turnover": "0",
                 "total_pnl": "0",
-                "degraded": ["sqlite"],
+                "degraded": list(dict.fromkeys(degraded)),
             }
-
-        # 2. 读取当前持仓，计算未实现盈亏
-        try:
-            positions = await asyncio.to_thread(self._store.get_all_positions)
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"today_pnl positions read failed: {e}")
-            positions = []
-
-        # 3. 从 Redis 快照读取标记价
-        snapshot = None
-        try:
-            raw = await self._redis.get(
-                self._settings.monitor.dashboard_snapshot_key
-            )
-            snapshot = _loads(raw)
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"today_pnl snapshot read failed: {e}")
 
         # 4. 构建标记价映射
         mark_prices: dict[str, Decimal] = {}
@@ -1735,9 +1763,11 @@ class DashboardService:
         days = max(1, min(int(days), 90))
         now = int(time.time() * 1000)
         since = now - days * 86_400_000
+        # 规则计数（带时间窗）与未读汇总（全量）是两条独立查询，并发执行
         try:
-            rules = await asyncio.to_thread(
-                self._store.alert_rule_counts, since
+            rules, summary = await asyncio.gather(
+                asyncio.to_thread(self._store.alert_rule_counts, since),
+                asyncio.to_thread(self._store.alert_summary_counts),
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"alert stats read failed: {e}")
@@ -1747,6 +1777,9 @@ class DashboardService:
                 "since": since,
                 "total": 0,
                 "rules": [],
+                "unread": 0,
+                "by_level": {"ERROR": 0, "WARNING": 0, "INFO": 0},
+                "total_all": 0,
                 "degraded": ["sqlite"],
             }
         return {
@@ -1755,6 +1788,15 @@ class DashboardService:
             "since": since,
             "total": sum(int(item["total"]) for item in rules),
             "rules": rules,
+            # 未读/级别计数不带时间窗：未读是「还欠处理」的动作项，历史遗留
+            # 的 open 也要计入；看板摘要据此前端不再每 5s 数 200 条（P2-20）
+            "unread": int(summary["unread"]),
+            "by_level": {
+                "ERROR": int(summary["errors"]),
+                "WARNING": int(summary["warnings"]),
+                "INFO": int(summary["infos"]),
+            },
+            "total_all": int(summary["total_all"]),
             "degraded": [],
         }
 

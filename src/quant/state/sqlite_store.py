@@ -1209,6 +1209,45 @@ class SQLiteStore:
         )
         return [dict(r) for r in rows], total
 
+    def alert_summary_counts(self) -> dict:
+        """全部告警的未读汇总（M1-9 口径：open/silenced 算未读）。
+
+        不带时间窗：未读是「现在还欠处理」的动作项，历史遗留的 open 也要
+        计入。供看板告警摘要消费，替代「前端从最近 200 条里自己数」的口径。
+        """
+        row = self._query_one(
+            """
+            SELECT COALESCE(SUM(state IN ('open', 'silenced')), 0) AS unread,
+                   COALESCE(SUM(
+                       state IN ('open', 'silenced') AND level = 'ERROR'
+                   ), 0) AS errors,
+                   COALESCE(SUM(
+                       state IN ('open', 'silenced') AND level = 'WARNING'
+                   ), 0) AS warnings,
+                   COALESCE(SUM(
+                       state IN ('open', 'silenced') AND level = 'INFO'
+                   ), 0) AS infos,
+                   COUNT(*) AS total_all
+              FROM alerts
+            """,
+            (),
+        )
+        if row is None:
+            return {
+                "unread": 0,
+                "errors": 0,
+                "warnings": 0,
+                "infos": 0,
+                "total_all": 0,
+            }
+        return {
+            "unread": int(row["unread"]),
+            "errors": int(row["errors"]),
+            "warnings": int(row["warnings"]),
+            "infos": int(row["infos"]),
+            "total_all": int(row["total_all"]),
+        }
+
     def alert_rule_counts(self, since_ms: int) -> list[dict]:
         """按规则统计告警条数与各数量（M9-14 告警趋势），按总数降序。"""
         rows = self._query_all(

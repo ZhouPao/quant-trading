@@ -55,4 +55,24 @@ describe("fetchAll 失败降级", () => {
 
     await expect(fetchAll(signal)).rejects.toThrow(/HTTP 500/);
   });
+
+  it("includeAlerts=false 时不请求 /api/alerts（摘要改用后端聚合）", async () => {
+    const calls: string[] = [];
+    vi.mocked(fetch).mockImplementation((async (url: string) => {
+      calls.push(String(url));
+      return okResponse({});
+    }) as never);
+
+    const bundle = await fetchAll(
+      signal,
+      { since: null, until: null },
+      true,
+      false,
+    );
+
+    // 总览页不再为算统计数拉 200 条明细（P2-20）
+    expect(calls.some((p) => p.startsWith("/api/alerts"))).toBe(false);
+    expect(bundle.alerts.alerts).toEqual([]);
+    expect(bundle.alerts.degraded).toEqual([]);
+  });
 });

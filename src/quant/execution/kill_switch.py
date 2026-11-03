@@ -42,6 +42,18 @@ class KillSwitch:
         """是否处于紧急停止状态。"""
         return await self._redis.exists(self.key) > 0
 
+    async def status(self) -> tuple[bool, str | None]:
+        """一次读出 (是否激活, 原因)。
+
+        overview 原先分开调 is_active + reason（EXISTS + GET 两次往返），
+        两次之间标志若被切换会出现 active=true 但 reason=None 的撕裂状态
+        （TOCTOU）；单次 GET 天然原子。worker/engine 用的 is_active 保持不变。
+        """
+        raw = await self._redis.get(self.key)
+        if raw is None:
+            return False, None
+        return True, self._parse_reason(raw)
+
     async def reason(self) -> str | None:
         """激活原因；未激活或无原因返回 None。
 
@@ -51,6 +63,10 @@ class KillSwitch:
         raw = await self._redis.get(self.key)
         if raw is None:
             return None
+        return self._parse_reason(raw)
+
+    @staticmethod
+    def _parse_reason(raw: str) -> str | None:
         try:
             value = str(json.loads(raw).get("reason", ""))
         except (json.JSONDecodeError, AttributeError):

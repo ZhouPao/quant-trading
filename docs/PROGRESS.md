@@ -1772,6 +1772,37 @@ alerts 每轮拉 200 条、页面不可见时暂停轮询 / 失败退避）；P3
 「成交额」并用 `compactAmount` 缩写（≥1M 用 M、≥1k 用 k、否则两位小数）；`.today-pnl .kv`
 扩为 5 列。`format.test.ts` 补 `compactAmount` 用例。
 
+### 8.60 首页总览第三批：P2 尾巴 5 项（2026-11-03）
+
+**P2-15 TOCTOU**：`KillSwitch` 新增 `status()`——单次 GET 同时返回 `(是否激活, 原因)`，
+overview 不再 EXISTS+GET 两次往返（中间标志若被切换会产生 active=true 但 reason=None
+的撕裂状态）。`is_active()` / `reason()` 保留给 worker / engine / CLI 原有调用。
+
+**P2-17 快照缺字段静默**：快照在但缺 `ts` / `account`（monitor 恒写这两个字段）→
+`degraded` 增加 `snapshot:malformed`，不再静默显示成 —。
+
+**P2-18 时钟漂移被吞**：快照时间在未来（> now+5s 容差）→ `degraded` 增加 `clock-skew`
+并 log.warning；年龄仍按 0 显示，但「数据很新」的假象不再掩盖时钟不可信。
+
+**P2-16 串行读残留**：
+- overview：订单计数与持仓数两次独立 SQLite 读改 `asyncio.gather` 并发（各自独立降级）。
+- today_pnl：三路读取（今日成交聚合 / 持仓 / Redis 快照）并发化；持仓读失败原先静默
+  返回 `[]`（浮动盈亏显示成 0、看起来没风险），现在显式降级 `sqlite:positions`。
+
+**P2-20 alerts 每 5s 拉 200 条**：
+- 后端 `alert_stats` 新增 `unread` / `by_level` / `total_all`（全量、不带时间窗，
+  open/silenced 算未读即 M1-9 口径），规则计数与未读汇总两条查询并发。
+- 前端 `fetchAll` 增加 `includeAlerts`：告警明细只在「告警日志」页拉取，
+  总览页 fetchAll 从 4 个请求降到 3 个。
+- 摘要卡 / ALERTS chip 改用后端聚合；`refresh()`（写操作后）与切页会立即重拉统计。
+- 顺带修正 P3-24 的语义错位：chip note 原来写「共 N 条」但显示的是未读数。
+
+**验证**：`pytest` 全量 **1666 passed**（+3：status 单读、malformed、clock-skew）；
+`npx tsc --noEmit` 通过；`npm test` **22 passed**（+1 includeAlerts 契约）；
+`npm run build` 通过；改动文件 `ruff` 全过。
+
+**未做**：P2-16 的 ETag / HTTP 缓存（本地看板收益小，暂不做）；P3 全部 8 项（体验/可访问性）。
+
 ---
 
 ## 9. 相关文档
