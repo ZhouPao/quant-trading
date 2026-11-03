@@ -85,6 +85,7 @@ class WSClient:
         max_reconnect_delay: float = 60.0,
         connect_fn: ConnectFn | None = None,
         proxy: str | None = None,
+        keepalive_interval: float = 25.0,
     ) -> None:
         self._url = url
         self._reconnect_delay = reconnect_delay
@@ -92,6 +93,8 @@ class WSClient:
         self._connect_fn = connect_fn or _default_connect
         # None = 不走代理；如系统需代理，传 "http://host:port"
         self._proxy = proxy
+        # 应用层心跳间隔：OKX 要求空闲约 30s 内发文本 "ping"，超时被断连
+        self._keepalive_interval = keepalive_interval
         self._log = get_logger("okx.ws")
 
         self._ws: Any = None
@@ -192,8 +195,13 @@ class WSClient:
                     self._connected.set()
                     self._log.info(f"ws connected url={self._url}")
                     await self._restore_subscriptions(ws)
-                    async for raw in ws:
-                        await self._handle_message(raw)
+                    # 应用层心跳与消息循环并行，断开时取消
+                    keepalive = asyncio.create_task(self._keepalive(ws))
+                    try:
+                        async for raw in ws:
+                            await self._handle_message(raw)
+                    finally:
+                        keepalive.cancel()
 
                 # 连接被对端正常关闭：退避后重连，避免空转
                 self._connected.clear()
@@ -257,8 +265,27 @@ class WSClient:
         for sub in self._subscriptions:
             await ws.send(json.dumps(sub))
 
+    async def _keepalive(self, ws: Any) -> None:
+        """应用层心跳：OKX 要求空闲约 30s 内发文本 "ping"，否则服务端断连。
+
+        协议层 ping_interval=20 只保 websocket 帧；OKX 网关认的是文本
+        ping/pong——冷门品种长时间无行情会被周期性踢线、反复重连（P2）。
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._keepalive_interval)
+                await ws.send("ping")
+                self._log.debug("ws keepalive ping sent")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self._log.warning(f"ws keepalive failed: {e}")
+
     async def _handle_message(self, raw: str | bytes) -> None:
         """分发一条 WS 消息。"""
+        # 应用层心跳回应：OKX 对文本 "ping" 回文本 "pong"，无 JSON 载荷
+        if isinstance(raw, str) and raw.strip().lower() == "pong":
+            return
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):

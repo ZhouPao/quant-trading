@@ -28,10 +28,14 @@ class InstrumentStorage:
         path = self._path_for(inst_type)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = [self._instrument_to_dict(i) for i in instruments]
-        path.write_text(
+        # 原子写：写一半崩溃会留下截断 JSON，下次 load 直接抛
+        # JSONDecodeError 且无降级（funding/OI/checkpoint 都是 tmp+rename）
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        tmp.replace(path)
         return len(data)
 
     def load_instruments(self, inst_type: str) -> list[Instrument]:

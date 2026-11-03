@@ -11,12 +11,31 @@ parquet 按 UTC 年份分文件存储，同时间戳去重（保留最新）。
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 
 from quant.models.bar import Bar
+
+#: inst_id / bar_size 会被直接拼进文件路径，且可能来自 HTTP 查询参数：
+#: 只允许安全字符，杜绝 ../ 路径穿越（P2）
+_INST_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+_BAR_SIZE_RE = re.compile(r"[A-Za-z0-9]{1,8}")
+
+
+def validate_inst_id(inst_id: str) -> None:
+    """校验 inst_id 可安全用作路径段；非法抛 ValueError。"""
+    if not _INST_ID_RE.fullmatch(inst_id):
+        raise ValueError(f"invalid inst_id: {inst_id!r}")
+
+
+def validate_market_identifiers(inst_id: str, bar_size: str) -> None:
+    """校验 inst_id / bar_size 可安全用作路径段；非法抛 ValueError。"""
+    validate_inst_id(inst_id)
+    if not _BAR_SIZE_RE.fullmatch(bar_size):
+        raise ValueError(f"invalid bar_size: {bar_size!r}")
 
 
 class BarStorage:
@@ -25,6 +44,10 @@ class BarStorage:
     同一 (inst_id, bar_size, year) 落到同一文件；
     写入时若文件已存在，merge + 去重（保留新值，按 ts 覆盖）；
     读取按时间区间返回 Bar 列表。
+
+    写入为原子替换（tmp + rename），读取方不会读到半截文件；
+    两个进程同时写同一文件仍是「后写覆盖」可能丢更新——当前只有
+    sync-candles 单进程写入，若未来多写者需引入文件锁。
     """
 
     def __init__(self, data_dir: Path) -> None:
@@ -64,10 +87,13 @@ class BarStorage:
                 df = df.sort_values("ts").reset_index(drop=True)
                 new_count = len(df)
 
+            # 原子写：先写临时文件再 replace，读取方不会读到半截 parquet
+            tmp = path.with_name(path.name + ".tmp")
             df.to_parquet(
-                path, index=False, engine="pyarrow", compression="zstd",
+                tmp, index=False, engine="pyarrow", compression="zstd",
                 row_group_size=8192,
             )
+            tmp.replace(path)
             written += new_count - old_count
         return written
 
@@ -95,6 +121,7 @@ class BarStorage:
 
     def list_years(self, inst_id: str, bar_size: str) -> list[int]:
         """列出磁盘上已存在的年份文件，按升序。"""
+        validate_inst_id(inst_id)
         inst_type = self._infer_type(inst_id)
         dir_ = self._root / "candles" / inst_type / inst_id / bar_size
         if not dir_.exists():
@@ -109,6 +136,7 @@ class BarStorage:
 
     def list_bar_sizes(self, inst_id: str) -> list[str]:
         """列出磁盘上已有 K 线文件的周期目录（如 ["1H", "4H"]）。"""
+        validate_inst_id(inst_id)
         inst_type = self._infer_type(inst_id)
         dir_ = self._root / "candles" / inst_type / inst_id
         if not dir_.exists():
@@ -120,6 +148,7 @@ class BarStorage:
         )
 
     def _path_for(self, inst_id: str, bar_size: str, year: int) -> Path:
+        validate_market_identifiers(inst_id, bar_size)
         inst_type = self._infer_type(inst_id)
         return self._root / "candles" / inst_type / inst_id / bar_size / f"{year}.parquet"
 
@@ -183,4 +212,4 @@ class BarStorage:
         )
 
 
-__all__ = ["BarStorage"]
+__all__ = ["BarStorage", "validate_inst_id", "validate_market_identifiers"]

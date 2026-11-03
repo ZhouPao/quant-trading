@@ -51,33 +51,39 @@ class _Bucket:
         self._penalized_until = 0.0
 
     def acquire(self, timeout: float = 10.0) -> None:
-        """阻塞直到获取 1 个令牌；超时抛 RateLimitTimeoutError。"""
+        """阻塞直到获取 1 个令牌；超时抛 RateLimitTimeoutError。
+
+        等待在锁外进行：原先持锁 sleep 会让同组的 acquire/penalize/tokens
+        全部被队头阻塞——50011 的惩罚要等当前等待者睡醒才生效（P2）。
+        """
         deadline = time.monotonic() + timeout
-        with self._lock:
-            while True:
-                now = time.monotonic()
-                # 1. 处于惩罚期，先等惩罚结束
+        while True:
+            now = time.monotonic()
+            wait = 0.0
+            with self._lock:
+                # 1. 处于惩罚期：等惩罚结束（锁外睡）
                 if now < self._penalized_until:
                     wait = self._penalized_until - now
-                    if now + wait > deadline:
-                        raise RateLimitTimeoutError(group=self._name, timeout=timeout)
-                    time.sleep(wait)
-                    continue
-                # 2. 补充令牌
-                self._refill(now)
-                # 3. 有令牌，扣减并返回
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                # 4. 令牌不足，等待补充
-                need = 1.0 - self._tokens
-                wait = need / self._cfg.refill_per_sec
-                if now + wait > deadline:
-                    raise RateLimitTimeoutError(group=self._name, timeout=timeout)
-                time.sleep(wait)
+                else:
+                    # 2. 补充令牌
+                    self._refill(now)
+                    # 3. 有令牌，扣减并返回
+                    if self._tokens >= 1.0:
+                        self._tokens -= 1.0
+                        return
+                    # 4. 令牌不足，等待补充
+                    wait = (1.0 - self._tokens) / self._cfg.refill_per_sec
+            if now + wait > deadline:
+                raise RateLimitTimeoutError(group=self._name, timeout=timeout)
+            time.sleep(wait)
 
     def penalize(self, seconds: float = 2.0) -> None:
-        """命中 50011 时强制阻塞该桶并清空令牌。"""
+        """命中 50011 时强制阻塞该桶并清空令牌。
+
+        语义说明（2026-11-03 复核）：惩罚 2s 结束后按组速率补充的令牌量
+        = 2s × refill_per_sec，恰好等于 OKX 的 2s 窗口配额，持续速率仍
+        ≤ 限额——「回满=循环 50011」并不成立，行为保持不变。
+        """
         with self._lock:
             self._penalized_until = max(self._penalized_until, time.monotonic() + seconds)
             self._tokens = 0.0

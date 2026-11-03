@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from quant.foundation.logger import get_logger
-from quant.storage.bar_storage import BarStorage
+from quant.storage.bar_storage import BarStorage, validate_market_identifiers
 from quant.storage.validator import DataValidator, ValidationReport
 
 log = get_logger("storage.quality")
@@ -27,7 +27,8 @@ RULES_ALERT = "data_quality"
 
 
 def report_path(data_dir: Path, inst_id: str, bar_size: str) -> Path:
-    """质量报告落盘路径。"""
+    """质量报告落盘路径。inst/bar 可能来自 HTTP 查询参数，防路径穿越（P2）。"""
+    validate_market_identifiers(inst_id, bar_size)
     return data_dir / "quality" / inst_id / bar_size / "latest.json"
 
 

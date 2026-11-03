@@ -118,6 +118,7 @@ class CandleFetcher:
             # 后续页 after=oldest-1（拿比上次更旧的）
             # 停止：返回空，或 oldest <= cursor（已覆盖到 start）
             next_after = end_ts + 1  # 第一页拿 ts <= end_ts
+            prev_oldest: int | None = None
             while True:
                 batch = self._client.get_history_candles(
                     inst_id=inst_id,
@@ -130,9 +131,18 @@ class CandleFetcher:
                     break
                 # OKX 返回按 ts 倒序（新→旧），转正序
                 bars = sorted(batch, key=lambda b: b.ts)
+                oldest = bars[0].ts
+                # 停滞保护：OKX 异常返回同一页时 oldest 不前进，主循环会
+                # 无限打转（资金费率侧有 stall 检测，K 线侧原先没有，P2）
+                if prev_oldest is not None and oldest >= prev_oldest:
+                    _log.warning(
+                        f"candle page stalled: oldest={oldest} not older than "
+                        f"previous={prev_oldest}, stop main loop"
+                    )
+                    break
+                prev_oldest = oldest
                 # 过滤：只保留 [cursor, end_ts] 区间
                 in_range = [b for b in bars if cursor <= b.ts <= end_ts]
-                oldest = bars[0].ts
                 newest = bars[-1].ts
                 if in_range:
                     saved = self._storage.save_bars(in_range)
@@ -251,6 +261,7 @@ class CandleFetcher:
         all_bars: list[Bar] = []
         # 从 range_end 开始向旧方向翻页
         next_after = range_end + 1
+        prev_oldest: int | None = None
         while True:
             data = self._client.get_history_candles(
                 inst_id=inst_id,
@@ -261,13 +272,21 @@ class CandleFetcher:
             if not data:
                 break
             bars = sorted(data, key=lambda b: b.ts)
+            oldest = bars[0].ts
+            # 停滞保护：与主循环同口径，防止补拉循环无限打转（P2）
+            if prev_oldest is not None and oldest >= prev_oldest:
+                _log.warning(
+                    f"fill page stalled: oldest={oldest} not older than "
+                    f"previous={prev_oldest}, stop filling"
+                )
+                break
+            prev_oldest = oldest
             # 只保留 [range_start, range_end] 内的
             in_range = [
                 b for b in bars
                 if range_start <= b.ts <= range_end
             ]
             all_bars.extend(in_range)
-            oldest = bars[0].ts
             # 推进到本页最旧一根的 -1
             next_after = oldest
             # oldest <= range_start 说明已覆盖到起点

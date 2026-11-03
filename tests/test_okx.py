@@ -185,6 +185,26 @@ class TestRateLimiter:
         # 惩罚期内令牌应严格为 0（_refill 在惩罚期不会补充）
         assert rl.tokens("public") == 0.0
 
+    def test_penalize_not_blocked_by_waiting_acquire(self):
+        """acquire 的等待在锁外：慢速等待者不得阻塞 penalize 生效（P2）。"""
+        import threading
+
+        cfg = {"public": BucketConfig(capacity=1, refill_per_sec=0.5)}
+        rl = RateLimiter(cfg)
+        rl.acquire("public", timeout=0.5)  # 拿走唯一令牌
+
+        def _waiter() -> None:
+            rl.acquire("public", timeout=5.0)  # 需 ~2s 才有令牌
+
+        t = threading.Thread(target=_waiter, daemon=True)
+        t.start()
+        time.sleep(0.1)  # 让 waiter 进入等待（旧实现会在锁内 sleep ~2s）
+        t0 = time.monotonic()
+        rl.penalize("public", seconds=0.1)
+        # 旧实现持锁 sleep，penalize 要等 ~2s；现在必须立即返回
+        assert time.monotonic() - t0 < 0.5
+        t.join(timeout=6)
+
     def test_refill_over_time(self):
         """令牌应随时间补充。"""
         cfg = {"public": BucketConfig(capacity=10, refill_per_sec=100.0)}

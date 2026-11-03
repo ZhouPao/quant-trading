@@ -289,6 +289,30 @@ class TestWsRetryAt:
         )
 
 
+class _RawRecordingWS(_HangingWS):
+    """记录原始发送内容（基类 send 会 json.loads，"ping" 不是 JSON）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raw_sent: list[str] = []
+
+    async def send(self, raw: str) -> None:
+        self.raw_sent.append(raw)
+
+
+class TestWsKeepalive:
+    @pytest.mark.asyncio
+    async def test_sends_app_layer_ping_while_connected(self):
+        """连接空闲时按周期发送文本 "ping"（OKX 应用层心跳，P2）。"""
+        ws = _RawRecordingWS()
+        client = WSClient(connect_fn=FakeConnect(ws), keepalive_interval=0.05)
+        task = asyncio.create_task(client.run())
+        await asyncio.sleep(0.2)
+        await client.close()
+        await task
+        assert any(s == "ping" for s in ws.raw_sent)
+
+
 class TestLivePriceBook:
     def test_update_and_get(self):
         book = LivePriceBook()

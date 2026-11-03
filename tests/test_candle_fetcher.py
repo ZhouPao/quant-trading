@@ -511,3 +511,19 @@ class TestValidatorLeadingGap:
         assert fetcher.fetch("BTC-USDT", "1H", 0, 10 * 3_600_000) == 0
         assert any("empty bars" in m for m in warnings_logged)
 
+
+class TestPaginationStallGuard:
+    def test_stalled_page_terminates(self, tmp_path: Path) -> None:
+        """OKX 异常重复返回同一页时必须停止，不能无限打转（P2）。"""
+        bar = 3_600_000
+        page = _make_bar_sequence(201 * bar, 100)  # [201h..300h] 满页，够不到 start=0
+
+        client = MagicMock()
+        client.get_history_candles.side_effect = lambda **kwargs: list(page)
+
+        fetcher = CandleFetcher(client, tmp_path, page_size=100)
+        total = fetcher.fetch("BTC-USDT", "1H", 0, 300 * bar)
+
+        # 100 根只落盘一次；循环靠停滞保护终止（旧实现会无限打转）
+        assert total == 100
+

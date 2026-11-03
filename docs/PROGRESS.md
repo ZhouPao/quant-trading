@@ -1911,6 +1911,46 @@ dataZoom 绑定、candles confirm）；更新 1 个旧断言（`test_quality.py`
 **过程说明**：本批曾误加一个占位空测试（`pass`），发现后立即删除——如实记录，不掩盖。
 **M2 遗留**：批次四/五（P2 可靠性与性能）。
 
+### 8.64 M2 批次四：可靠性加固 P2（2026-11-03）
+
+**先纠错（审计自查）**：批次三报告里的 **P2-6「限频器惩罚后整桶回满 → 循环 50011」经
+重新推演不成立**——惩罚 2s 结束后按组速率补充的令牌量 = 2s × refill_per_sec，恰好等于
+OKX 的 2s 窗口配额，持续速率仍 ≤ 限额（public：20 张/2s = 10/s 合规）。行为未改，
+仅在 `penalize()` docstring 记录该结论，防止后人再误判。
+
+**P2-7 acquire 持锁 sleep（真缺陷，已修）**：等待期间持有桶锁，同组的
+`acquire/penalize/tokens` 全部被队头阻塞——50011 的惩罚要等当前等待者睡醒（最长
+timeout=10s）才生效。修复：等待计算在锁内、**sleep 移到锁外**循环重试；新增多线程
+回归测试证明 `penalize` 不再被慢速等待者阻塞。
+
+**K 线翻页停滞保护**：OKX 异常重复返回同一页时 `oldest` 不前进，主循环与补拉循环
+都会无限打转（资金费率侧有 stall 检测，K 线侧没有）。修复：两处循环加「页首不前进
+即 break + WARNING」；新增满页重复返回的回归测试（旧实现会挂死）。
+
+**parquet / JSON 原子写**：`BarStorage` 直写目标路径（读方可读到半截文件），
+`InstrumentStorage` 直写 JSON（写一半崩溃 → 下次 load 抛 JSONDecodeError 无降级）。
+修复：统一 tmp + rename；`BarStorage` docstring 说明并发语义（单写者现状下安全，
+多写者需文件锁）。新增测试：save 后无 `.tmp` 残留、merge 路径数据完整。
+
+**路径穿越防护**：`inst_id`/`bar_size`（可来自 HTTP 查询参数）被直接拼进文件路径。
+修复：`BarStorage` 新增字符白名单校验（`[A-Za-z0-9-]`/`[A-Za-z0-9]`），`_path_for`/
+`list_years`/`list_bar_sizes`/`quality.report_path` 全部前置校验，非法抛 ValueError →
+被 service 的异常兜底捕获进 `degraded`，不会 500。新增 `tests/test_storage_hardening.py`。
+
+**WS 应用层心跳**：协议层 `ping_interval=20` 只保 websocket 帧；OKX 网关要求空闲约
+30s 内发**文本** "ping"，冷门品种长时间无行情会被周期性踢线、反复重连。修复：连接
+期间并行任务每 25s 发 "ping"（间隔可配），`pong` 文本静默处理不误报 invalid message；
+新增回归测试。
+
+**验证**：`pytest` 全量 **1691 passed**（+9）；改动文件 `ruff` 全过。纯后端，前端无改动。
+
+**遗留（批次五 + 有意不做）**：
+- 批次五（性能/前端）：parquet mtime 缓存（1m 年文件每 5s 全量解码）、前端轮询
+  seq 守卫、NaN 防御、质量明细缓存失效、输入 debounce。
+- **订阅被拒重试：有意不做**——订阅参数本身非法时盲目重试会造成无限重连循环，
+  需要区分「参数错」（告警人工介入）与「瞬态错」（重试）的语义，当前 error 级日志
+  已可触发告警；留待有真实案例再设计。
+
 ---
 
 ## 9. 相关文档
