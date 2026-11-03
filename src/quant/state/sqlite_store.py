@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import threading
 from decimal import Decimal
@@ -1915,6 +1916,84 @@ class SQLiteStore:
     def get_backtest_metrics(self, run_id: str) -> dict | None:
         row = self._query_one(
             "SELECT * FROM backtest_metrics WHERE run_id = ?", (run_id,)
+        )
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # optimize jobs（MS4-C §10.4 / M4-13 寻优进度落库；表由 A1 的 v10 迁移建立）
+    # ------------------------------------------------------------------
+
+    _OPTIMIZE_JOB_STATUSES = frozenset({"running", "done", "failed", "canceled"})
+
+    def save_optimize_job(
+        self,
+        job_id: str,
+        *,
+        run_id: str,
+        grid: dict,
+        metric: str,
+        n_jobs: int,
+        total: int,
+        created_at: int,
+        status: str = "running",
+    ) -> None:
+        """登记一个寻优任务（M4-13 进度上报的落库基础）。
+
+        `grid` 以 JSON 落库，与 spec §10.4 的 TEXT 列一致；`created_at` 为 epoch
+        毫秒，由调用方传入（与 create_backtest_run 约定一致）。`job_id` 必须唯一，
+        重复登记按主键唯一约束抛 StateError。
+        """
+        if status not in self._OPTIMIZE_JOB_STATUSES:
+            raise ValueError(f"invalid optimize job status: {status!r}")
+        self._execute(
+            """
+            INSERT INTO optimize_jobs
+                (job_id, run_id, grid, metric, n_jobs, total,
+                 completed, status, created_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+            """,
+            (
+                job_id, run_id, json.dumps(grid, ensure_ascii=False), metric,
+                n_jobs, total, status, created_at,
+            ),
+        )
+
+    def update_optimize_progress(self, job_id: str, completed: int) -> bool:
+        """累加已完成组合数；单调更新（仅当比已记录更大才写），任务不存在返回 False。"""
+        return (
+            self._execute(
+                """
+                UPDATE optimize_jobs
+                   SET completed = ?
+                 WHERE job_id = ? AND completed < ?
+                """,
+                (completed, job_id, completed),
+            )
+            > 0
+        )
+
+    def finish_optimize_job(
+        self, job_id: str, status: str, *, finished_at: int
+    ) -> bool:
+        """结束任务：置终态（done/failed/canceled）与结束时间；不存在返回 False。"""
+        if status not in self._OPTIMIZE_JOB_STATUSES:
+            raise ValueError(f"invalid optimize job status: {status!r}")
+        return (
+            self._execute(
+                """
+                UPDATE optimize_jobs
+                   SET status = ?, finished_at = ?
+                 WHERE job_id = ?
+                """,
+                (status, finished_at, job_id),
+            )
+            > 0
+        )
+
+    def get_optimize_job(self, job_id: str) -> dict | None:
+        """查询单个寻优任务（供 P3 的 GET /api/optimize/{job_id} 复用）。"""
+        row = self._query_one(
+            "SELECT * FROM optimize_jobs WHERE job_id = ?", (job_id,)
         )
         return dict(row) if row else None
 

@@ -1568,6 +1568,29 @@ breaking）才修。即"非破坏修复 critical"在实际解析里不成立。
 vite5→6 / echarts5→6 / vitest 大版本），需 `build + typecheck + vitest` 全量回归 + 重建
 `web/dist`，另行排期，不在本次范围。
 
+### 8.52 A2 · P1：optimize_jobs 落库方法（2026-11-03）
+
+**范围**：A2（M4-13 寻优进度上报）分 5 期，本期为 P1——只给 state 层加 `optimize_jobs`
+的写/查方法；表由 A1（v10 迁移）建立，本期不碰任何运行逻辑与前后端契约。
+
+**改动（仅 state 层，符合迁移/不变量纪律）**：
+- `src/quant/state/sqlite_store.py` 新增 4 个方法，全部复用既有 `_execute`/`_query_one`
+  与 `self._lock` 线程安全约定，`created_at` 由调用方传 epoch 毫秒（与 `create_backtest_run` 一致）：
+  - `save_optimize_job`：`INSERT`，`grid` 以 `json.dumps` 落库；`job_id` 唯一，重复登记按主键
+    约束抛 `StateError`；状态白名单 `{running,done,failed,canceled}`，非法抛 `ValueError`。
+  - `update_optimize_progress`：单调更新（`completed < ?`），回退进度不覆盖已记录最大值；
+    任务不存在返回 `False`。
+  - `finish_optimize_job`：置终态 + `finished_at`；不存在返回 `False`；同样校验状态。
+  - `get_optimize_job`：按 `job_id` 查单行，供 P3 的 `GET /api/optimize/{job_id}` 复用。
+- `tests/test_sqlite_store.py` 新增 `TestOptimizeJobs`（6 例）：落库+读回（含 grid JSON 往返）、
+  进度单调、结束、缺失返回 False、重复 job_id 抛 `StateError`、非法 status 抛 `ValueError`。
+
+**验证**：`ruff check` 全过；`pytest tests/test_sqlite_store.py` **78 passed**（原 72 + 6），
+零回归；`read_lints` 零告警。
+
+**未完成（留待后续期）**：P2 后端登记式任务 + 进度落库、P3 进度查询 API、P4 前端进度条、
+P5（可选）Redis 实时轮询。M4-13 在看板的可见进度仍待 P4 完成才算闭环。
+
 ---
 
 ## 9. 相关文档

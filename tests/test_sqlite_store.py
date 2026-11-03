@@ -1,6 +1,7 @@
 """SQLiteStore 单元测试（spec §11）。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ import pytest
 from quant.backtest.order import Fill, Order
 from quant.backtest.position import Position
 from quant.backtest.signal import Signal
+from quant.foundation.errors import StateError
 from quant.state.sqlite_store import SCHEMA_VERSION, SQLiteStore
 
 
@@ -516,6 +518,88 @@ class TestMigrations:
             "completed", "status", "created_at", "finished_at",
         } <= columns
         assert row == ("0.12",)
+
+
+class TestOptimizeJobs:
+    """optimize_jobs 落库（A1 建表，P1 写入方法，M4-13 进度上报基础）。"""
+
+    def test_save_and_get(self, store) -> None:
+        grid = {"fast_len": [5, 10, 20], "slow_len": [20, 50, 100]}
+        store.save_optimize_job(
+            "job-1",
+            run_id="r-1",
+            grid=grid,
+            metric="sharpe",
+            n_jobs=4,
+            total=9,
+            created_at=1_700_000_000_000,
+        )
+
+        row = store.get_optimize_job("job-1")
+
+        assert row is not None
+        assert row["job_id"] == "job-1"
+        assert row["run_id"] == "r-1"
+        assert row["status"] == "running"
+        assert row["completed"] == 0
+        assert row["n_jobs"] == 4
+        assert row["total"] == 9
+        assert row["created_at"] == 1_700_000_000_000
+        assert row["finished_at"] is None
+        # grid 以 JSON 落库，读回应能原样解析
+        assert json.loads(row["grid"]) == grid
+
+    def test_progress_is_monotonic(self, store) -> None:
+        store.save_optimize_job(
+            "job-2", run_id="r-2", grid={"k": [1]}, metric="sharpe",
+            n_jobs=2, total=10, created_at=1,
+        )
+        assert store.update_optimize_progress("job-2", 5) is True
+        assert store.get_optimize_job("job-2")["completed"] == 5
+        # 回退的进度不得覆盖已记录的最大值
+        assert store.update_optimize_progress("job-2", 3) is False
+        assert store.get_optimize_job("job-2")["completed"] == 5
+        assert store.update_optimize_progress("job-2", 8) is True
+        assert store.get_optimize_job("job-2")["completed"] == 8
+
+    def test_finish(self, store) -> None:
+        store.save_optimize_job(
+            "job-3", run_id="r-3", grid={"k": [1]}, metric="sharpe",
+            n_jobs=1, total=1, created_at=1,
+        )
+        assert store.finish_optimize_job("job-3", "done", finished_at=999) is True
+        row = store.get_optimize_job("job-3")
+        assert row["status"] == "done"
+        assert row["finished_at"] == 999
+
+    def test_missing_job_returns_false(self, store) -> None:
+        assert store.update_optimize_progress("nope", 1) is False
+        assert store.finish_optimize_job("nope", "done", finished_at=1) is False
+        assert store.get_optimize_job("nope") is None
+
+    def test_duplicate_job_id_raises(self, store) -> None:
+        store.save_optimize_job(
+            "job-4", run_id="r-4", grid={"k": [1]}, metric="sharpe",
+            n_jobs=1, total=1, created_at=1,
+        )
+        with pytest.raises(StateError):
+            store.save_optimize_job(
+                "job-4", run_id="r-4", grid={"k": [1]}, metric="sharpe",
+                n_jobs=1, total=1, created_at=1,
+            )
+
+    def test_invalid_status_raises(self, store) -> None:
+        with pytest.raises(ValueError):
+            store.save_optimize_job(
+                "job-5", run_id="r-5", grid={"k": [1]}, metric="sharpe",
+                n_jobs=1, total=1, created_at=1, status="bogus",
+            )
+        store.save_optimize_job(
+            "job-6", run_id="r-6", grid={"k": [1]}, metric="sharpe",
+            n_jobs=1, total=1, created_at=1,
+        )
+        with pytest.raises(ValueError):
+            store.finish_optimize_job("job-6", "bogus", finished_at=1)
 
 
 class TestRiskEvents:
