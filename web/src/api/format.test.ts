@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { num, signed } from "../api";
+import { compactAmount, num, signed } from "../api";
 
 describe("金额格式化", () => {
   it("num 保留千分位与固定小数位", () => {
@@ -14,5 +14,12 @@ describe("金额格式化", () => {
     expect(signed("0")).toBe("0.00");
     expect(signed(null)).toBe("—");
     expect(signed(undefined)).toBe("—");
+  });
+
+  it("compactAmount 按量级缩写，小值保留两位小数", () => {
+    expect(compactAmount("2500000")).toBe("2.50M");
+    expect(compactAmount("12300")).toBe("12.3k");
+    expect(compactAmount("987.65")).toBe("987.65");
+    expect(compactAmount(null)).toBe("—");
   });
 });

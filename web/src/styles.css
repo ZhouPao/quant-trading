@@ -3725,7 +3725,11 @@ tbody tr:hover {
   margin-top: 6px;
 }
 
-/* 今日盈亏：数字列右对齐 + 等宽数字，正负号才好逐行扫读 */
+/* 今日盈亏：汇总行 5 项（含成交额），数字列右对齐 + 等宽数字 */
+.today-pnl .kv {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .today-pnl table th:nth-child(n + 2),
 .today-pnl table td:nth-child(n + 2) {
   text-align: right;

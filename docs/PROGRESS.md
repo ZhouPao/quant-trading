@@ -1768,7 +1768,9 @@ alerts 每轮拉 200 条、页面不可见时暂停轮询 / 失败退避）；P3
 
 **验证**：`npx tsc --noEmit` 通过；`npm test` **20 passed**；`npm run build` 通过。
 
-**未做**：`turnover`（成交额）后端已返回但前端仍未展示；如需可加到汇总行或品种副标题。
+**后续补充**：`today_pnl` 新增 `total_turnover` 字段（成功与降级分支都带），前端汇总行加
+「成交额」并用 `compactAmount` 缩写（≥1M 用 M、≥1k 用 k、否则两位小数）；`.today-pnl .kv`
+扩为 5 列。`format.test.ts` 补 `compactAmount` 用例。
 
 ---
 

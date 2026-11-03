@@ -36,6 +36,7 @@ import {
   flattenPositions,
   METRIC_LABELS,
   metricText,
+  compactAmount,
   num,
   pct,
   signed,
@@ -911,6 +912,10 @@ export default function App() {
                 <div>
                   <dt>手续费</dt>
                   <dd className="dim">{num(todayPnl.total_fee, 2)}</dd>
+                </div>
+                <div>
+                  <dt>成交额</dt>
+                  <dd className="dim">{compactAmount(todayPnl.total_turnover)}</dd>
                 </div>
                 <div>
                   <dt>总盈亏</dt>

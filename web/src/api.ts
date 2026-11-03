@@ -105,6 +105,7 @@ export type TodayPnlResponse = {
   total_realized: string;
   total_unrealized: string;
   total_fee: string;
+  total_turnover: string;
   total_pnl: string;
   degraded: string[];
 };
@@ -1776,6 +1777,22 @@ export function num(value: string | number | null | undefined, digits = 2): stri
   return parsed.toLocaleString("en-US", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
+  });
+}
+
+/** 金额缩写：≥1M 用 M、≥1k 用 k，否则两位小数；成交额这类量级跨度大的值。 */
+export function compactAmount(
+  value: string | number | null | undefined,
+): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "—";
+  const abs = Math.abs(parsed);
+  if (abs >= 1_000_000) return `${(parsed / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${(parsed / 1_000).toFixed(1)}k`;
+  return parsed.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   });
 }
 

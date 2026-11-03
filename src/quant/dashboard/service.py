@@ -1374,6 +1374,7 @@ class DashboardService:
                 "total_realized": "0",
                 "total_unrealized": "0",
                 "total_fee": "0",
+                "total_turnover": "0",
                 "total_pnl": "0",
                 "degraded": ["sqlite"],
             }
@@ -1442,11 +1443,13 @@ class DashboardService:
         total_realized = Decimal("0")
         total_unrealized = Decimal("0")
         total_fee = Decimal("0")
+        total_turnover = Decimal("0")
 
         for data in inst_data.values():
             total_realized += data["realized"]
             total_unrealized += data["unrealized"]
             total_fee += data["fee"]
+            total_turnover += data["turnover"]
             instruments.append({
                 "inst_id": data["inst_id"],
                 "realized": str(data["realized"]),
@@ -1469,6 +1472,7 @@ class DashboardService:
             "total_realized": str(total_realized),
             "total_unrealized": str(total_unrealized),
             "total_fee": str(total_fee),
+            "total_turnover": str(total_turnover),
             "total_pnl": str(total_realized + total_unrealized),
             "degraded": [],
         }
