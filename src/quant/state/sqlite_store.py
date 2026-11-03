@@ -320,6 +320,28 @@ _MIGRATIONS: list[str] = [
     """
     ALTER TABLE backtest_metrics ADD COLUMN funding_cost TEXT;
     """,
+    # v9 -> v10：参数寻优任务落库（MS4-C §6.2 / §10.4，AGENTS.md 已知问题 #1）
+    #
+    # 详设 §10.4 给出完整 DDL，但迁移列表里长期只有「留到各自切片再加」的占位
+    # 注释，optimize_jobs 表从未真正创建。当前 optimize 命令同步跑完即返，进度只
+    # 活在 Redis（TTL 300s），dashboard 重启后查不到「跑到哪了」。
+    # 本段只补齐这张表：建表用 IF NOT EXISTS，天然幂等，不参与任何运行逻辑；
+    # 真正的进度上报（M4-13，写 optimize_jobs.completed + Redis 1s 轮询）属独立
+    # 功能，留待后续切片。SCHEMA_VERSION 会随列表长度自动变为 10。
+    """
+    CREATE TABLE IF NOT EXISTS optimize_jobs (
+        job_id      TEXT PRIMARY KEY,
+        run_id      TEXT REFERENCES backtest_runs(run_id),
+        grid        TEXT NOT NULL,          -- JSON
+        metric      TEXT NOT NULL,
+        n_jobs      INTEGER NOT NULL,
+        total       INTEGER NOT NULL,
+        completed   INTEGER NOT NULL DEFAULT 0,
+        status      TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        finished_at INTEGER
+    );
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。

@@ -1528,6 +1528,29 @@ dashboard）。
 
 ---
 
+### 8.50 A1：补齐 optimize_jobs 表迁移（v9 → v10，2026-11-03）
+
+**背景**：`AGENTS.md` 已知问题 #1 —— 详设 `MS4-C §10.4` 早已给出 `optimize_jobs` 完整
+DDL，但 `_MIGRATIONS` 里只有「留到各自切片再加」的占位注释，表从未被创建；`feature-inventory`
+甚至误记成「`optimize_jobs` 已有表」。这导致 M4-13 的进度上报（dashboard 重启后仍可查
+「跑到哪了」）缺少落库基础。
+
+**改动（仅 state 层，符合迁移硬规则 #2）**：
+- `src/quant/state/sqlite_store.py::_MIGRATIONS` 末尾追加第 9 段（`v9 → v10`），用
+  `CREATE TABLE IF NOT EXISTS optimize_jobs (...)` 照 spec §10.4 原样建表；`IF NOT EXISTS`
+  天然幂等，不改任何历史 DDL，`SCHEMA_VERSION` 自动变 10。
+- `tests/test_sqlite_store.py` 新增 `test_v9_db_gains_optimize_jobs_table`：模拟 v9 存量库
+  升级到 v10，断言 `optimize_jobs` 表与 10 个列存在、老数据不丢、`user_version == SCHEMA_VERSION`。
+
+**验证**：`ruff check` 全过；`pytest tests/test_sqlite_store.py` **72 passed**（原 71 + 1），
+零回归；`read_lints` 零告警。
+
+**范围边界**：A1 只建表、不参与任何运行逻辑。真正接通 M4-13 进度上报（把 `cli/optimize.py`
+改登记式任务、写 `optimize_jobs.completed` + Redis 轮询、前端进度条）属独立功能 **A2**，
+不在本次范围，见 `feature-inventory` §3.4 / 后续优先级第 4 条。
+
+---
+
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）

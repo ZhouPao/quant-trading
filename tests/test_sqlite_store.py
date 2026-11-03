@@ -474,6 +474,49 @@ class TestMigrations:
         assert "funding_cost" in columns
         assert row == ("0.12", None)
 
+    def test_v9_db_gains_optimize_jobs_table(self, tmp_path) -> None:
+        """存量库（v9）无 optimize_jobs 表，升级到 v10 后应补齐（AGENTS.md 已知问题 #1）。"""
+        path = tmp_path / "quant.db"
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE backtest_metrics (
+                run_id TEXT PRIMARY KEY,
+                total_return TEXT
+            );
+            INSERT INTO backtest_metrics VALUES ('r-old', '0.12');
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA user_version = 9")
+        conn.commit()
+        conn.close()
+
+        SQLiteStore(path).close()
+
+        conn = sqlite3.connect(str(path))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
+                SCHEMA_VERSION
+            )
+            tables = self._tables(path)
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(optimize_jobs)")
+            }
+            row = conn.execute(
+                "SELECT total_return FROM backtest_metrics"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert "optimize_jobs" in tables
+        assert {
+            "job_id", "run_id", "grid", "metric", "n_jobs", "total",
+            "completed", "status", "created_at", "finished_at",
+        } <= columns
+        assert row == ("0.12",)
+
 
 class TestRiskEvents:
     """risk_events 落库与查询（MS4-B §11.1）。"""
