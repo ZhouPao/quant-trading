@@ -108,6 +108,9 @@ class WSClient:
         self._last_error_ts: int | None = None
         self._connected_since: int | None = None
         self._next_delay: float | None = None
+        # 下次重连的墙钟时刻（UTC ms）：看板据此显示真倒计时，而不是把
+        # 退避总时长当静态快照反复显示（P1 口径）
+        self._next_retry_at: int | None = None
         # 当前退避基数（每失败一次翻倍，封顶 max_reconnect_delay）
         self._current_delay = reconnect_delay
 
@@ -124,6 +127,7 @@ class WSClient:
             "last_error_ts": self._last_error_ts,
             "connected_since": self._connected_since,
             "next_delay": None if self._next_delay is None else round(self._next_delay, 1),
+            "next_retry_at": self._next_retry_at,
         }
 
     def _jitter(self, delay: float) -> float:
@@ -138,7 +142,9 @@ class WSClient:
         self._failures += 1
         self._last_error = error[:200]
         self._last_error_ts = _now_ms()
-        return self._jitter(self._current_delay)
+        wait = self._jitter(self._current_delay)
+        self._next_retry_at = _now_ms() + int(wait * 1000)
+        return wait
 
     async def subscribe(
         self,
@@ -180,6 +186,7 @@ class WSClient:
                     # 连上即视为恢复：失败计数清零，退避回到起点
                     self._current_delay = self._reconnect_delay
                     self._next_delay = None
+                    self._next_retry_at = None
                     self._failures = 0
                     self._connected_since = _now_ms()
                     self._connected.set()

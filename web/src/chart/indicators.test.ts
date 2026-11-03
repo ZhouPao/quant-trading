@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { atr, boll, ema, kdj, macd, pivotLevels, rma, sma, supertrend } from "./indicators";
+import { buildChartOption, defaultZoom, formatTime } from "./options";
 import { mergeSettings, parsePeriods, type Bar } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -138,5 +139,40 @@ describe("设置解析", () => {
       ma: { periods: [5, "x", 20, 0, -1] },
     });
     expect(partial.ma.periods).toEqual([5, 20]);
+  });
+});
+
+describe("图表时间轴与缩放", () => {
+  it("formatTime 统一按 UTC+8（与全站 stamp 同口径，P1）", () => {
+    // 2026-11-03 16:00:00 UTC == 2026-11-04 00:00 +08
+    const ts = Date.UTC(2026, 10, 3, 16, 0, 0);
+    expect(formatTime(ts, "1H")).toBe("11-04 00:00");
+    expect(formatTime(ts, "1D")).toBe("11-04");
+  });
+
+  it("dataZoom 绑定全部网格且带 start/end（P1：原先被 spread 覆盖）", () => {
+    const bars: Bar[] = [
+      { ts: 0, open: 1, high: 2, low: 0.5, close: 1.5, vol: 10 },
+      { ts: 3_600_000, open: 1.5, high: 2.5, low: 1, close: 2, vol: 12 },
+    ];
+    const option = buildChartOption({
+      bars,
+      settings: DEFAULT_SETTINGS,
+      fills: [],
+      position: null,
+      bar: "1H",
+      zoom: null,
+    }) as unknown as {
+      dataZoom: { xAxisIndex?: number[]; start?: number; end?: number }[];
+    };
+
+    // 默认设置开 VOL+MACD → 3 个网格，缩放必须绑全部
+    const zoom = defaultZoom(bars.length);
+    expect(option.dataZoom).toHaveLength(2);
+    for (const dz of option.dataZoom) {
+      expect(dz.xAxisIndex).toEqual([0, 1, 2]);
+      expect(dz.start).toBeCloseTo(zoom.start);
+      expect(dz.end).toBeCloseTo(zoom.end);
+    }
   });
 });

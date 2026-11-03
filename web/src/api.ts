@@ -505,6 +505,8 @@ export type CandleRow = {
   low: string;
   close: string;
   vol: string;
+  /** 0=未收盘（最后一根还会变）、1=已收盘（P1 契约） */
+  confirm: number;
 };
 
 export type CandleFill = {
@@ -1004,6 +1006,8 @@ export type WsStatus = {
   last_error_ts: number | null;
   connected_since: number | null;
   next_delay: number | null;
+  /** 下次重连墙钟时刻（UTC ms）：前端按本地时钟倒数（P1 口径） */
+  next_retry_at: number | null;
 };
 
 export type ProcessItem = {
@@ -1237,7 +1241,13 @@ export async function fetchReports(signal: AbortSignal, limit = 20) {
 
 /** 数据质量报告摘要列表；candles 每轮同步后刷新。 */
 export async function fetchQuality(signal: AbortSignal) {
-  return getJson<QualityListResponse>("/api/quality", signal);
+  const data = await getJson<QualityListResponse>("/api/quality", signal);
+  // 兜底：旧后端缺字段时不能让渲染期 .length 崩溃（与 fetchAlertStats 等一致）
+  return {
+    ...data,
+    reports: data.reports ?? [],
+    degraded: data.degraded ?? [],
+  };
 }
 
 /** 单个品种/周期的完整报告（点开摘要行时才拉）。 */
@@ -1246,8 +1256,16 @@ export async function fetchQualityReport(
   instId: string,
   barSize: string,
 ) {
-  const query = new URLSearchParams({ inst_id: instId, bar_size: barSize });
-  return getJson<QualityDetailResponse>(`/api/quality?${query}`, signal);
+  const query = new URLSearchParams({
+    inst_id: encodeURIComponent(instId),
+    bar_size: encodeURIComponent(barSize),
+  });
+  const data = await getJson<QualityDetailResponse>(
+    `/api/quality?${query}`,
+    signal,
+  );
+  // 兜底：report 键缺失（而非 null）会让 QualityDetail 解引用崩溃
+  return { ...data, report: data.report ?? null, degraded: data.degraded ?? [] };
 }
 
 export type DeadLetterItem = {
@@ -1846,7 +1864,8 @@ export function compactQty(value: string | null | undefined): string {
 
 // 后端日切 / 报表按 UTC+8（timeline since、today-pnl day_start），
 // 前端统一按 UTC+8 呈现，避免非 UTC+8 环境下「今日」边界与显示时间错位。
-const TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
+// 图表横轴（options.ts）共用同一口径，勿在此之外另立时区真相。
+export const TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 function pad2(value: number): string {
   return String(value).padStart(2, "0");

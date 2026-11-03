@@ -290,6 +290,8 @@ def _ws_status(raw: dict | None) -> dict[str, object] | None:
         "next_delay": (
             float(next_delay) if isinstance(next_delay, (int, float)) else None
         ),
+        # 下次重连墙钟时刻（UTC ms）：前端按本地时钟倒数（P1 口径）
+        "next_retry_at": _child_int(raw, "next_retry_at"),
     }
 
 
@@ -1533,14 +1535,11 @@ class DashboardService:
 
         传 `inst_id`+`bar_size` 返回单份完整报告（含 gaps/invalid_ohlc）；
         不传参返回全部 `latest.json` 的摘要列表。
+        参数只传一个由路由层直接 422：这里的响应形状必须与
+        QualityListResponse / QualityDetailResponse 之一严格匹配，
+        否则前端按错误形状解析会 TypeError（P1）。
         """
         now = int(time.time() * 1000)
-        if bool(inst_id) != bool(bar_size):
-            return {
-                "ts": now,
-                "error": "inst_id 与 bar_size 需要同时提供",
-                "degraded": ["quality"],
-            }
         reporter = QualityReporter(self._settings.storage.data_dir)
         try:
             if inst_id and bar_size:
@@ -1557,6 +1556,16 @@ class DashboardService:
             reports = await asyncio.to_thread(reporter.summaries)
         except Exception as e:  # noqa: BLE001
             log.warning(f"quality read failed: {e}")
+            # 形状必须与调用模式一致：detail 模式也要带 report 键（null），
+            # 否则前端 QualityDetail 对 undefined 解引用直接崩（P1）
+            if inst_id and bar_size:
+                return {
+                    "ts": now,
+                    "inst_id": inst_id,
+                    "bar_size": bar_size,
+                    "report": None,
+                    "degraded": ["quality"],
+                }
             return {"ts": now, "reports": [], "degraded": ["quality"]}
         return {"ts": now, "reports": reports, "degraded": []}
 
@@ -2108,6 +2117,8 @@ class DashboardService:
                     "low": str(b.low),
                     "close": str(b.close),
                     "vol": str(b.vol),
+                    # 0=未收盘（最后一根还在变）、1=已收盘；前端据此标注（P1 契约）
+                    "confirm": b.confirm,
                 }
                 for b in bars[-limit:]
             ],

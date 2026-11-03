@@ -1646,6 +1646,73 @@ class TestCandles:
 
         assert result["position"] is None
 
+    async def test_bars_carry_confirm(self, candle_env) -> None:
+        """confirm 必须下发：前端要能区分「最后一根未收盘」（P1 契约）。"""
+        service, _store, settings = candle_env
+        BarStorage(settings.storage.data_dir).save_bars(
+            self._bars(20, NOW - 20 * self.HOUR)
+        )
+
+        result = await service.candles(limit=20)
+
+        assert result["bars"], "应有 K 线"
+        assert all("confirm" in bar for bar in result["bars"])
+        assert result["bars"][-1]["confirm"] in (0, 1)
+
+
+class TestQualityApi:
+    """M2-15 质量接口：响应形状必须与前端类型严格匹配（错形状会 TypeError）。"""
+
+    LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
+
+    async def test_partial_params_rejected_with_422(
+        self, env, tmp_path
+    ) -> None:
+        """参数只传一个直接 422，不再返回 200 + 无法解析的形状（P1）。"""
+        service, _store, _redis, _settings = env
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            res = await client.get(
+                "/api/quality",
+                params={"inst_id": "BTC-USDT"},
+                headers=self.LOCAL,
+            )
+
+        assert res.status_code == 422
+
+    async def test_detail_degraded_keeps_report_shape(
+        self, env, monkeypatch, tmp_path
+    ) -> None:
+        """detail 模式异常时也要带 report 键（null），否则前端解引用崩（P1）。"""
+        service, _store, _redis, _settings = env
+
+        class _Boom:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def load(self, *_args, **_kwargs) -> None:
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr("quant.dashboard.service.QualityReporter", _Boom)
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            res = await client.get(
+                "/api/quality",
+                params={"inst_id": "BTC-USDT", "bar_size": "1H"},
+                headers=self.LOCAL,
+            )
+
+        body = res.json()
+        assert res.status_code == 200
+        assert body["report"] is None
+        assert "quality" in body["degraded"]
+
 
 class TestKillSwitch:
     LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}

@@ -1,4 +1,5 @@
 import type { EChartsOption } from "echarts";
+import { TZ_OFFSET_MS } from "../api";
 import {
   boll,
   kdj,
@@ -254,6 +255,8 @@ export function buildChartOption(input: BuildInput): EChartsOption {
     };
   });
 
+  const zoom = input.zoom ?? defaultZoom(bars.length);
+
   return {
     animation: false,
     backgroundColor: "transparent",
@@ -278,11 +281,21 @@ export function buildChartOption(input: BuildInput): EChartsOption {
         kdj: kdjValues,
       }),
     },
+    // start/end 必须合进同一份 dataZoom：原先 ...zoomOption 的第二次 spread
+    // 会把带 xAxisIndex/滑块样式的配置整个覆盖掉，缩放只作用于主图，
+    // VOL/MACD/KDJ 副图不跟随且样式丢失（P1）
     dataZoom: [
-      { type: "inside", xAxisIndex: allIndexes(grids.length) },
+      {
+        type: "inside",
+        xAxisIndex: allIndexes(grids.length),
+        start: zoom.start,
+        end: zoom.end,
+      },
       {
         type: "slider",
         xAxisIndex: allIndexes(grids.length),
+        start: zoom.start,
+        end: zoom.end,
         height: 18,
         bottom: 8,
         borderColor: COLOR.axis,
@@ -293,16 +306,6 @@ export function buildChartOption(input: BuildInput): EChartsOption {
       },
     ],
     series,
-    ...zoomOption(input.zoom ?? defaultZoom(bars.length)),
-  } as EChartsOption;
-}
-
-function zoomOption(zoom: ZoomRange): EChartsOption {
-  return {
-    dataZoom: [
-      { type: "inside", start: zoom.start, end: zoom.end },
-      { type: "slider", start: zoom.start, end: zoom.end },
-    ],
   } as EChartsOption;
 }
 
@@ -525,11 +528,13 @@ function compact(value: number): string {
   return value.toFixed(2);
 }
 
+/** 图表横轴/tooltip 统一按 UTC+8（与全站 stamp、后端日切同口径）。
+ *  原先用浏览器本地时区，非 UTC+8 机器上同一根 bar 在图上和其它卡片对不上（P1）。 */
 export function formatTime(ts: number, bar: string): string {
-  const date = new Date(ts);
+  const date = new Date(ts + TZ_OFFSET_MS);
   const pad = (value: number) => String(value).padStart(2, "0");
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
+  const month = pad(date.getUTCMonth() + 1);
+  const day = pad(date.getUTCDate());
   if (/^(1D|1W|1M|1Dutc)$/i.test(bar)) return `${month}-${day}`;
-  return `${month}-${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${month}-${day} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 }

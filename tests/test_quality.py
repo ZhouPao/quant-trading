@@ -639,8 +639,8 @@ class TestQualityApi:
             missing = await service.quality("BTC-USDT", "4H")
             assert missing["report"] is None
 
-            partial = await service.quality("BTC-USDT", None)
-            assert "error" in partial
+            # 参数不齐已上移到路由层直接 422（见 test_dashboard.py::TestQualityApi），
+            # service 层不再产出 200 + error 的第三种形状
         finally:
             store.close()
             await redis.aclose()

@@ -1873,6 +1873,44 @@ client 关闭；补 CLI 回归测试（此前 0 覆盖）。
 **M2 审计遗留**：批次三（P1 契约/显示族：quality API 异常形状、dataZoom、图表时区、
 WS 倒计时、candles confirm、SWAP vol 口径）→ 批次四/五（P2 可靠性与性能）。
 
+### 8.63 M2 批次三：契约/口径/显示族 P1×6（2026-11-03）
+
+**P1-1 quality API 形状**（前后端）：detail 模式异常分支丢 `report` 键、参数不齐返回
+200+error 第三种形状（与 list/detail 都不匹配）→ 前端 `QualityDetail` 解引用 TypeError。
+修复：service 异常分支按模式带 `report: null`；参数不齐上移路由层 **422**；
+`fetchQuality`/`fetchQualityReport` 补空值兜底 + inst/bar URL 编码。
+
+**P1-2 dataZoom 被 spread 覆盖**（前端）：`...zoomOption` 的第二次 spread 把带
+`xAxisIndex`/滑块样式的配置整个覆盖 → 缩放只作用于主图、VOL/MACD/KDJ 副图不跟随、
+滑块样式丢失，且每次 5s 轮询重绘都复现。修复：start/end 合并进单一 dataZoom 配置，
+删除 `zoomOption`；新增测试断言副图网格被绑定。
+
+**P1-3 图表时区改 UTC+8**（前端）：横轴/tooltip 原用浏览器本地时区，与全站
+`stamp`/后端日切对不上。修复：`formatTime` 用共享的 `TZ_OFFSET_MS`（api.ts 导出，
+单一来源），`getHours→getUTCHours`；新增测试。
+
+**P1-4 WS「重连倒计时」改真倒计时**（前后端）：原先显示退避总时长的静态快照
+（30s 退避会连续多轮显示同一个"30s"）。修复：`WSClient` 记录下次重连墙钟时刻
+`next_retry_at`（断线时设置、连上清空，`next_delay` 保留兼容），`_ws_status` 白名单
+放行，前端按本地时钟倒数；worker 在线但 WS 心跳过期时显示「状态未知」而非整行消失。
+
+**P1-5 candles 下发 `confirm`**（前后端）：前端无法区分未收盘 bar。修复：响应带
+`confirm`（0=未收盘/1=已收盘），`CandleRow` 类型同步；图表页脚对未收盘最后一根
+显示「最后 1 根未收盘，数值还会变」。
+
+**P1-6 SWAP/FUTURES 成交量口径**（后端）：OKX 合约 idx5 `vol` 单位是**张**，
+idx6 `volCcy` 才是基础币量——原先统一取 idx5，一旦同步合约成交量即差 ctVal 倍。
+修复：`from_okx_raw` 按 inst 后缀区分（`-SWAP`/`-FUTURES` 取 idx6），现货不变；
+新增 SWAP 解析测试。
+
+**测试**：+7 新用例（quality 422/降级形状、WS retry、SWAP 口径、formatTime、
+dataZoom 绑定、candles confirm）；更新 1 个旧断言（`test_quality.py` 参数不齐的
+200+error 行为已上移路由层）。**验证**：`pytest` 全量 **1682 passed**；
+`tsc --noEmit` 通过；`npm test` **25 passed**；`npm run build` 通过；`ruff` 全过。
+
+**过程说明**：本批曾误加一个占位空测试（`pass`），发现后立即删除——如实记录，不掩盖。
+**M2 遗留**：批次四/五（P2 可靠性与性能）。
+
 ---
 
 ## 9. 相关文档

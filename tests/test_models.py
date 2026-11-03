@@ -83,6 +83,27 @@ def test_bar_from_okx_raw_normal():
     assert b.bar_size == "1H"
 
 
+def test_bar_from_okx_raw_swap_vol_uses_volccy():
+    """SWAP 的 idx5 vol 单位是张，基础币量在 idx6 volCcy（= 张数×ctVal）。
+
+    统一成基础币口径，否则合约成交量与现货差 ctVal 倍（P1 口径）。
+    """
+    raw = [
+        "1700000000000",
+        "50000.0",
+        "50500.5",
+        "49500.0",
+        "50200.0",
+        "1234",  # vol（张数）
+        "12.34",  # volCcy（基础币量，1234 张 × ctVal=0.01）
+        "620000.7",  # volCcyQuote
+        "1",
+    ]
+    b = Bar.from_okx_raw(raw, inst_id="BTC-USDT-SWAP", bar_size="1H")
+    assert b.vol == Decimal("12.34")
+    assert b.vol_quote == Decimal("620000.7")
+
+
 def test_bar_from_okx_raw_too_short():
     with pytest.raises(ValueError, match=">=9 elements"):
         Bar.from_okx_raw(["1", "2"], inst_id="BTC-USDT", bar_size="1H")

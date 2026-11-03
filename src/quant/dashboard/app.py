@@ -299,6 +299,13 @@ def create_app(
         inst_id: str | None = Query(None),
         bar_size: str | None = Query(None),
     ) -> JSONResponse:
+        # 参数不齐直接 422：原先返回 200 + error 形状，与 list/detail 两个
+        # 响应类型都不匹配，前端按任一形状解析都会 TypeError（P1）
+        if bool(inst_id) != bool(bar_size):
+            raise HTTPException(
+                status_code=422,
+                detail="inst_id 与 bar_size 需要同时提供",
+            )
         return JSONResponse(await service.quality(inst_id, bar_size))
 
     @app.get("/api/pnl")

@@ -1955,6 +1955,10 @@ tbody tr.row-active td:first-child {
   background: rgba(8, 10, 9, 0.6);
 }
 
+.chart-stale {
+  color: var(--warn);
+}
+
 .chart-foot {
   display: flex;
   flex-wrap: wrap;

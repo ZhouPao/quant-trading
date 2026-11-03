@@ -3659,6 +3659,11 @@ function ChartPanel() {
       <div className="chart-foot">
         <span>数据来源：本地 parquet（{data?.bars.length ?? 0} 根）</span>
         <span>成交点来自 SQLite fills</span>
+        {data &&
+          data.bars.length > 0 &&
+          data.bars[data.bars.length - 1].confirm === 0 && (
+            <span className="chart-stale">最后 1 根未收盘，数值还会变</span>
+          )}
         <span>滚轮缩放，底部滑块拖动可见区间</span>
       </div>
     </section>
@@ -6706,24 +6711,41 @@ function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
             pid {item.pid ?? "—"}
             {item.restarts !== null ? ` · 重启 ${item.restarts}` : ""}
           </span>
-          {item.ws && (
+          {item.ws ? (
             <span
               className={`proc-meta mono proc-ws${item.ws.connected ? "" : " proc-ws-off"}`}
               title={item.ws.last_error ?? undefined}
             >
               {item.ws.connected
                 ? "WS 已连接"
-                : `WS 断开 · 连续失败 ${item.ws.failures}${
-                    item.ws.next_delay !== null
-                      ? ` · ${item.ws.next_delay.toFixed(0)}s 后重连`
-                      : ""
-                  }`}
+                : `WS 断开 · 连续失败 ${item.ws.failures}${wsRetryNote(item.ws)}`}
             </span>
-          )}
+          ) : item.name === "worker" && item.online ? (
+            <span className="proc-meta mono">WS 状态未知（心跳可能过期）</span>
+          ) : null}
         </div>
       ))}
     </div>
   );
+}
+
+/** WS 重连提示：有 next_retry_at 时按本地时钟倒数（真倒计时）；
+ *  旧后端只有 next_delay 时退回静态时长（P1 口径）。 */
+function wsRetryNote(ws: {
+  next_retry_at?: number | null;
+  next_delay: number | null;
+}): string {
+  if (ws.next_retry_at != null) {
+    const remaining = Math.max(
+      0,
+      Math.ceil((ws.next_retry_at - Date.now()) / 1000),
+    );
+    return ` · ${remaining}s 后重连`;
+  }
+  if (ws.next_delay !== null) {
+    return ` · ${ws.next_delay.toFixed(0)}s 后重连`;
+  }
+  return "";
 }
 
 function heartbeatNote(seconds: number | null | undefined): string {

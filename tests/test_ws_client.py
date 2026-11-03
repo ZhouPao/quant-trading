@@ -269,6 +269,26 @@ class TestWSClient:
         assert client.status()["connected"] is False
 
 
+class TestWsRetryAt:
+    """next_retry_at：看板真倒计时的时间来源（P1 口径）。"""
+
+    def test_next_retry_at_null_until_failure(self):
+        ws = WSClient()
+        assert ws.status()["next_retry_at"] is None
+
+    def test_next_retry_at_set_on_failure(self):
+        ws = WSClient()
+        wait = ws._record_failure("boom")
+        status = ws.status()
+        assert status["next_retry_at"] is not None
+        # ≈ last_error_ts + wait*1000（容许取整误差）
+        assert status["next_retry_at"] >= status["last_error_ts"]
+        assert (
+            abs(status["next_retry_at"] - status["last_error_ts"] - wait * 1000)
+            < 50
+        )
+
+
 class TestLivePriceBook:
     def test_update_and_get(self):
         book = LivePriceBook()

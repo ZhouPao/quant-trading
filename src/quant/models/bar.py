@@ -79,20 +79,23 @@ class Bar:
         """从 OKX REST 响应的原始 list[str] 构造 Bar。
 
         OKX 字段顺序：[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-        索引 6 是 volCcy（基础币额），7 是 volCcyQuote（计价币额）。
-        本类 vol 字段对应索引 5（基础币成交量），vol_quote 对应索引 7。
+        现货：idx5 vol 是基础币量，idx7 volCcyQuote 是计价币成交额。
+        合约（SWAP/FUTURES）：idx5 vol 单位是「张」，idx6 volCcy 才是基础币量
+        （= 张数 × ctVal）——统一取基础币口径，否则合约成交量与现货差
+        ctVal 倍，图表与回测全部失真（P1 口径）。
         """
         if len(raw) < 9:
             raise ValueError(
                 f"OKX raw candle must have >=9 elements, got {len(raw)}: {raw}"
             )
+        is_contract = inst_id.endswith(("-SWAP", "-FUTURES"))
         return cls(
             ts=int(raw[0]),
             open=Decimal(raw[1]),
             high=Decimal(raw[2]),
             low=Decimal(raw[3]),
             close=Decimal(raw[4]),
-            vol=Decimal(raw[5]),
+            vol=Decimal(raw[6] if is_contract else raw[5]),
             vol_quote=Decimal(raw[7]),
             confirm=int(raw[8]),
             inst_id=inst_id,
