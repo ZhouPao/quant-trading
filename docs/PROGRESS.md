@@ -1485,6 +1485,49 @@ PRD 细化到 150 条后，详设侧暴露出两个问题：一是文件名与�
 
 ---
 
+### 8.49 启动阻塞修复 + 工程化收尾（2026-11-02 ~ 2026-11-03）
+
+**背景**：接手时系统本应在跑，但 5 个常驻子进程（worker / engine / webhook / monitor /
+dashboard）全部秒退，只有不碰库的 `sync-candles` 存活；看板 `:8080` 打不开。
+
+**根因**：存量库 `data/state/quant.db` 的 `user_version = 8`，且
+`backtest_metrics.funding_cost` 列**已经存在**（更早一版该列写在基线 `_SCHEMA`，后被抽成
+v9 增量迁移 `ALTER TABLE ... ADD COLUMN funding_cost`）。当前代码打开库时，v2–v8 已应用，
+轮到 v9 想再加一次 → `sqlite3.OperationalError: duplicate column name: funding_cost`
+→ `SQLiteStore.__init__` 抛 `StateError` → 5 个子进程全崩。这正好违反 `AGENTS.md` 硬规则
+#2「迁移必须幂等」。
+
+**修复（只动迁移循环，不改任何历史 DDL）**：
+- `src/quant/state/sqlite_store.py::_apply_migrations`：对每段迁移的 `executescript` 包一层
+  `try/except sqlite3.OperationalError`，仅当错误含 `duplicate column` 时视为「已应用」
+  跳过，其余错误照常上抛。
+- 不新增迁移段、不修改 `_SCHEMA` 与既有 `_MIGRATIONS`，符合「历史迁移不可改」的硬规则。
+
+**验证**：`read_lints` 零错误；`tests/test_sqlite_store.py` **71 passed**（含
+`test_v8_db_gains_funding_cost_column` 等迁移用例），无回归；cash 模式 supervisor 在下一个
+退避周期内自愈拉满 6 进程。
+
+**运维处置**：机器上原本还跑着一个 `cross` 模式的旧 supervisor（21:14 起），与本次要的
+`cash --paper-mode` 冲突且抢占 `:8000`/`:8080` 与信号队列。经用户确认，停掉旧 cross 实例、
+保留 cash 实例；端口释放后 6 进程全部在线（candles / webhook / worker / engine / monitor /
+dashboard）。
+
+**前端构建**：`cd web && npm install && npm run build`，产出 `web/dist`；dashboard 由
+「API-only」切换为完整 React UI（标题 `QUANT / OPS`），浏览器 `http://127.0.0.1:8080`
+可看完整看板（账户 / 权益曲线 / 持仓 / 订单 / 成交 / 告警 / 策略 / 回测）。
+
+**工程化**：把 `AGENTS.md` 的协作纪律（含用户后补的「先想透 / 写完必测 / 做完必总结落文档 /
+详细注释」）固化为项目级 skill `quant-trading-rules`
+（`.codebuddy/skills/quant-trading-rules/`，已通过官方 `package_skill.py` 校验）。该 skill
+是 `AGENTS.md` 的可执行伴侣 + 超集，覆盖 9 步工作法 + 14 条硬规则，可在 IDE 技能面板调用。
+
+**未完成（待用户确认）**：
+- `sqlite_store.py` 的修复尚未提交；
+- `.codebuddy/skills` 与 `web/dist` 是否随仓库提交待定（`.env` 等密钥绝不入库）；
+- `optimize_jobs` 表（PRD 有模型、代码未建，见 `AGENTS.md` 已知问题 #1）仍缺。
+
+---
+
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）

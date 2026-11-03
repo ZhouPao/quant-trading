@@ -327,14 +327,26 @@ SCHEMA_VERSION = 1 + len(_MIGRATIONS)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """建基线表并依次应用未执行的迁移。"""
+    """建基线表并依次应用未执行的迁移。
+
+    每段迁移都必须可「重放」：存量库可能由更早的代码版本创建（例如某列原本
+    写在基线 ``_SCHEMA`` 里，后被抽成一段增量迁移）。此时 ``user_version`` 仍判定
+    该段「未应用」，再次执行 ``ALTER ... ADD COLUMN`` 会抛 ``duplicate column``。
+    这类「列已存在」属于幂等安全的已应用态，跳过即可，绝不该阻断进程启动——
+    这与「迁移必须幂等、崩溃同版本可重放」的硬规则一致。
+    """
     conn.executescript(_SCHEMA)
     row = conn.execute("PRAGMA user_version").fetchone()
     version = int(row[0]) if row else 0
     for target, script in enumerate(_MIGRATIONS, start=2):
         if version >= target:
             continue
-        conn.executescript(script)
+        try:
+            conn.executescript(script)
+        except sqlite3.OperationalError as exc:
+            # 幂等重放：列/索引已存在等可安全忽略；其余错误照常上抛。
+            if "duplicate column" not in str(exc).lower():
+                raise
         # PRAGMA 不支持参数绑定；target 来自 enumerate，必为整数
         conn.execute(f"PRAGMA user_version = {target}")
         conn.commit()

@@ -317,6 +317,12 @@
 | 订单/成交无筛选 | `/api/orders`、`/api/fills` 只有 `limit` | 补 `inst/strategy/status/source` 查询参数与前端筛选条 |
 | 设置页整体占位 | M10 12 条未开始 | 按 MS5 清单先做只读配置视图与凭证健康 |
 
+### 4.4 代码层修复记录（2026-11-02）
+
+| 日期 | 问题 | 修复 | 影响 |
+|---|---|---|---|
+| 2026-11-02 | 存量库 `user_version=8` 且 `funding_cost` 列已存在，v9 迁移 `ADD COLUMN` 非幂等 → 打开即 `duplicate column`，5 个子进程秒退、看板打不开 | `_apply_migrations` 加 `try/except`，`duplicate column` 视为已应用跳过；不改历史 DDL | 存量库可正常打开，6 进程自愈拉满；**完成度不变** |
+
 ---
 
 ## 5. 里程碑对照
