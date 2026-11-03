@@ -1549,6 +1549,25 @@ DDL，但 `_MIGRATIONS` 里只有「留到各自切片再加」的占位注释�
 改登记式任务、写 `optimize_jobs.completed` + Redis 轮询、前端进度条）属独立功能 **A2**，
 不在本次范围，见 `feature-inventory` §3.4 / 后续优先级第 4 条。
 
+### 8.51 npm 依赖审计评估（B-安全，2026-11-03）
+
+**背景**：`npm audit` 报 7 条（4 moderate / 1 high / 2 critical），集中在
+vite / esbuild / vitest / echarts / tinypool。原计划走 B-安全（`npm audit fix` 非 force）
+清掉 critical。
+
+**实测结论**：`npm audit fix`（非 force）只把 `@vitest/*` 子包从 2.1.8→2.1.9 蹭了一小步，
+**0 条告警被清除**，tinypool critical 仍在；npm 现要求 `--force`（升 vitest→4.1.12 等大版本
+breaking）才修。即"非破坏修复 critical"在实际解析里不成立。
+
+**决策（选项 B）**：回退 `web/package-lock.json` 的这次无意义改动，**保持现状**。理由：7 条
+全为开发/测试/构建期依赖，对生产零暴露——tinypool 仅活在 vitest 测试 runner；esbuild/vite
+是 dev-server 类，生产看板静态托管 `web/dist` 不跑 vite dev server；echarts XSS 仅渲染不可信
+数据时触发（图表均为自家回测结果）。本地单用户面板，无实际威胁，不影响任何功能。
+
+**后续**：若日后要彻底清零，只能走 B-全量（`npm audit fix --force`，breaking 升
+vite5→6 / echarts5→6 / vitest 大版本），需 `build + typecheck + vitest` 全量回归 + 重建
+`web/dist`，另行排期，不在本次范围。
+
 ---
 
 ## 9. 相关文档
