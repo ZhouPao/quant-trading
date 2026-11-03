@@ -43,7 +43,8 @@ import {
   replayDeadLetter,
   replayDeadLetters,
   resolveReconciliation,
-  runOptimize,
+  submitOptimize,
+  getOptimizeJob,
   submitBacktest,
   submitBatch,
   fetchBacktestRuns,
@@ -81,6 +82,7 @@ import {
   type FreshnessResponse,
   type KillSwitchState,
   type MetricMap,
+  type OptimizeJobResponse,
   type OptimizeResponse,
   type OrderRow,
   type Overview,
@@ -3649,6 +3651,9 @@ function BacktestPanel({
     trades: BacktestTrade[];
   } | null>(null);
   const [optimize, setOptimize] = useState<OptimizeResponse | null>(null);
+  // A2-P4：寻优进度——提交后轮询 GET /api/optimize/{job_id} 期间展示进度条
+  const [optimizeProgress, setOptimizeProgress] =
+    useState<OptimizeJobResponse | null>(null);
   // 历史改由后端 backtest_runs 持久化（M4-9/M4-10），不再写 localStorage
   const [history, setHistory] = useState<BacktestRun[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -3774,6 +3779,34 @@ function BacktestPanel({
     } finally {
       if (!controller.signal.aborted) setBusy(false);
       setHistoryVersion((n) => n + 1);
+    }
+  };
+
+  /** 轮询寻优任务直到终态；done 后再取完整排名结果（M4-13 进度展示，A2-P4）。 */
+  const followOptimizeJob = async (jobId: string) => {
+    followAbort.current?.abort();
+    const controller = new AbortController();
+    followAbort.current = controller;
+    setBusy(true);
+    setOptimize(null);
+    try {
+      for (;;) {
+        const job = await getOptimizeJob(controller.signal, jobId);
+        setOptimizeProgress(job);
+        if (isTerminalStatus(job.status)) {
+          if (job.status === "done" && job.result) {
+            setOptimize(job.result);
+          }
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      setError((err as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+      setOptimizeProgress(null);
     }
   };
 
@@ -3911,15 +3944,18 @@ function BacktestPanel({
         await followRun(run_id);
       } else {
         setRun(null);
-        setOptimize(
-          await runOptimize(controller.signal, {
-            ...body,
-            grid,
-            metric,
-            top: Number(top) || 10,
-            n_jobs: Math.min(Math.max(Number(jobs) || 1, 1), 8),
-          }),
-        );
+        setOptimize(null);
+        setOptimizeProgress(null);
+        // 提交即返回 job_id（M4-13 / A2-P2），页面轮询进度而不是同步等待
+        const { job_id } = await submitOptimize(controller.signal, {
+          ...body,
+          grid,
+          metric,
+          top: Number(top) || 10,
+          n_jobs: Math.min(Math.max(Number(jobs) || 1, 1), 8),
+        });
+        setNotice(`寻优任务已提交（${job_id}），正在后台计算`);
+        await followOptimizeJob(job_id);
       }
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
@@ -4189,6 +4225,8 @@ function BacktestPanel({
         )
       ) : optimize ? (
         <OptimizeResult data={optimize} />
+      ) : optimizeProgress ? (
+        <OptimizeProgress progress={optimizeProgress} />
       ) : (
         <div className="empty">填好网格后点「开始寻优」，参数排名会显示在这里</div>
       )}
@@ -4764,6 +4802,31 @@ function CompareTable({ runs }: { runs: BacktestRun[] }) {
       </div>
       <Table head={head} rows={rows} empty={false} emptyHint="" />
     </>
+  );
+}
+
+function OptimizeProgress({ progress }: { progress: OptimizeJobResponse }) {
+  const total = progress.total;
+  const done = progress.completed;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return (
+    <div className="opt-progress">
+      <div className="opt-progress-head">
+        <span>正在寻优…</span>
+        <span className="dim">
+          {done} / {total} 组
+        </span>
+      </div>
+      <div className="opt-progress-track">
+        <div className="opt-progress-bar" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="opt-progress-foot">
+        <span className="dim">
+          {RUN_STATUS_TEXT[progress.status] ?? progress.status}
+        </span>
+        <span className="dim">{pct}%</span>
+      </div>
+    </div>
   );
 }
 

@@ -1666,8 +1666,13 @@ export async function importPine(
   );
 }
 
-export async function runOptimize(signal: AbortSignal, body: OptimizeBody) {
-  return postJson<OptimizeResponse>("/api/optimize", body, signal);
+/** M4-13：提交寻优任务，立即返回 job_id（后端登记式，A2-P2），进度走轮询。 */
+export async function submitOptimize(signal: AbortSignal, body: OptimizeBody) {
+  return postJson<{ job_id: string; status: string; total: number }>(
+    "/api/optimize",
+    body,
+    signal,
+  );
 }
 
 export type OptimizeJobResponse = {

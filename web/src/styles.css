@@ -3690,6 +3690,41 @@ tbody tr:hover {
   word-break: break-word;
 }
 
+/* ---------------- optimize progress (M4-13 / A2-P4) ---------------- */
+
+.opt-progress {
+  padding: 26px 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.opt-progress-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.opt-progress-track {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.opt-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+.opt-progress-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-top: 6px;
+}
+
 /* ---------------- empty & footer ---------------- */
 
 .empty {

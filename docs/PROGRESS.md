@@ -1644,6 +1644,30 @@ service 断言 grid 解析 + result/error 形态）+ `test_optimize_job_get`（H
 **未完成（后续期）**：P4 前端进度条 + 1s 轮询消费本接口、把 `runOptimize` 从同步改轮询；
 P5（可选）Redis 实时轮询。M4-13 在看板可见进度仍待 P4 闭环。
 
+### 8.55 A2 · P4：前端进度条 + 轮询，M4-13 闭环（2026-11-03）
+
+**范围**：A2 第四期、最后一期。把前端寻优从“同步等结果”改为“提交 → 1s 轮询 → 渲染”，
+在看板显示实时进度，闭环 M4-13“寻优进度上报”。
+
+**改动（完全复用既有模式）**：
+- `web/src/api.ts`：`runOptimize` 改为 `submitOptimize`——返回 `{job_id,status,total}` 信封，
+  与 backtest 的 `submitBacktest` 完全同构（P3 的 `getOptimizeJob` 不动）。
+- `web/src/App.tsx`：
+  - 新增 `followOptimizeJob(jobId)`——照抄既有 `followRun` 的轮询模式（复用 `followAbort`
+    做取消、`isTerminalStatus` 判终态、1s `setTimeout` 间隔），终态 done 时把 `job.result`
+    写入 `optimize` 状态、finally 清进度。
+  - optimize 分支：`submitOptimize` 拿 job_id → `setNotice` → `await followOptimizeJob(job_id)`。
+  - 新增 `optimizeProgress` 状态与 `OptimizeProgress` 组件（`completed/total` + 百分比 +
+    状态文案），复用 `RUN_STATUS_TEXT` 与 `.dim` 样式。
+- `web/src/styles.css`：新增 `.opt-progress*` 进度条样式，复用 `var(--accent)/--line/--panel-2`。
+
+**验证**：`tsc --noEmit -p tsconfig.json` 通过；`npm run build`（`tsc -b && vite build`）成功
+（590 模块，1.32s，产出 dist）；`npm test`（vitest）**13 passed**；后端未改动故 pytest 不受影响。
+`web/dist/` 被 `.gitignore:44` 忽略，**构建产物不入仓**。
+
+**闭环说明**：M4-13 至此在看板可见实时进度，状态由 🟡 转 🟢。仍可增强（未做）：取消按钮、
+结果持久化与重启恢复（`fail_interrupted_optimize_jobs`）、（可选 P5）Redis 实时轮询。
+
 ---
 
 ## 9. 相关文档
