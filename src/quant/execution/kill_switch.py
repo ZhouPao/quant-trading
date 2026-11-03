@@ -43,14 +43,19 @@ class KillSwitch:
         return await self._redis.exists(self.key) > 0
 
     async def reason(self) -> str | None:
-        """激活原因；未激活返回 None。"""
+        """激活原因；未激活或无原因返回 None。
+
+        空原因统一返回 None 而不是空串：前端按「有没有值」判断是否展示原因，
+        空串既不是 null 也不是有效文案，容易让 UI 显示成空白。
+        """
         raw = await self._redis.get(self.key)
         if raw is None:
             return None
         try:
-            return str(json.loads(raw).get("reason", ""))
+            value = str(json.loads(raw).get("reason", ""))
         except (json.JSONDecodeError, AttributeError):
-            return str(raw)
+            value = str(raw)
+        return value or None
 
 
 __all__ = ["KillSwitch", "DEFAULT_KEY"]

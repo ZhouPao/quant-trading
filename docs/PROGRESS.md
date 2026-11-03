@@ -1720,6 +1720,35 @@ A1 加了 v10（`optimize_jobs`）迁移后应为 10。**此前只按子集跑 p
 冗余请求、组件 memo 化）；P3（aria-live 噪音、表格行键盘不可达、新鲜度文案误导、
 其余阈值继续改为后端下发）。
 
+### 8.58 首页总览第二批修复：P1 余项 + 后端可靠性 / 性能（2026-11-03）
+
+**P1（契约与口径）**：
+- `kill_switch` 默认字典补 `auth_required`——Redis 全挂时该字段原本**整个缺失**（非 null），
+  前端 `?? false` 会让急停面板隐藏 token 输入。
+- `KillSwitch.reason()` 空原因统一返回 `None` 而非 `""`（已同步 `test_kill_switch.py` 断言）。
+- 时间显示统一按 **UTC+8**：`clock` / `stamp` 原本用浏览器本地时区，而后端日切
+  （timeline `since`、today-pnl `day_start`）是 UTC+8，非 UTC+8 环境下「今日」边界错位。
+- 订单状态标签改中文（`StatusTag` 之前直接渲染英文 status，与全中文 UI 不一致）。
+
+**P2（后端可靠性 / 性能）**：
+- Redis 读取由「一个大 try 包 8 次读」改为 **`asyncio.gather` 并发 + 按源独立降级**
+  （标记 `redis:snapshot / worker / monitor / queue / kill`，同一来源去重）。原先快照读失败会
+  **连带放弃**心跳 / 队列 / 急停，且只留一个笼统 `"redis"` 标记、定位不到子源。
+- 看板 Redis 连接补 `socket_connect_timeout=2.0` / `socket_timeout=5.0`：原先未设超时，
+  Redis 挂起会让 `/api/overview` **永久阻塞**，连降级都走不到。
+- `fetchAll` 新增 `includeExecution` 参数：订单 / 成交 / 盈亏只在「交易执行」页使用，
+  其它页直接返回空壳，**每轮轮询省掉 3 个请求**（overview 页 11 → 8）。
+
+**契约变更（前后端已同步）**：`degraded` 中 Redis 相关标记由 `"redis"` 细化为
+`"redis:{源名}"`；`kill_switch.reason` 空值语义由 `""` 改为 `null`。
+
+**验证**：`pytest` **全量 1663 passed**；`npx tsc --noEmit` 通过；`npm test`（vitest）
+**18 passed**；`npm run build` 通过；改动文件 `ruff` 全过。
+
+**未做（第三批）**：P2 余项（跨端点重复读同一快照的短期缓存、组件 `React.memo`、
+alerts 每轮拉 200 条、页面不可见时暂停轮询 / 失败退避）；P3（aria-live 噪音、
+表格行键盘不可达、新鲜度文案限定单组合、其余阈值继续改为后端下发）。
+
 ---
 
 ## 9. 相关文档

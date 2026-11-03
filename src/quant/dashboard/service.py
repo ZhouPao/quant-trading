@@ -447,6 +447,19 @@ class DashboardService:
     # 概览
     # ------------------------------------------------------------------
 
+    async def _redis_read(self, name: str, degraded: list[str], coro):
+        """读一个 Redis 数据源；失败只降级该源，不影响其它源。
+
+        返回 None 既可能是键不存在，也可能是读取失败——后者会在 degraded
+        里留下 `redis:{name}` 标记。
+        """
+        try:
+            return await coro
+        except Exception as e:  # noqa: BLE001
+            degraded.append(f"redis:{name}")
+            log.warning(f"overview redis read failed [{name}]: {e}")
+            return None
+
     async def overview(self) -> dict[str, object]:
         now = int(time.time() * 1000)
         degraded: list[str] = []
@@ -458,43 +471,65 @@ class DashboardService:
             "inflight": None,
             "dead": None,
         }
-        kill: dict[str, object] = {"active": False, "reason": None, "known": False}
+        kill: dict[str, object] = {
+            "active": False,
+            "reason": None,
+            # Redis 全挂时也要带上该字段：前端据此决定是否要求 token（P1）
+            "auth_required": bool(self._settings.dashboard.token),
+            "known": False,
+        }
 
-        try:
-            raw = await self._redis.get(
-                self._settings.monitor.dashboard_snapshot_key
-            )
-            snapshot = _loads(raw)
-            worker = _heartbeat(
-                await self._redis.get(
-                    self._settings.monitor.worker_heartbeat_key
-                ),
-                self._settings.monitor.worker_heartbeat_timeout_seconds,
-                now,
-            )
-            monitor = _heartbeat(
-                await self._redis.get(
-                    self._settings.monitor.monitor_heartbeat_key
-                ),
-                self._settings.monitor.monitor_heartbeat_timeout_seconds,
-                now,
-            )
-            queue = {
-                "pending": int(await self._redis.llen(self._settings.redis.queue_key)),
-                "inflight": int(
-                    await self._redis.llen(self._settings.redis.inflight_key)
-                ),
-                "dead": int(await self._redis.llen(self._settings.redis.dead_key)),
-            }
+        # 各数据源独立降级并并发读取：原先一个大 try 会让「快照读失败」连带放弃
+        # 心跳 / 队列 / 急停，且只留一个笼统的 "redis" 标记、定位不到子源（P2）
+        mon = self._settings.monitor
+        redis = self._redis
+        (
+            raw,
+            worker_raw,
+            monitor_raw,
+            pending,
+            inflight,
+            dead,
+            active,
+            reason,
+        ) = await asyncio.gather(
+            self._redis_read(
+                "snapshot", degraded, redis.get(mon.dashboard_snapshot_key)
+            ),
+            self._redis_read(
+                "worker", degraded, redis.get(mon.worker_heartbeat_key)
+            ),
+            self._redis_read(
+                "monitor", degraded, redis.get(mon.monitor_heartbeat_key)
+            ),
+            self._redis_read(
+                "queue", degraded, redis.llen(self._settings.redis.queue_key)
+            ),
+            self._redis_read(
+                "queue", degraded, redis.llen(self._settings.redis.inflight_key)
+            ),
+            self._redis_read(
+                "queue", degraded, redis.llen(self._settings.redis.dead_key)
+            ),
+            self._redis_read("kill", degraded, self._kill_switch.is_active()),
+            self._redis_read("kill", degraded, self._kill_switch.reason()),
+        )
+
+        snapshot = _loads(raw) if raw is not None else None
+        worker = _heartbeat(worker_raw, mon.worker_heartbeat_timeout_seconds, now)
+        monitor = _heartbeat(monitor_raw, mon.monitor_heartbeat_timeout_seconds, now)
+        queue = {
+            "pending": None if pending is None else int(pending),
+            "inflight": None if inflight is None else int(inflight),
+            "dead": None if dead is None else int(dead),
+        }
+        if active is not None:
             kill = {
-                "active": await self._kill_switch.is_active(),
-                "reason": await self._kill_switch.reason(),
+                "active": bool(active),
+                "reason": reason,
                 "auth_required": bool(self._settings.dashboard.token),
                 "known": True,
             }
-        except Exception as e:  # noqa: BLE001
-            degraded.append("redis")
-            log.warning(f"overview redis read failed: {e}")
 
         order_counts: dict[str, int] = {}
         try:
@@ -511,7 +546,7 @@ class DashboardService:
                 snapshot_ts = int(snapshot.get("ts") or 0) or None
             except (TypeError, ValueError):
                 snapshot_ts = None
-        if snapshot is None and "redis" not in degraded:
+        if snapshot is None and "redis:snapshot" not in degraded:
             # 键缺失或已过 TTL（monitor 每轮刷新，停机后自然过期）：账户列会
             # 静默变成 —，必须和「读取失败」一样显式降级，否则界面看起来一切正常。
             degraded.append("snapshot")
@@ -520,6 +555,9 @@ class DashboardService:
         if positions_count is None:
             # 读库失败必须显式降级：否则前端把「取不到」显示成 0，看起来像没持仓
             degraded.append("sqlite:positions")
+
+        # 同一来源的多次读取只保留一个标记（queue 读三个键、kill 读两次）
+        degraded = list(dict.fromkeys(degraded))
 
         return {
             "ts": now,

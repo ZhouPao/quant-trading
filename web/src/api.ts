@@ -903,11 +903,33 @@ const EMPTY_PNL: PnlResponse = {
 export async function fetchAll(
   signal: AbortSignal,
   alertRange: AlertRange = { since: null, until: null },
+  includeExecution = true,
 ) {
   const alertsQuery = new URLSearchParams({ limit: "200" });
   // M9-5 时间区间筛选走服务端：前端只截 200 条时按时间过滤会漏掉区间内的行
   if (alertRange.since !== null) alertsQuery.set("since", String(alertRange.since));
   if (alertRange.until !== null) alertsQuery.set("until", String(alertRange.until));
+
+  // 订单 / 成交 / 盈亏只在「交易执行」页使用：其它页直接返回空壳，
+  // 每轮轮询省掉三个用不到的请求（首页总览 P2）
+  if (!includeExecution) {
+    const [overview, positions, alerts, engine] = await Promise.all([
+      getJson<Overview>("/api/overview", signal),
+      getJson<PositionsResponse>("/api/positions", signal),
+      getJson<AlertsResponse>(`/api/alerts?${alertsQuery.toString()}`, signal),
+      getJson<EngineResponse>("/api/engine", signal),
+    ]);
+    return {
+      overview,
+      positions,
+      orders: EMPTY_ORDERS,
+      fills: EMPTY_FILLS,
+      pnl: EMPTY_PNL,
+      alerts,
+      engine,
+    };
+  }
+
   const [overview, positions, orders, fills, pnl, alerts, engine] =
     await Promise.all([
       getJson<Overview>("/api/overview", signal),
@@ -1774,15 +1796,24 @@ export function compactQty(value: string | null | undefined): string {
   return Math.abs(parsed) >= 1 ? num(parsed, 4) : parsed.toPrecision(4);
 }
 
+// 后端日切 / 报表按 UTC+8（timeline since、today-pnl day_start），
+// 前端统一按 UTC+8 呈现，避免非 UTC+8 环境下「今日」边界与显示时间错位。
+const TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
 export function clock(ts: number | null | undefined): string {
   if (!ts) return "—";
-  return new Date(ts).toLocaleTimeString("zh-CN", { hour12: false });
+  const date = new Date(ts + TZ_OFFSET_MS);
+  return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}`;
 }
 
 export function stamp(ts: number | null | undefined): string {
   if (!ts) return "—";
-  const date = new Date(ts);
-  const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const date = new Date(ts + TZ_OFFSET_MS);
+  const day = `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
   return `${day} ${clock(ts)}`;
 }
 

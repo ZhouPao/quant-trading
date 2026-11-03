@@ -76,7 +76,8 @@ class TestKillSwitch:
         redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
         ks = KillSwitch(redis)
         await ks.enable()
-        assert await ks.reason() == ""
+        # 空原因统一返回 None 而不是空串：前端据此判断「无原因」，避免显示空白
+        assert await ks.reason() is None
 
 
 class TestWorkerKillSwitch:

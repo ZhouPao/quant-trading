@@ -274,8 +274,17 @@ class TestOverview:
         finally:
             store.close()
 
-        assert overview["degraded"] == ["redis"]
+        # 各 Redis 数据源独立降级（标记带来源名便于定位），同一来源去重
+        assert set(overview["degraded"]) == {
+            "redis:snapshot",
+            "redis:worker",
+            "redis:monitor",
+            "redis:queue",
+            "redis:kill",
+        }
         assert overview["kill_switch"]["known"] is False
+        # Redis 全挂时 auth_required 也要存在（不能整个字段缺失）
+        assert overview["kill_switch"]["auth_required"] is False
         assert overview["account"] is None
 
     async def test_invalid_snapshot_ignored(self, env) -> None:

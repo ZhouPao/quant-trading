@@ -371,7 +371,8 @@ export default function App() {
   const load = useCallback(
     async (signal: AbortSignal) => {
       try {
-        const bundle = await fetchAll(signal, alertRange);
+        // 订单 / 成交 / 盈亏只在「交易执行」页用到：其它页不必每轮都拉
+        const bundle = await fetchAll(signal, alertRange, tab === "execution");
         setData(bundle);
         setError(null);
         setUpdatedAt(Date.now());
@@ -381,7 +382,7 @@ export default function App() {
         setError((err as Error).message);
       }
     },
-    [alertRange],
+    [alertRange, tab],
   );
 
   // 告警已读/静音是写操作，成功后立刻重取，不等下一轮轮询
@@ -6521,7 +6522,11 @@ function StatusTag({ status }: { status: string }) {
     canceled: "tag-muted",
     rejected: "tag-bad",
   };
-  return <span className={`tag ${map[status] ?? "tag-muted"}`}>{status}</span>;
+  return (
+    <span className={`tag ${map[status] ?? "tag-muted"}`}>
+      {ORDER_STATUS_LABELS[status] ?? status}
+    </span>
+  );
 }
 
 /** M1-6 今日事件流：四表合并倒序，可按类型筛选，点击跳到对应模块。 */

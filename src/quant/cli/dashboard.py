@@ -26,7 +26,14 @@ from quant.state.sqlite_store import SQLiteStore
 
 async def _serve(args, settings: Settings, log) -> int:
     store = SQLiteStore(settings.state.db_path)
-    redis = Redis.from_url(settings.redis.url, decode_responses=True)
+    redis = Redis.from_url(
+        settings.redis.url,
+        decode_responses=True,
+        # 不设超时时 Redis 挂起会让 /api/overview 永久阻塞、连降级都走不到；
+        # 设了超时，读失败才能落到各数据源的独立降级上
+        socket_connect_timeout=2.0,
+        socket_timeout=5.0,
+    )
     web_dir = Path(args.web_dir) if args.web_dir else settings.dashboard.web_dir
     # 手动减仓是唯一会写库/下单的入口，与只读的 service 分开构造
     manual = ManualTrader(settings, store, redis)
