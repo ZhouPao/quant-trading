@@ -6,6 +6,7 @@ import math
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 
 from quant.dashboard.backtest import (
@@ -183,6 +184,28 @@ class TestSubmit:
         assert points
         assert {"ts", "equity", "drawdown"} <= set(points[0])
         assert trades["total"] >= trades["trades"].__len__()
+
+    def test_equity_downsample_keeps_last_point(self, env, monkeypatch) -> None:
+        """P1：等距采样不能丢尾点，否则曲线终点与 final_equity 不符。"""
+        store, _settings_, service = env
+        tasks = TaskRunner(store, service._settings, service)
+        frame = pd.DataFrame(
+            {
+                "ts": list(range(100)),
+                "equity": [str(i) for i in range(100)],
+                "drawdown": ["0"] * 100,
+            }
+        )
+        monkeypatch.setattr(tasks, "_artifact_path", lambda *a: "fake")
+        monkeypatch.setattr(
+            "quant.dashboard.tasks._read_parquet", lambda _p: frame
+        )
+
+        points = tasks.equity("x", limit=60)
+
+        assert points[0]["ts"] == 0
+        assert points[-1]["ts"] == 99
+        assert points[-1]["equity"] == "99"
 
     async def test_equity_of_unknown_run_is_empty(self, env) -> None:
         store, _settings_, service = env

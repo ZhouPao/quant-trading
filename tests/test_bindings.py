@@ -29,6 +29,7 @@ from quant.strategies.bindings import (
     BindingsUnavailable,
     ensure_seed,
     read_bindings,
+    read_cache,
     write_cache,
 )
 
@@ -169,6 +170,18 @@ class TestSeed:
         assert ensure_seed(store, settings, NOW) is False
         assert [r["strategy_id"] for r in store.list_bindings()] == ["rsi"]
 
+    def test_delete_all_bindings_is_not_reseeded(self, env) -> None:
+        """P0 回归：用户主动解绑全部组合是有意状态，不能被自动复活。"""
+        settings, store, _redis = env
+        assert ensure_seed(store, settings, NOW) is True
+        assert store.delete_binding("sma_cross", INST) is True
+        assert store.list_bindings() == []
+
+        # 模拟看板再次读矩阵 / 引擎再次回落 DB
+        assert ensure_seed(store, settings, NOW + 1) is False
+        assert ensure_seed(store, settings, NOW + 2) is False
+        assert store.list_bindings() == []
+
 
 class TestReadBindings:
     async def test_cache_hit(self, env) -> None:
@@ -211,6 +224,39 @@ class TestReadBindings:
 
         with pytest.raises(BindingsUnavailable):
             await read_bindings(redis, store, settings)
+
+    async def test_empty_cache_is_not_cache_miss(self, env) -> None:
+        """P0：空绑定是合法状态，哨兵 field 让它不与「缓存丢了」混淆。"""
+        settings, store, redis = env
+        await write_cache(redis, settings.engine.bindings_key, [])
+
+        assert await read_cache(redis, settings.engine.bindings_key) == []
+        assert await read_bindings(redis, store, settings) == []
+        # 没有回落 DB，也就没有触发补种
+        assert store.list_bindings() == []
+
+    async def test_halt_mode_allows_intentional_empty_bindings(self, env) -> None:
+        """P0：全部解绑后 halt 模式不应误触发急停。"""
+        settings, store, redis = env
+        settings.engine.bindings_fail_mode = "halt"
+        await write_cache(redis, settings.engine.bindings_key, [])
+
+        assert await read_bindings(redis, store, settings) == []
+
+    async def test_deleted_bindings_not_resurrected_by_cache_fallback(
+        self, env
+    ) -> None:
+        """P0 全链路：seed → 全量解绑 → 缓存丢失回落 DB，仍不得复活。"""
+        settings, store, redis = env
+        assert ensure_seed(store, settings, NOW) is True
+        assert store.delete_binding("sma_cross", INST) is True
+        # 模拟 Redis 键丢失（重启 / flush）
+        await redis.delete(settings.engine.bindings_key)
+
+        bindings = await read_bindings(redis, store, settings)
+
+        assert bindings == []
+        assert store.list_bindings() == []
 
     async def test_rollback_switch_ignores_cache_and_db(self, env) -> None:
         settings, store, redis = env
@@ -369,6 +415,25 @@ class TestApi:
             )
             assert rebound.status_code == 200
             assert rebound.json()["binding"]["bar"] == "4H"
+
+    async def test_delete_last_binding_not_reseeded_by_get(self, api) -> None:
+        """P0 回归：解绑后再次打开策略页，不能把组合种回来。"""
+        app, store, _redis, _settings_ = api
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.get("/api/strategies/sma_cross/bindings")  # 首次 seed
+            deleted = await client.request(
+                "DELETE",
+                f"/api/strategies/sma_cross/bindings/{INST}",
+                headers=LOCAL_WRITE,
+            )
+            assert deleted.json()["ok"] is True
+
+            again = await client.get("/api/strategies/sma_cross/bindings")
+
+        assert again.json()["bindings"] == []
+        assert store.list_bindings() == []
 
     async def test_delete_binding_requires_write_guard(self, api) -> None:
         app, _store, _redis, _settings_ = api

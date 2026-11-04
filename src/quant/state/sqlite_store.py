@@ -344,6 +344,16 @@ _MIGRATIONS: list[str] = [
         finished_at INTEGER
     );
     """,
+    # v10 -> v11：一次性初始化标记的持久化位置。
+    # 「strategy_bindings 表为空」既可能是从未初始化，也可能是用户主动解绑了
+    # 全部组合；没有持久标记就无法区分，ensure_seed 会把用户解绑的结果复活
+    # （P0）。用通用 kv 表而不是给 bindings 表加哨兵行，避免污染矩阵数据。
+    """
+    CREATE TABLE IF NOT EXISTS app_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -1767,6 +1777,23 @@ class SQLiteStore:
     # ------------------------------------------------------------------
     # strategy bindings（MS4-C §4.1 / §10.3）
     # ------------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        """读取一次性初始化标记；不存在返回 None。"""
+        row = self._query_one(
+            "SELECT value FROM app_meta WHERE key = ?", (key,)
+        )
+        return str(row["value"]) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写入一次性初始化标记（幂等覆盖）。"""
+        self._execute(
+            """
+            INSERT INTO app_meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
 
     def list_bindings(self, strategy_id: str | None = None) -> list[dict]:
         """启停矩阵；传 strategy_id 只看该策略，否则全量。"""

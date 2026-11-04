@@ -350,7 +350,12 @@ class TaskRunner:
         if frame.empty:
             return []
         step = max(1, -(-len(frame) // limit))
-        sampled = frame.iloc[::step]
+        indices = list(range(0, len(frame), step))
+        # 等距采样会漏掉最后一点（如 N=100/limit=60 → 止于 98），导致曲线
+        # 终点权益与 final_equity 不符、对比图形态失真（P1）。显式补尾点。
+        if indices[-1] != len(frame) - 1:
+            indices.append(len(frame) - 1)
+        sampled = frame.iloc[indices]
         return [
             {"ts": int(row.ts), "equity": str(row.equity), "drawdown": str(row.drawdown)}
             for row in sampled.itertuples()

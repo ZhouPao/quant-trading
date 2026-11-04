@@ -6,6 +6,8 @@
 缓存键 `quant:strategy:bindings`，field 为 `{strategy_id}:{inst_id}`，
 value 为 JSON `{"bar": "1H", "enabled": 1}`。**禁用项也写进缓存**，
 这样「hash 不存在」才等价于「缓存丢了」，不会把「全部禁用」误判成缓存故障。
+**全部解绑则写一个哨兵 field**：空绑定是用户有意状态，同样不能当成缓存故障，
+否则回落 DB 时 `ensure_seed` 会把解绑掉的组合复活、halt 模式还会误触发急停。
 """
 from __future__ import annotations
 
@@ -20,6 +22,11 @@ from quant.foundation.logger import get_logger
 from quant.state.sqlite_store import SQLiteStore
 
 log = get_logger("strategies.bindings")
+
+#: 「绑定表已初始化过」的持久标记（存 SQLite app_meta）
+SEED_META_KEY = "bindings_seeded"
+#: 空绑定的哨兵 field：hash 存在但没有任何有效绑定
+EMPTY_FIELD = "__empty__"
 
 
 class BindingsUnavailable(Exception):
@@ -68,8 +75,17 @@ def initial_binding(settings: Settings) -> Binding:
 
 
 def ensure_seed(store: SQLiteStore, settings: Settings, now_ms: int) -> bool:
-    """表为空时写入初始绑定；返回是否真的写了。"""
+    """仅在「从未初始化」时种入初始绑定；返回是否真的写了。
+
+    「表为空」既可能是首次启动，也可能是用户主动解绑了全部组合（P0）。
+    后者是有意状态，必须靠持久标记区分：否则看板每次读矩阵、引擎每次回落
+    DB 都会把刚解绑掉的组合复活并重新开仓评估。
+    """
+    if store.get_meta(SEED_META_KEY):
+        return False
     if store.list_bindings():
+        # 存量库（v11 之前已有绑定）：只补标记，绝不改动现有数据
+        store.set_meta(SEED_META_KEY, "1")
         return False
     binding = initial_binding(settings)
     store.upsert_binding(
@@ -79,6 +95,7 @@ def ensure_seed(store: SQLiteStore, settings: Settings, now_ms: int) -> bool:
         binding.enabled,
         now_ms,
     )
+    store.set_meta(SEED_META_KEY, "1")
     log.info(
         f"seeded initial binding strategy={binding.strategy_id} "
         f"inst={binding.inst_id} bar={binding.bar}"
@@ -105,6 +122,10 @@ async def write_cache(redis: Redis, key: str, bindings: list[Binding]) -> None:
                 for item in bindings
             },
         )
+    else:
+        # 空绑定也要让 hash 存在：删键会让 read_cache 判成「缓存丢了」，
+        # 回落 DB 后补种复活、halt 模式误触发急停（P0）
+        pipe.hset(key, EMPTY_FIELD, "1")
     await pipe.execute()
 
 
@@ -113,8 +134,13 @@ async def read_cache(redis: Redis, key: str) -> list[Binding] | None:
     raw = await redis.hgetall(key)
     if not raw:
         return None
+    if len(raw) == 1 and EMPTY_FIELD in raw:
+        # 合法的全空绑定（用户主动解绑），不是缓存丢失
+        return []
     out: list[Binding] = []
     for field, value in raw.items():
+        if field == EMPTY_FIELD:
+            continue
         strategy_id, _, inst_id = str(field).partition(":")
         if not strategy_id or not inst_id:
             log.warning(f"binding cache field malformed: {field!r}")

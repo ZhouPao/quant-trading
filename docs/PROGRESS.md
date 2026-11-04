@@ -2093,6 +2093,40 @@ reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"
 语义文案），余项（对比上限静默忽略、compare 单 id 报错文案、equity 降采样尾点
 等）按范围有意保留。M3「策略研究」模块存量审计到此结束。
 
+### 8.69 M3 第二轮复核 · 批次甲：P0 止损（2026-11-04）
+
+**背景**：对 M3 全部 18 项做第二轮全量复核（含 ⬜ 项与三批修复验收），发现上一轮
+「M3 审计收尾」过早：留下一处 **P0 半成品**，且「两层合并处处同一函数」「五回调
+实盘/回测共用」两条正面结论被推翻。本批先做不依赖任何口径决策的止损项。
+
+**P0 全量解绑被 seed 复活（上批新增 DELETE 解绑后暴露）**：
+- 机理：`write_cache` 空列表只 `delete(key)` → `read_cache` 空 hash 返回 `None`（判成
+  「缓存丢了」）→ 默认 `bindings_fail_mode="db"` 回落 SQLite → `ensure_seed` 见表空
+  即补种 `enabled=True` 初始绑定；`halt` 模式则直接触发 kill switch。且 `_bindings_sync`
+  **每次看板读矩阵也调 `ensure_seed`**，复活不需要等引擎。
+- 修复（两处合修，缺一不可）：
+  ① `bindings.write_cache` 空绑定写哨兵 field `__empty__`、`read_cache` 识别后返回 `[]`
+     而非 `None` —— 区分「用户主动清空」与「缓存丢失」；
+  ② SQLite 新增 `app_meta` 表（v11 幂等迁移）与 `get_meta/set_meta`，`ensure_seed`
+     改为**仅在从未初始化时种一次**；存量库已有绑定时只补标记、不动数据。
+- 测试（6 条）：清空后不复活、空缓存≠缓存丢失、缓存丢失回落仍不复活、halt 模式
+  允许有意空绑定、HTTP 层 DELETE 后 GET 不再种回、equity 尾点。
+
+**P1 equity 降采样丢尾点**：`tasks.equity` 的 `iloc[::step]` 止于倒数第二点
+（N=100/limit=60 → 丢 index 99），曲线终点与 `final_equity` 不符 → 显式补尾点。
+
+**复核纠错（本批有意不做）**：子代理报「实盘漏调 `on_trade`」，亲自核实后判定
+**不改** —— `live.py:275` 每轮 `strategy_cls()` 重建实例，`SrExitMixin.protective_exit`
+已用「持仓均价重新定档」自适应（`sr_exit.py:108-115`），`on_trade` 清冻结价位在实盘
+无跨轮意义；强行补反而会改变同轮多 bar 回放行为，属于为改而改。记为生命周期
+一致性讨论，非 bug。
+
+**验证**：`pytest` 全量 **1717 passed**（+6）；改动文件 `ruff` 全过。纯后端。
+
+**后续**：批次丁落地两个已拍板的口径决策（CLI 共用函数不共用数据源 / Python 为
+唯一基准）；其余复核发现（Pine 门禁三态、CLI 校验、错误详情解析、AbortError 竞态等）
+按批次乙/丙顺序处理。
+
 ---
 
 ## 9. 相关文档

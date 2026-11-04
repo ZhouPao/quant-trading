@@ -102,9 +102,10 @@ def service(store, redis, tmp_path):
 
 class TestDeadLetterStore:
     def test_schema_version_bumped(self) -> None:
-        # v1 基线 + 9 段迁移 = 10；对账差异表是 v8，资金费率成本列是 v9，
-        # optimize_jobs 表（M4-13 寻优进度落库）是 v10
-        assert SCHEMA_VERSION == 10
+        # v1 基线 + 10 段迁移 = 11；对账差异表是 v8，资金费率成本列是 v9，
+        # optimize_jobs 表（M4-13 寻优进度落库）是 v10，
+        # app_meta 表（绑定初始化标记，P0 全量解绑复活修复）是 v11
+        assert SCHEMA_VERSION == 11
 
     def test_insert_and_get(self, store) -> None:
         _insert(store, "d-1", signal=_signal())
