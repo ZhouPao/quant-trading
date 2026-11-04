@@ -2522,6 +2522,27 @@ flaky，与本批改动无关。
 **下一项**：按既定顺序进入 3-1 `quant backup`（SQLite 在线备份 + config 快照 +
 sha256 + manifest）。
 
+### 8.79 MS5 收尾 3-1：`quant backup`（2026-11-04）
+
+**新增 `src/quant/foundation/backup.py` + `quant backup`**（M10-7 第一项）：
+- **在线备份**：用 `sqlite3.Connection.backup` 而不是复制文件——WAL 模式下
+  worker 正在写入也能拿到一致快照，直接 copy 可能复制到半个事务、恢复后库损坏。
+- **产物结构**：`<data_dir>/backups/YYYYMMDD-HHMMSS/` 下 `quant.db` +
+  `<config>.toml`（存在才复制）+ `manifest.json`（created_at、schema_version、
+  每个文件的 size/sha256）。
+- **schema 版本**：直接读 `PRAGMA user_version`，不 import `SCHEMA_VERSION`，
+  避免 `foundation → state` 的循环依赖。
+- **只快照显式指定的配置文件**，不递归目录——避免把密钥/凭据一并打包。
+- CLI：`quant backup [--out DIR] [--config config/config.toml]`，打印每个文件的
+  大小与 sha256 前缀。
+
+**测试**：`tests/test_backup.py` 4 条——在线快照可独立打开且数据完整、显式配置
+被快照、源库缺失报 `BackupError`、manifest 的 schema_version 与备份库一致。
+
+**验证**：`pytest` 全量 **1775 passed**（+5）；`ruff` 全过。
+
+**下一项**：3-2 `quant restore`（dry-run 校验、拒绝覆盖运行中的库、恢复前自动备份）。
+
 ---
 
 ## 9. 相关文档

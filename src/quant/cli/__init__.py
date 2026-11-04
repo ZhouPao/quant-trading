@@ -15,6 +15,7 @@ import sys
 
 from quant.cli.align_data import main as align_data_main
 from quant.cli.backtest import main as backtest_main
+from quant.cli.backup import main as backup_main
 from quant.cli.check_data import main as check_data_main
 from quant.cli.check_live import main as check_live_main
 from quant.cli.dashboard import main as dashboard_main
@@ -624,6 +625,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # backup
+    p_backup = sub.add_parser(
+        "backup",
+        help="备份 SQLite 状态库与配置快照（M10-7，带 sha256 清单）",
+    )
+    p_backup.add_argument(
+        "--out", default=None, help="输出根目录（默认 <data_dir>/backups）"
+    )
+    p_backup.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     return parser
 
 
@@ -632,7 +645,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "fetch-candles":
+    if args.command == "backup":
+        return backup_main(args)
+    elif args.command == "fetch-candles":
         return fetch_candles_main(args)
     elif args.command == "fetch-instruments":
         return fetch_instruments_main(args)
