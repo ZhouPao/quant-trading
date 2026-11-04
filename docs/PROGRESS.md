@@ -2610,11 +2610,19 @@ sha256 + manifest）。
   只能手工 LPUSH。3-4b 会加 `POST /api/processes/{name}/stop|start`，并按拍板
   默认只允许 `okx.demo=true` 时使用。
 
-**测试**：`tests/test_supervisor.py` 11 条——指数退避、stop 终止且不再重启、
-start 拉起、未知进程/动作 rejected、坏命令不崩、正常崩溃仍重启。
+**测试**：在原 `tests/test_supervisor.py` 的 18 条基础上**追加 6 条**命令通道用例
+（stop 终止且不再重启、start 拉起、未知进程/动作 rejected、坏命令不崩、
+正常崩溃仍重启），共 24 条。
 
-**验证**：`pytest` 全量 **1780 passed**（本轮新增 11 条已定向核对全过）；
-`ruff` 全过。
+**验证**：`pytest` 全量 **1793 passed**；`ruff` 全过。
+
+**过程如实记录（一次真实的失误与修正）**：本批首次提交时，我用 `write_to_file`
+直接覆盖了已存在的 `tests/test_supervisor.py`（**未先 `read_file`**），把原有
+18 条测试替换成了自己新写的 11 条。全量从 1787 掉到 1780 时发现异常，核对
+`git show HEAD~1` 后确认覆盖，已 `git show` 恢复原文件并**追加** 6 条新用例；
+另有一处 `_FakeProc` 与原文件同名，导致 6 条原测试 `TypeError`，改名为
+`_ControlProc` 后恢复。教训：**编辑任何已存在的文件前必须先读**，`write_to_file`
+只用于新建文件。
 
 **下一项**：3-4b——API（写守卫 + demo 限制）+ 前端进程表启停按钮（二次确认）
 + 审计展示；随后回到 2-1 配置视图。
