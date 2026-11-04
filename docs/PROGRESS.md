@@ -2757,6 +2757,28 @@ MS5 剩余仅 M3-7（M3-13 仍 🟡）。
 
 **下一项**：4-1 `quant research export`（M3-7 第一部分）。
 
+### 8.88 MS5 收尾 4-1：`quant research export`（2026-11-04）
+
+**M3-7 第一部分**：把研究所需数据导出成独立目录，notebook/脚本不必直连内部存储。
+- `quant research export --inst BTC-USDT --bar 1H --start ... --end ... [--out DIR]
+  [--run-id RUN]`
+- 产物：
+  - `bars.parquet`：区间内 K 线（数值保持 **Decimal 文本**，不转 float）
+  - `trades.parquet`：`--run-id` 时复制该回测的成交产物；否则取本地 fills 并按
+    品种/区间过滤
+  - `backtest.json`：仅 `--run-id`，含 run 登记行与指标（`default=str` 兼容 Decimal）
+  - `manifest.json`：导出时间、条数、区间、run_id、文件清单（供 notebook 校验
+    数据版本）
+- 边界：无 K 线直接报错退出（1）；日期格式错误报 `invalid date`；输出目录默认
+  `research/{inst}-{bar}`。
+
+**测试**：`tests/test_research_cli.py` 4 条——K线+本地成交（且不混入其它品种）、
+`--run-id` 复制产物并写指标、无 K 线失败、非法日期失败。
+
+**验证**：`pytest` 全量 **1825 passed**（+4）；`ruff` 全过。纯只读，不改运行逻辑。
+
+**下一项**：4-2 `notebooks/` 模板 + README（M3-7 收尾）。
+
 ---
 
 ## 9. 相关文档

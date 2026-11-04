@@ -29,6 +29,7 @@ from quant.cli.monitor import main as monitor_main
 from quant.cli.optimize import main as optimize_main
 from quant.cli.paper_report import main as paper_report_main
 from quant.cli.prune import main as prune_main
+from quant.cli.research import main as research_main
 from quant.cli.restore import main as restore_main
 from quant.cli.run_engine import main as run_engine_main
 from quant.cli.run_worker import main as run_worker_main
@@ -679,6 +680,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # research
+    p_research = sub.add_parser(
+        "research", help="研究数据导出：K线/成交/回测结果（M3-7）"
+    )
+    research_sub = p_research.add_subparsers(
+        dest="research_command", required=True
+    )
+    p_export = research_sub.add_parser(
+        "export", help="导出为 parquet/JSON 目录，供 notebook 使用"
+    )
+    p_export.add_argument("--inst", required=True, help="instId，如 BTC-USDT")
+    p_export.add_argument(
+        "--bar", default="1H", choices=BAR_CHOICES, help="K线周期"
+    )
+    p_export.add_argument(
+        "--start", required=True, help="开始日期 YYYY-MM-DD（含当天）"
+    )
+    p_export.add_argument(
+        "--end", required=True, help="结束日期 YYYY-MM-DD（含当天）"
+    )
+    p_export.add_argument(
+        "--out",
+        default=None,
+        help="输出目录（默认 research/{inst}-{bar}）",
+    )
+    p_export.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help="可选：导出该回测的成交与指标，而不是本地 fills",
+    )
+    p_export.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     return parser
 
 
@@ -691,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
         return backup_main(args)
     elif args.command == "restore":
         return restore_main(args)
+    elif args.command == "research":
+        return research_main(args)
     elif args.command == "doctor":
         return doctor_main(args)
     elif args.command == "fetch-candles":
