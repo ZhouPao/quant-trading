@@ -2316,6 +2316,55 @@ CLI 1、门禁 2）；`ruff` 全过。纯后端，前端无改动。
 寻优高亮、成交方向、筛选契约、两处白屏兜底）；批次丁（P2/P3 + 两条未做功能
 M4-4 导出、M4-6 walk-forward 入口）。
 
+### 8.74 M4 批次乙：引擎/成交正确性（2026-11-04）
+
+**P1 取消在首根 bar → IndexError → 状态变 failed + 误告警**：`equity_curve` 为空时
+`_run_payload` 取 `[-1]` 抛错，异常落到 `except Exception` 绕过 canceled 判定。
+修复：空曲线回退 `initial_cash`，取消由 `should_stop` 正常判定为 canceled。
+
+**P1 保护性出场价不校验 bar 区间**：策略返回本根从未触及的价格也会「成交」（任意价
+后门，策略 bug 会静默放大收益）。修复：`low <= exit_price <= high` 前置校验，越界
+抛 ValueError（fail loud，不夹价掩盖 bug）。
+
+**P1 限价单未穿透即丢弃（不是挂单）**：只给一根 bar 的机会，限价策略被系统性低估。
+修复：改为 **GTC 挂单**——未穿透保留到下一根继续尝试；新信号替换旧挂单时记入
+`unfilled`（不静默丢）。**这是行为变更**：限价策略的回测成交数会变多（修正方向）。
+
+**P1 金额被转 float**（AGENTS 硬规则 #1）：`max_consecutive_loss_amount`、
+`funding_cost` 原先 `float()` 入库会变成 `0.10000000000000001`。修复：保持
+`str(Decimal)` 文本；连带修 `runner.format_metric` 兼容文本金额（我改完 Decimal 后
+CLI 立刻因 `f"{'0':.2f}"` 崩，全量测试抓到，已一并修复）。
+
+**P1 `turnover` 静默丢弃**（硬规则 #3 的坑）：`metrics.py` 早就算出该指标、前端
+`METRIC_ORDER`/`METRIC_HINTS` 也早已注册，但表里没有列、`_METRIC_COLUMNS` 也没
+——`save_backtest_metrics` 静默 return。修复：v12 迁移补 `turnover TEXT` 列 +
+白名单；新增 roundtrip 测试。**前端无需改动**。
+
+**P1 `_metrics_payload` 遇 inf 会 500**：`float("inf")` 直接进 `JSONResponse`
+（`allow_nan=False`）→ `/runs`、`/compare`、`/runs/{id}` 全挂。修复：读取时
+`math.isfinite` 判定，非有限值置 `None`（前端统一渲染「—」）。
+
+**P1 批量取消粒度不符**：`BatchSweep` 只在格与格之间检查 `should_stop`，一格 10 万根
+时取消要等很久。修复：透传到 `Backtest.run`（每根 bar 检查）。**连带语义修正**：
+格内取消时 `run` 只回放了部分 bar，该格结果必须丢弃；取消不再抛「全部失败」。
+既有测试 `test_should_stop_ends_after_current_cell` 同步改为
+`test_should_stop_aborts_within_cell_and_discards_partial`（断言 `ok == []`）。
+
+**P1 compare 不校验 run 类型**：`backtest` 与 `walkforward`/`batch` 的 metrics 键
+完全不同，同表排名会拿不可比指标当「最优」。修复：要求所有 run 的 `kind` 一致。
+
+**复核纠错（不改）**：审计报「cash 穿负 → `max_drawdown` 算 0 → Calmar 失效」
+**不成立**——`compute_drawdown_curve` 的 peak 从首点正权益起算，穿负后
+`(peak - 负值)/peak > 1`，回撤只会更大；且回测允许杠杆是常见口径，加资金校验会
+改变策略行为。仅记录，不改。
+
+**验证**：`pytest` 全量 **1753 passed**（+6：GTC、出场越界、取消首根、compare
+kind、inf 防护、turnover roundtrip）；`ruff` 全过。纯后端，前端无改动。
+
+**批次乙遗留（放到下一批）**：`rerun` 参数类型漂移（需改请求契约）、4 张表写入
+非事务、回测 `git_commit` 从不写入、`trades` 取最早 100 笔但文案写「最近」、
+产物读取无异常兜底。
+
 ---
 
 ## 9. 相关文档

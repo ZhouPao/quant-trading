@@ -262,6 +262,48 @@ class TestUnfilled:
             Matcher().match(signal, bars[1])
 
 
+class TestLimitOrderGtc:
+    def test_limit_order_retries_until_touched(self) -> None:
+        """限价单未穿透不丢弃：后续 bar 继续尝试（原先一根即弃，P1）。"""
+        bars = [
+            _bar(0),
+            _bar(3_600_000, open_="100", high="101", low="99"),  # 未触达 90
+            _bar(
+                7_200_000, open_="95", high="96", low="85", close="90"
+            ),  # 触达 90
+        ]
+        signal = _signal(qty="1", price="90", order_type="limit")
+
+        result = Backtest(ScriptedStrategy({0: signal}), Matcher()).run(bars)
+
+        assert len(result.trades) == 1
+        assert result.trades[0].price == Decimal("90")
+        assert result.trades[0].ts == 7_200_000
+        assert result.unfilled_signals == []
+
+
+class _BadExitStrategy(ScriptedStrategy):
+    """保护性出场返回本根 bar 从未触及的价位。"""
+
+    def protective_exit(self, bar, ctx):
+        return Decimal("1")
+
+
+class TestProtectiveExitPriceGuarded:
+    def test_exit_price_outside_bar_raises(self) -> None:
+        """出场价必须落在本根 bar 内，否则等于允许任意价成交（P1）。"""
+        bars = [
+            _bar(0),
+            _bar(3_600_000, open_="100", high="101", low="99"),
+            _bar(7_200_000, open_="100", high="101", low="99"),
+        ]
+
+        with pytest.raises(ValueError, match="outside bar range"):
+            Backtest(
+                _BadExitStrategy({0: _signal()}), Matcher()
+            ).run(bars)
+
+
 class TestShouldStop:
     def test_stops_before_first_bar(self) -> None:
         result = Backtest(ScriptedStrategy()).run(

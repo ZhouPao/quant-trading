@@ -217,7 +217,8 @@ class TestBatchSweep:
         with pytest.raises(ValueError, match="all 1 batch cells failed"):
             _sweep().run(expand_cells(["BTC-USDT"], ["1H"]), load)
 
-    def test_should_stop_ends_after_current_cell(self) -> None:
+    def test_should_stop_aborts_within_cell_and_discards_partial(self) -> None:
+        """取消粒度与单次回测一致（每根 bar）：格内取消要丢弃部分结果（P1）。"""
         seen = {"n": 0}
 
         def stop() -> bool:
@@ -225,11 +226,13 @@ class TestBatchSweep:
             return seen["n"] > 1
 
         cells = expand_cells(["A", "B", "C"], ["1H"])
-        ok, _failed = _sweep().run(
+        ok, failed = _sweep().run(
             cells, lambda inst, bar: ([], _bars(inst)), should_stop=stop
         )
 
-        assert [cell.inst for cell in ok] == ["A"]
+        # 第一格内即取消：部分结果不可用，后续格不再执行，且不报「全部失败」
+        assert ok == []
+        assert failed == []
 
     def test_progress_reports_done_and_total(self) -> None:
         steps: list[tuple[int, int]] = []

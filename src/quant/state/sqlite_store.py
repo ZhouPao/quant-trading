@@ -354,6 +354,12 @@ _MIGRATIONS: list[str] = [
         value TEXT NOT NULL
     );
     """,
+    # v11 -> v12：换手率落库。
+    # `metrics.py` 早就算出 `turnover`，但表里没有列、`_METRIC_COLUMNS` 也没有，
+    # `save_backtest_metrics` 会静默丢弃——正是 AGENTS.md 硬规则 #3 警告的坑。
+    """
+    ALTER TABLE backtest_metrics ADD COLUMN turnover TEXT;
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -2497,6 +2503,7 @@ _METRIC_COLUMNS = frozenset(
         "max_consecutive_losses",
         "max_consecutive_loss_amount",
         "exposure_ratio",
+        "turnover",
         "monthly_returns",
         "compounded_return",
         "profitable_segments",

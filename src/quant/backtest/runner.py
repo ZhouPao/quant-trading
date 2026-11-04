@@ -207,17 +207,25 @@ _METRIC_LABELS = {
 _PCT_METRICS = {"total_return", "annual_return", "max_drawdown", "win_rate"}
 
 
-def format_metric(key: str, value: float | None) -> str:
-    """按指标语义格式化（比率转百分比）；None 显示为占位符。"""
+def format_metric(key: str, value: float | str | None) -> str:
+    """按指标语义格式化（比率转百分比）；None 显示为占位符。
+
+    金额列可能是 Decimal 文本（`"-84.51"`），先归一成 float 再格式化，
+    否则 `f"{'0':.2f}"` 会抛 ValueError（P1 连带修复）。
+    """
     if value is None:
         return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
     if key in _PCT_METRICS:
-        return f"{value:.2%}"
-    if key == "profit_factor" and value == float("inf"):
+        return f"{number:.2%}"
+    if key == "profit_factor" and number == float("inf"):
         return "inf"
     if key in ("trade_count",):
-        return f"{value:.0f}"
-    return f"{value:.2f}"
+        return f"{number:.0f}"
+    return f"{number:.2f}"
 
 
 def format_metrics(metrics: dict[str, float]) -> str:

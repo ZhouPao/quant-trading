@@ -135,7 +135,7 @@ class BatchSweep:
         Args:
             cells: `expand_cells` 的结果
             load_bars: 按 (品种, 周期) 加载数据；异常按该格子失败处理
-            should_stop: 每格开始前检查一次，返回 True 即提前结束
+            should_stop: 格内每根 bar 检查，返回 True 即提前结束（与单次回测同粒度）
             progress: 进度回调 `(已完成, 总数)`
 
         Raises:
@@ -146,9 +146,11 @@ class BatchSweep:
         # 缓存异常本身：同一品种后续格子不必重复踩一遍数据缺失
         loaded: dict[tuple[str, str], tuple[list[Bar], list[Bar]] | Exception] = {}
         total = len(cells)
+        canceled = False
 
         for done, (inst, bar, combo) in enumerate(cells, 1):
             if should_stop is not None and should_stop():
+                canceled = True
                 break
             params = {**self.base_params, **combo}
             key = (inst, bar)
@@ -172,16 +174,25 @@ class BatchSweep:
                         params=params,
                         warmup_bars=warmup,
                         funding=self.funding.get(inst),
-                    ).run(bars)
+                        # 取消粒度与单次回测对齐：原先只在格与格之间检查，
+                        # 一格 10 万根时取消要等很久（P1）
+                    ).run(bars, should_stop=should_stop)
                 except ValueError as e:
                     # 例如 fast_len >= slow_len，属该格参数非法
                     failed.append(BatchCell(inst, bar, params, error=str(e)))
                 else:
-                    ok.append(BatchCell(inst, bar, params, result.metrics))
+                    if should_stop is not None and should_stop():
+                        # 取消发生在格内：`Backtest.run` 只回放了部分 bar，
+                        # 这个结果不可用，必须丢弃（P1）
+                        canceled = True
+                    else:
+                        ok.append(BatchCell(inst, bar, params, result.metrics))
             if progress is not None:
                 progress(done, total)
+            if canceled:
+                break
 
-        if not ok:
+        if not ok and not canceled:
             detail = f"; first error: {failed[0].error}" if failed else ""
             raise ValueError(f"all {len(cells)} batch cells failed{detail}")
         return ok, failed

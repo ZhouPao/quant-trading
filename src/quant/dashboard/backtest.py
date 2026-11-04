@@ -887,7 +887,13 @@ class BacktestService:
             "trade_count": len(result.trades),
             "trades_truncated": len(result.trades) > len(trades),
             "unfilled_signals": len(result.unfilled_signals),
-            "final_equity": str(result.equity_curve[-1][1]),
+            # 取消发生在首根 bar 时 equity_curve 为空：原先 [-1] 抛
+            # IndexError → 被当成 failed 并误发告警，绕过 canceled 判定（P1）
+            "final_equity": str(
+                result.equity_curve[-1][1]
+                if result.equity_curve
+                else result.initial_cash
+            ),
             "metrics": _clean_metrics(result.metrics),
             "equity": _equity_points(result.equity_curve),
             "trades": [

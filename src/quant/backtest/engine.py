@@ -148,14 +148,16 @@ class Backtest:
                 try:
                     fill = self.matcher.match(pending, bar)
                 except NoFillError:
-                    unfilled.append(pending)
+                    # 限价单未穿透：保留挂单，下一根继续尝试（GTC）。
+                    # 原先直接丢弃 → 限价策略在回测里被系统性低估（P1）
+                    pass
                 else:
                     cash -= fill.net_value
                     position.apply_fill(fill)
                     trades.append(fill)
                     ctx.cash = cash
                     self.strategy.on_trade(fill, ctx)
-                pending = None
+                    pending = None
 
             ctx.timestamp = bar.ts
             self._advance(ctx, bar)
@@ -165,6 +167,13 @@ class Backtest:
             if position.is_long:
                 exit_price = self.strategy.protective_exit(bar, ctx)
                 if exit_price is not None:
+                    # 策略返回的出场价必须落在本根 bar 内：否则等于允许任意价
+                    # 成交，策略 bug 会静默放大/缩小收益（P1）
+                    if not (bar.low <= exit_price <= bar.high):
+                        raise ValueError(
+                            f"protective exit price {exit_price} outside bar "
+                            f"range [{bar.low}, {bar.high}]"
+                        )
                     fill = self.matcher.fill_at(
                         inst_id=bar.inst_id,
                         side="sell",
@@ -182,6 +191,9 @@ class Backtest:
             if not exited:
                 signal = self.strategy.on_bar(bar, ctx)
                 if signal is not None:
+                    if pending is not None:
+                        # 新信号取消旧挂单：记入未成交，避免静默丢失
+                        unfilled.append(pending)
                     pending = signal
 
             ctx.cash = cash
@@ -195,7 +207,9 @@ class Backtest:
 
         drawdown_curve = compute_drawdown_curve(equity_curve)
         metrics = compute_metrics(trades, equity_curve, bars)
-        metrics["funding_cost"] = float(funding_cost)
+        # 金额必须保持 Decimal 文本：转 float 入库会变成
+        # 0.10000000000000001 这类脏值（AGENTS.md 硬规则 #1）
+        metrics["funding_cost"] = str(funding_cost)
 
         return BacktestResult(
             trades=trades,

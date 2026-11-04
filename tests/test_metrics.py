@@ -342,7 +342,8 @@ class TestExtendedMetrics:
         m = compute_metrics(trades, _curve([(_TS0, "100")]), bars)
 
         assert m["max_consecutive_losses"] == 2
-        assert m["max_consecutive_loss_amount"] == pytest.approx(30.0)
+        # 金额保持 Decimal 文本（硬规则 #1），比较时再转数值
+        assert float(m["max_consecutive_loss_amount"]) == pytest.approx(30.0)
 
     def test_no_losing_streak(self) -> None:
         trades = [
@@ -354,7 +355,7 @@ class TestExtendedMetrics:
         )
 
         assert m["max_consecutive_losses"] == 0
-        assert m["max_consecutive_loss_amount"] == 0.0
+        assert m["max_consecutive_loss_amount"] == "0"
 
     def test_exposure_ratio_denominator_is_all_bars(self) -> None:
         """4 根 bar 中持仓 2 根 → 0.5。"""

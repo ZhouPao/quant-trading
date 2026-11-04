@@ -249,7 +249,8 @@ def test_long_pays_positive_rate_and_receives_negative() -> None:
     result = _run(rates)
     # t=1h 结算发生在开仓成交之前（当时空仓），只结算 t=2h 与 t=3h
     assert result.funding_cost == Decimal("-0.014")
-    assert result.metrics["funding_cost"] == pytest.approx(-0.014)
+    # 金额保持 Decimal 文本（硬规则 #1），比较时再转数值
+    assert float(result.metrics["funding_cost"]) == pytest.approx(-0.014)
     # 9889.89 - 0.012 + 0.026
     assert result.final_cash == Decimal("9889.904")
 
@@ -295,4 +296,4 @@ def test_multiple_settlements_in_one_bar() -> None:
 def test_no_funding_when_disabled() -> None:
     result = _run(None)
     assert result.funding_cost == Decimal("0")
-    assert result.metrics["funding_cost"] == 0.0
+    assert result.metrics["funding_cost"] == "0"

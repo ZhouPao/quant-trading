@@ -215,6 +215,36 @@ class TestSubmit:
         assert tasks.trades("nope") == {"total": 0, "trades": []}
 
 
+class TestCancelBeforeFirstBar:
+    def test_immediate_stop_produces_valid_payload(self, env) -> None:
+        """取消发生在首根 bar：equity_curve 为空，build 不能 IndexError（P1）。"""
+        _store, _settings_, service = env
+
+        payload, result = service.build(
+            _request(), should_stop=lambda: True
+        )
+
+        assert result.equity_curve == []
+        assert Decimal(payload["final_equity"]) == (
+            service._settings.backtest.initial_cash
+        )
+        assert payload["metrics"]["trade_count"] == 0
+
+
+class TestMetricsPayloadFinite:
+    def test_non_finite_values_become_null(self) -> None:
+        """inf/NaN 不是合法 JSON：读取时必须置空，否则接口 500（P1）。"""
+        from quant.dashboard.tasks import _metrics_payload
+
+        payload = _metrics_payload(
+            {"run_id": "r1", "sharpe": "inf", "calmar": "nan", "sortino": "1.5"}
+        )
+
+        assert payload["sharpe"] is None
+        assert payload["calmar"] is None
+        assert payload["sortino"] == 1.5
+
+
 class TestCancel:
     async def test_cancel_pending(self, env) -> None:
         store, _settings_, service = env
@@ -412,7 +442,15 @@ class TestHistory:
 class TestCompareValidation:
     """M3-18 同品种+同周期+同区间+已完成（P1）。"""
 
-    def _run(self, store, run_id: str, *, start: int, status: str = DONE) -> None:
+    def _run(
+        self,
+        store,
+        run_id: str,
+        *,
+        start: int,
+        status: str = DONE,
+        kind: str = "backtest",
+    ) -> None:
         store.create_backtest_run(
             run_id,
             strategy_id="sma_cross",
@@ -421,10 +459,21 @@ class TestCompareValidation:
             start_ts=start,
             end_ts=start + HOUR,
             params="{}",
-            kind="backtest",
+            kind=kind,
             status=status,
             created_at=start,
         )
+
+    async def test_compare_rejects_mixed_kinds(self, env) -> None:
+        """backtest 与 walkforward 的指标键完全不同，不能同表排名（P1）。"""
+        store, settings, service = env
+        tasks = TaskRunner(store, settings, service)
+        now = 1_700_000_000_000
+        self._run(store, "a", start=now)
+        self._run(store, "b", start=now, kind="walkforward")
+
+        with pytest.raises(ValueError, match="类型不一致"):
+            tasks.compare(["a", "b"])
 
     async def test_compare_rejects_different_range(self, env) -> None:
         store, settings, service = env

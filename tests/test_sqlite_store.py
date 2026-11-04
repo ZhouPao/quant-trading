@@ -1116,6 +1116,17 @@ class TestBacktestRuns:
         assert row["funding_cost"] == "-84.51"
         assert row["sharpe"] == "1.5"
 
+    def test_turnover_roundtrip(self, store) -> None:
+        """turnover 早就算出来但表里没列，会被静默丢弃（硬规则 #3）。"""
+        self._create(store)
+
+        store.save_backtest_metrics("r1", {"sharpe": "1.5", "turnover": "2.0"})
+
+        row = store.get_backtest_metrics("r1")
+
+        assert row["turnover"] == "2.0"
+        assert row["sharpe"] == "1.5"
+
     def test_artifacts(self, store) -> None:
         self._create(store)
 

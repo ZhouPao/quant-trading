@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -315,6 +316,13 @@ class TaskRunner:
                 )
         first = rows[0]
         for row in rows[1:]:
+            # kind 不同（backtest / walkforward / batch）的 metrics 键完全不同，
+            # 同表排名会拿不可比指标当「最优」（P1）
+            if row["kind"] != first["kind"]:
+                raise ValueError(
+                    f"{row['run_id']} 是 {row['kind']}，与 {first['run_id']} "
+                    f"的 {first['kind']} 类型不一致，无法对比"
+                )
             if row["inst_id"] != first["inst_id"] or row["bar"] != first["bar"]:
                 raise ValueError(
                     f"{row['run_id']} ({row['inst_id']} {row['bar']}) 与 "
@@ -749,9 +757,13 @@ def _metrics_payload(row: dict) -> dict[str, Any]:
                 out[key] = value
         else:
             try:
-                out[key] = float(value)
+                number = float(value)
             except (TypeError, ValueError):
                 out[key] = value
+            else:
+                # inf/nan 不是合法 JSON：Starlette 的 JSONResponse 会直接
+                # 抛 ValueError → /runs、/compare、/runs/{id} 全 500（P1）
+                out[key] = number if math.isfinite(number) else None
     return out
 
 

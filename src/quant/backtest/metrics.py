@@ -46,7 +46,8 @@ _ZERO_METRICS: dict[str, float | int | str | None] = {
     "sortino": None,
     "monthly_returns": None,
     "max_consecutive_losses": 0,
-    "max_consecutive_loss_amount": 0.0,
+    # 金额列保持 Decimal 文本口径（与 _consecutive_losses 一致）
+    "max_consecutive_loss_amount": "0",
     "exposure_ratio": 0.0,
     "turnover": 0.0,
 }
@@ -219,7 +220,8 @@ def _consecutive_losses(pnls: list[Decimal]) -> tuple[int, float]:
         else:
             streak = 0
             amount = Decimal("0")
-    return longest, float(worst_amount)
+    # 金额保持 Decimal 文本：float 入库会产生 0.10000000000000001（硬规则 #1）
+    return longest, str(worst_amount)
 
 
 def _exposure_ratio(bars: list[Bar], trades: list[Fill]) -> float:
