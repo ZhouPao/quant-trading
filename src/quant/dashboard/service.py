@@ -1294,20 +1294,35 @@ class DashboardService:
             "degraded": degraded,
         }
 
-    async def orders(self, limit: int = 50) -> dict[str, object]:
+    async def orders(
+        self,
+        limit: int = 50,
+        *,
+        inst_id: str | None = None,
+        strategy_id: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, object]:
         now = int(time.time() * 1000)
         try:
-            rows = await asyncio.to_thread(self._store.get_recent_orders, limit)
+            rows = await asyncio.to_thread(
+                self._store.get_recent_orders,
+                limit,
+                inst_id=inst_id,
+                strategy_id=strategy_id,
+                status=status,
+            )
         except Exception as e:  # noqa: BLE001
             log.warning(f"orders sqlite read failed: {e}")
             return {"ts": now, "orders": [], "degraded": ["sqlite"]}
         return {"ts": now, "orders": rows, "degraded": []}
 
-    async def fills(self, limit: int = 50) -> dict[str, object]:
+    async def fills(
+        self, limit: int = 50, *, inst_id: str | None = None
+    ) -> dict[str, object]:
         now = int(time.time() * 1000)
         try:
             trades = await asyncio.to_thread(
-                self._store.get_recent_trades, limit
+                self._store.get_recent_trades, limit, inst_id=inst_id
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"fills sqlite read failed: {e}")

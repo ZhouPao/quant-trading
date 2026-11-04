@@ -358,6 +358,43 @@ export type FillsResponse = {
   degraded: string[];
 };
 
+export type OrdersQuery = {
+  limit?: number;
+  inst?: string;
+  strategy?: string;
+  status?: string;
+};
+
+/** M8-12：订单列表，支持品种/策略/状态筛选（空值不传）。 */
+export async function fetchOrders(
+  signal: AbortSignal,
+  query: OrdersQuery = {},
+) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === "") continue;
+    params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return getJson<OrdersResponse>(`/api/orders${qs ? `?${qs}` : ""}`, signal);
+}
+
+export type FillsQuery = { limit?: number; inst?: string };
+
+/** M8-12：成交列表，支持品种筛选。 */
+export async function fetchFills(
+  signal: AbortSignal,
+  query: FillsQuery = {},
+) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === "") continue;
+    params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return getJson<FillsResponse>(`/api/fills${qs ? `?${qs}` : ""}`, signal);
+}
+
 export type AlertRow = {
   alert_id?: string;
   rule: string;

@@ -57,6 +57,8 @@ import {
   fetchBacktestBatch,
   fetchBacktestSegments,
   fetchBacktestCompare,
+  fetchOrders,
+  fetchFills,
   cancelBacktest,
   rerunBacktest,
   importPine,
@@ -369,6 +371,15 @@ export default function App() {
   const [alertTrendVersion, setAlertTrendVersion] = useState(0);
   // M1-8 今日盈亏汇总：按品种拆分，变化频率与持仓相同
   const [todayPnl, setTodayPnl] = useState<TodayPnlResponse | null>(null);
+  // M8-12 交易页筛选：空筛选直接复用 overview 里的 30 条，有筛选才单独请求
+  const [orderFilter, setOrderFilter] = useState({
+    inst: "",
+    strategy: "",
+    status: "",
+  });
+  const [fillFilter, setFillFilter] = useState({ inst: "" });
+  const [filteredOrders, setFilteredOrders] = useState<OrderRow[] | null>(null);
+  const [filteredFills, setFilteredFills] = useState<FillRow[] | null>(null);
   const timer = useRef<number | null>(null);
 
   const selectTab = useCallback((next: TabKey) => {
@@ -379,6 +390,59 @@ export default function App() {
       // 隐私模式下不持久化，切换仍然生效
     }
   }, []);
+
+  // M8-12：订单筛选（300ms 防抖；空筛选不请求，直接复用 overview 的 30 条）
+  useEffect(() => {
+    if (tab !== "execution") return;
+    const inst = orderFilter.inst.trim();
+    const strategy = orderFilter.strategy.trim();
+    const status = orderFilter.status;
+    if (!inst && !strategy && !status) {
+      setFilteredOrders(null);
+      return;
+    }
+    const controller = new AbortController();
+    const handle = window.setTimeout(() => {
+      fetchOrders(controller.signal, {
+        limit: 100,
+        inst: inst || undefined,
+        strategy: strategy || undefined,
+        status: status || undefined,
+      })
+        .then((res) => setFilteredOrders(res.orders))
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setFilteredOrders([]);
+        });
+    }, 300);
+    return () => {
+      controller.abort();
+      window.clearTimeout(handle);
+    };
+  }, [tab, orderFilter]);
+
+  // M8-12：成交筛选（只按品种，fills 表没有策略列）
+  useEffect(() => {
+    if (tab !== "execution") return;
+    const inst = fillFilter.inst.trim();
+    if (!inst) {
+      setFilteredFills(null);
+      return;
+    }
+    const controller = new AbortController();
+    const handle = window.setTimeout(() => {
+      fetchFills(controller.signal, { limit: 100, inst })
+        .then((res) => setFilteredFills(res.fills))
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setFilteredFills([]);
+        });
+    }, 300);
+    return () => {
+      controller.abort();
+      window.clearTimeout(handle);
+    };
+  }, [tab, fillFilter]);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -585,8 +649,9 @@ export default function App() {
 
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
-  const orders = data?.orders.orders ?? [];
-  const fills = data?.fills.fills ?? [];
+  // 有筛选时用筛选结果，否则复用 overview（避免交易页重复拉全量）
+  const orders = filteredOrders ?? data?.orders.orders ?? [];
+  const fills = filteredFills ?? data?.fills.fills ?? [];
   const alerts = data?.alerts.alerts ?? [];
   const equityPoints = equity?.points ?? [];
   const equityRange =
@@ -1265,6 +1330,44 @@ export default function App() {
             <h2>最近订单</h2>
             <span className="card-note">SQLite · 倒序 · 挂单可撤 · 限价可改</span>
           </div>
+          <div className="bt-form">
+            <label className="bt-field">
+              <span>品种</span>
+              <input
+                value={orderFilter.inst}
+                placeholder="全部"
+                onChange={(e) =>
+                  setOrderFilter({ ...orderFilter, inst: e.target.value })
+                }
+              />
+            </label>
+            <label className="bt-field">
+              <span>策略</span>
+              <input
+                value={orderFilter.strategy}
+                placeholder="全部"
+                onChange={(e) =>
+                  setOrderFilter({ ...orderFilter, strategy: e.target.value })
+                }
+              />
+            </label>
+            <label className="bt-field">
+              <span>状态</span>
+              <select
+                value={orderFilter.status}
+                onChange={(e) =>
+                  setOrderFilter({ ...orderFilter, status: e.target.value })
+                }
+              >
+                <option value="">全部</option>
+                {ORDER_STATUS_ORDER.map((status) => (
+                  <option key={status} value={status}>
+                    {ORDER_STATUS_LABELS[status] ?? status}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <OrdersPanel rows={orders} onChanged={refresh} />
         </section>
 
@@ -1274,6 +1377,16 @@ export default function App() {
             <span className="card-note">
               累计手续费 {num(data?.fills.total_fee, 4)}
             </span>
+          </div>
+          <div className="bt-form">
+            <label className="bt-field">
+              <span>品种</span>
+              <input
+                value={fillFilter.inst}
+                placeholder="全部"
+                onChange={(e) => setFillFilter({ inst: e.target.value })}
+              />
+            </label>
           </div>
           <Table
             empty={fills.length === 0}

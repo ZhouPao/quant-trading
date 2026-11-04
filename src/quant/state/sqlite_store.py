@@ -624,20 +624,43 @@ class SQLiteStore:
         )
         return {r["status"]: int(r["n"]) for r in rows}
 
-    def get_recent_orders(self, n: int) -> list[dict]:
-        """最近 n 笔订单（含信号上下文），按创建时间倒序。"""
+    def get_recent_orders(
+        self,
+        n: int,
+        *,
+        inst_id: str | None = None,
+        strategy_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """最近 n 笔订单（含信号上下文），按创建时间倒序。
+
+        M8-12：支持按品种/策略/状态筛选。列名硬编码、值全部参数化。
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if inst_id:
+            clauses.append("s.inst_id = ?")
+            params.append(inst_id)
+        if strategy_id:
+            clauses.append("s.strategy_id = ?")
+            params.append(strategy_id)
+        if status:
+            clauses.append("o.status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._query_all(
-            """
+            f"""
             SELECT o.order_id, o.status, o.created_ts, o.filled_ts,
                    o.filled_price, o.filled_qty, o.fee,
                    s.strategy_id, s.inst_id, s.side, s.order_type,
                    s.qty, s.price
             FROM orders o
             LEFT JOIN signals s ON o.signal_id = s.signal_id
+            {where}
             ORDER BY o.created_ts DESC
             LIMIT ?
             """,
-            (n,),
+            (*params, n),
         )
         return [dict(r) for r in rows]
 
@@ -689,11 +712,19 @@ class SQLiteStore:
             ),
         )
 
-    def get_recent_trades(self, n: int) -> list[Fill]:
-        """最近 n 笔成交（按 ts 升序返回）。"""
-        rows = self._query_all(
-            "SELECT * FROM fills ORDER BY ts DESC LIMIT ?", (n,)
-        )
+    def get_recent_trades(
+        self, n: int, *, inst_id: str | None = None
+    ) -> list[Fill]:
+        """最近 n 笔成交（按 ts 升序返回）；M8-12 支持按品种筛选。"""
+        if inst_id:
+            rows = self._query_all(
+                "SELECT * FROM fills WHERE inst_id = ? ORDER BY ts DESC LIMIT ?",
+                (inst_id, n),
+            )
+        else:
+            rows = self._query_all(
+                "SELECT * FROM fills ORDER BY ts DESC LIMIT ?", (n,)
+            )
         rows = list(reversed(rows))
         return [
             Fill(

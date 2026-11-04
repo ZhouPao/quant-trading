@@ -283,14 +283,22 @@ def create_app(
     @app.get("/api/orders")
     async def orders(
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        inst: str | None = Query(None),
+        strategy: str | None = Query(None),
+        status: str | None = Query(None),
     ) -> JSONResponse:
-        return JSONResponse(await service.orders(limit))
+        return JSONResponse(
+            await service.orders(
+                limit, inst_id=inst, strategy_id=strategy, status=status
+            )
+        )
 
     @app.get("/api/fills")
     async def fills(
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
+        inst: str | None = Query(None),
     ) -> JSONResponse:
-        return JSONResponse(await service.fills(limit))
+        return JSONResponse(await service.fills(limit, inst_id=inst))
 
     @app.get("/api/reports")
     async def reports(limit: int = 20) -> JSONResponse:

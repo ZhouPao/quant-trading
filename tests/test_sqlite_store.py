@@ -1051,6 +1051,83 @@ class TestRunFiltersFuzzy:
         assert total == 0
 
 
+class TestOrderFillsFilters:
+    """M8-12：交易页筛选的存储层（品种/策略/状态）。"""
+
+    def _seed(self, store) -> None:
+        from types import SimpleNamespace
+
+        rows = [
+            ("o0", "BTC-USDT", "sma_cross", "live"),
+            ("o1", "ETH-USDT", "sma_cross", "live"),
+            ("o2", "BTC-USDT", "rsi", "canceled"),
+        ]
+        for idx, (order_id, inst, strategy, status) in enumerate(rows):
+            sig = SimpleNamespace(
+                signal_id=f"s{idx}",
+                strategy_id=strategy,
+                side="buy",
+                order_type="market",
+                inst_id=inst,
+                qty="1",
+                price=None,
+                ts=idx,
+            )
+            store.save_signal(sig, "created", idx)
+            store.save_order(
+                SimpleNamespace(
+                    order_id=order_id,
+                    signal=sig,
+                    status=status,
+                    created_ts=idx,
+                )
+            )
+
+    def test_filter_by_inst(self, store) -> None:
+        self._seed(store)
+
+        rows = store.get_recent_orders(10, inst_id="BTC-USDT")
+
+        assert {row["order_id"] for row in rows} == {"o0", "o2"}
+
+    def test_filter_by_strategy(self, store) -> None:
+        self._seed(store)
+
+        rows = store.get_recent_orders(10, strategy_id="rsi")
+
+        assert [row["order_id"] for row in rows] == ["o2"]
+
+    def test_filter_by_status(self, store) -> None:
+        self._seed(store)
+
+        rows = store.get_recent_orders(10, status="live")
+
+        assert {row["order_id"] for row in rows} == {"o0", "o1"}
+
+    def test_trades_filter_by_inst(self, store) -> None:
+        from quant.backtest.order import Fill
+
+        for order_id, inst, ts in (
+            ("a", "BTC-USDT", 1),
+            ("b", "ETH-USDT", 2),
+        ):
+            store.save_fill(
+                Fill(
+                    order_id=order_id,
+                    inst_id=inst,
+                    side="buy",
+                    qty=Decimal("1"),
+                    price=Decimal("100"),
+                    fee=Decimal("0.1"),
+                    ts=ts,
+                )
+            )
+
+        trades = store.get_recent_trades(10, inst_id="BTC-USDT")
+
+        assert [fill.inst_id for fill in trades] == ["BTC-USDT"]
+
+
 class TestBacktestRuns:
     def _create(self, store, run_id: str = "r1", **kwargs) -> None:
         params = {

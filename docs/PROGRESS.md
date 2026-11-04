@@ -2486,6 +2486,42 @@ flaky，与本批改动无关。
 **验证**：`pytest` 全量 **1767 passed**（+4）；`npx tsc --noEmit` 通过；
 `npm test` **37 passed**；`npm run build` 通过；`ruff` 全过。
 
+### 8.78 MS5 收尾 0-1 / 1 组：账本纠偏 + 交易页筛选（2026-11-04）
+
+**0-1 账本纠偏**：需求表滞后于代码，先同步再排期——
+- M4 从 `14 ✅ + 2 🟡` 改为 **15 ✅ + 1 🟡**：M4-4 报告导出、M4-6 walk-forward
+  前端入口已在前一批补齐；仅 M4-8「偏离未进告警体系」仍 🟡。
+- M3 从 `15 ✅ + 1 🟡 + 2 ⬜` 改为 **15 ✅ + 2 🟡 + 1 ⬜**：M3-13 已有
+  `tests/strategies/test_pine_python_consistency.py` 显式登记双副本漂移（测试级，
+  无 CLI 一键校验），如实标 🟡。
+- M8-12 更新为「筛选主体已交付，来源筛选待加列」。
+
+**1 组 交易页筛选（M8-12，后端 + 前端）**：
+- 存储层：`get_recent_orders` 支持 `inst_id`/`strategy_id`/`status`；
+  `get_recent_trades` 支持 `inst_id`。列名硬编码、值全部参数化。
+- API：`GET /api/orders?inst=&strategy=&status=`、`GET /api/fills?inst=`。
+- 前端：交易页订单表加「品种/策略/状态」筛选栏、成交表加「品种」；300ms
+  防抖 + `AbortError` 过滤；空筛选直接复用 overview 的 30 条，有筛选才独立
+  请求（limit=100），避免交易页重复拉全量。
+- 测试：存储层 4 条（品种/策略/状态、成交品种）。
+
+**本批未做（如实记账）**：
+- **来源筛选**需要 `orders.source` 列 —— `Order` 模型与 `orders` 表都没有该字段
+  （M8-10 的「来源」目前只体现在日志/信号上下文，未持久化），加列需 v13 迁移 +
+  所有下单路径写入，超出 M8-12 的「展示」范围，单列一项。
+- **持仓表筛选**：`positions` 只有 `inst_id`，本地过滤即可，暂不加后端参数。
+
+**验证**：`pytest` 全量 **1770 passed**（+4）；`npx tsc --noEmit` 通过；
+`npm test` **37 passed**；`npm run build` 通过；`ruff` 全过。
+
+**过程说明**：一次全量里 `TestProcesses::test_all_online` 断言 `6 == 7` 失败，
+单独重跑 `TestProcesses` **8 passed** —— 该用例读真实进程状态，属环境性 flaky，
+与本批改动无关。前端初版误用了不存在的 `ORDER_STATUS_TEXT`，`tsc` 立刻报错，
+已改为实际的 `ORDER_STATUS_LABELS`。
+
+**下一项**：按既定顺序进入 3-1 `quant backup`（SQLite 在线备份 + config 快照 +
+sha256 + manifest）。
+
 ---
 
 ## 9. 相关文档
