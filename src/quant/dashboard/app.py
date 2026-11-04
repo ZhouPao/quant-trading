@@ -85,7 +85,11 @@ from quant.dashboard.backtest import (
     StrategyParamError,
     WalkforwardRequest,
 )
-from quant.dashboard.config_view import config_snapshot
+from quant.dashboard.config_view import (
+    RELOAD_MODES,
+    config_snapshot,
+    hot_reload_rules,
+)
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
@@ -503,9 +507,16 @@ def create_app(
 
     @app.get("/api/config")
     async def config_view() -> JSONResponse:
-        """脱敏后的生效配置 + 每项来源（M10-1 / M10-9）。"""
+        """脱敏后的生效配置 + 每项来源与生效方式（M10-1 / M10-9 / M10-10）。"""
         return JSONResponse(
             config_snapshot(service.settings, config_path)
+        )
+
+    @app.get("/api/config/hot-reload")
+    async def hot_reload_whitelist() -> JSONResponse:
+        """热改白名单：哪些能在线改、哪些必须改文件（M10-10）。"""
+        return JSONResponse(
+            {"modes": RELOAD_MODES, "rules": hot_reload_rules()}
         )
 
     @app.get("/api/processes")

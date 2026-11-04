@@ -1099,6 +1099,9 @@ export type ConfigItem = {
   value: unknown;
   /** toml / env / default */
   source: string;
+  /** hot / restart / env_only（M10-10） */
+  reload: string;
+  reload_hint: string;
 };
 
 export type ConfigResponse = {

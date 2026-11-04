@@ -1475,6 +1475,12 @@ const CONFIG_SOURCE_TEXT: Record<string, string> = {
   default: "默认值",
 };
 
+const CONFIG_RELOAD_TEXT: Record<string, string> = {
+  hot: "在线生效",
+  restart: "需重启",
+  env_only: "仅环境变量",
+};
+
 /** M10-1 / M10-9：脱敏后的生效配置与来源（只读，不提供在线修改）。 */
 function SettingsPanel() {
   const [data, setData] = useState<ConfigResponse | null>(null);
@@ -1507,14 +1513,26 @@ function SettingsPanel() {
           配置文件不存在：下列值全部来自默认值
         </div>
       )}
+      <div className="bt-note">
+        在线生效 = 用现有看板入口修改，无需重启；需重启 = 改 config.toml 后重启
+        对应进程；仅环境变量 = 凭证类，永不回显
+      </div>
       <Table
         empty={data.items.length === 0}
         emptyHint="没有可展示的配置项"
-        head={["配置项", "值", "来源"]}
+        head={["配置项", "值", "来源", "生效方式"]}
         rows={data.items.map((item) => [
           <span className="mono">{item.key}</span>,
-          <span className="mono">{formatConfigValue(item.value)}</span>,
+          <span className="mono" title={item.reload_hint}>
+            {formatConfigValue(item.value)}
+          </span>,
           CONFIG_SOURCE_TEXT[item.source] ?? item.source,
+          <span
+            className={item.reload === "hot" ? "positive" : "mono"}
+            title={item.reload_hint}
+          >
+            {CONFIG_RELOAD_TEXT[item.reload] ?? item.reload}
+          </span>,
         ])}
       />
     </>

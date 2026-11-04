@@ -32,6 +32,63 @@ SECRET_KEYS = frozenset(
 
 _PASSWORD_IN_URL = re.compile(r"://[^@/]*@")
 
+#: 生效方式：hot=在线改立即生效；restart=改 toml 后重启；env_only=仅环境变量
+RELOAD_MODES: dict[str, str] = {
+    "hot": "在线修改，立即生效",
+    "restart": "改 config.toml 后重启对应进程",
+    "env_only": "只能通过环境变量提供，改完需重启",
+}
+
+#: 热改白名单（M10-10）：模式 + 可操作入口。未命中的一律 restart。
+_HOT_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "okx.",
+        "env_only",
+        "OKX 凭证只能通过环境变量提供，改完需重启 worker；看板永不回显原值",
+    ),
+    (
+        "smtp.password",
+        "env_only",
+        "SMTP 密码只能通过环境变量提供，改完需重启 monitor",
+    ),
+    (
+        "dashboard.",
+        "restart",
+        "看板地址/端口/静态目录需改 config.toml 后重启 dashboard",
+    ),
+    (
+        "redis.",
+        "restart",
+        "Redis 地址与键名需改 config.toml 后重启所有进程",
+    ),
+    (
+        "state.",
+        "restart",
+        "状态库路径需改 config.toml 后重启所有进程（并先停进程）",
+    ),
+    (
+        "risk.",
+        "hot",
+        "「风险控制」页在线调整（POST /api/risk/overrides），worker 下一轮心跳生效",
+    ),
+)
+
+
+def reloadability(key: str) -> tuple[str, str]:
+    """配置键 -> (生效方式, 操作提示)。"""
+    for prefix, mode, hint in _HOT_RULES:
+        if key == prefix.rstrip(".") or key.startswith(prefix):
+            return mode, hint
+    return "restart", "改 config.toml 后重启对应进程"
+
+
+def hot_reload_rules() -> list[dict[str, str]]:
+    """热改白名单（供设置页图例/脚本查询）。"""
+    return [
+        {"pattern": prefix, "mode": mode, "hint": hint}
+        for prefix, mode, hint in _HOT_RULES
+    ]
+
 
 def _flatten(value: object, prefix: str = "") -> dict[str, object]:
     """把嵌套配置展平成点路径；列表作为一个整体值展示。"""
@@ -79,11 +136,15 @@ def config_snapshot(
             source = "env" if "${" in str(declared[key]) else "toml"
         else:
             source = "default"
+        mode, hint = reloadability(key)
         items.append(
             {
                 "key": key,
                 "value": _redact(key, values[key]),
                 "source": source,
+                # M10-10：让用户知道「改这个该去哪」，而不是默认 toml 会热生效
+                "reload": mode,
+                "reload_hint": hint,
             }
         )
     return {
@@ -93,4 +154,11 @@ def config_snapshot(
     }
 
 
-__all__ = ["REDACTED", "SECRET_KEYS", "config_snapshot"]
+__all__ = [
+    "REDACTED",
+    "RELOAD_MODES",
+    "SECRET_KEYS",
+    "config_snapshot",
+    "hot_reload_rules",
+    "reloadability",
+]

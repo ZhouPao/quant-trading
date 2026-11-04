@@ -2682,6 +2682,33 @@ sha256 + manifest）。
 **下一项**：2-2 热改白名单（M10-10）——列出「哪些能在线改、哪些必须改文件」，
 拒绝时说明原因。
 
+### 8.85 MS5 收尾 2-2：热改白名单（M10-10）（2026-11-04）
+
+**让「改这个配置该去哪」显性化**，避免用户以为改 `config.toml` 会热生效：
+- 三类生效方式：`hot`（在线改立即生效）/ `restart`（改 toml 后重启）/
+  `env_only`（只能环境变量，凭证类）。
+- 规则表：
+  | 前缀 | 方式 | 依据 |
+  |---|---|---|
+  | `risk.` | hot | `POST /api/risk/overrides`，worker 下一轮心跳生效 |
+  | `okx.*` | env_only | 凭证只从环境变量读，看板永不回显 |
+  | `smtp.password` | env_only | 同上 |
+  | `dashboard.*` / `redis.*` / `state.*` | restart | 地址/路径变更必须重启进程 |
+  | 其余 | restart | 默认不支持热改，宁可不承诺 |
+- `GET /api/config` 的每一项新增 `reload` / `reload_hint`；
+  `GET /api/config/hot-reload` 返回规则表与三类说明（供设置页图例/脚本）。
+- 前端设置页加「生效方式」列（`在线生效` 绿色、`需重启`/`仅环境变量` 普通）
+  与顶部图例；悬停显示具体操作提示（含真实入口）。
+
+**测试**：`tests/test_config_view.py` 新增 2 条——三项代表性配置的 reload 分类
+（且 hot 提示必须指向真实 `risk/overrides` 入口）、规则表覆盖 risk/okx/redis。
+
+**验证**：`pytest` 全量 **1808 passed**（+2）；`npm test` **38 passed**；
+`npx tsc --noEmit` / `npm run build` / `ruff` 全过。
+
+**下一项**：2-3 凭证状态（M10-2）——OKX 权限/子账户/IP + SMTP 是否配置，
+只读探测、不回显密钥。
+
 ---
 
 ## 9. 相关文档

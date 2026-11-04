@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant.dashboard.config_view import REDACTED, config_snapshot
+from quant.dashboard.config_view import (
+    REDACTED,
+    config_snapshot,
+    hot_reload_rules,
+)
 from quant.foundation.config import OKXSettings, Settings
 
 
@@ -71,6 +75,25 @@ class TestConfigSnapshot:
 
         assert items["okx.demo"]["value"] is True
         assert items["engine.bar"]["value"] == "1H"
+
+    def test_reload_modes_mark_hot_restart_and_env_only(self) -> None:
+        """M10-10：别让用户以为改 toml 会热生效。"""
+        data = config_snapshot(_settings(), Path("nope.toml"))
+        items = _items(data)
+
+        assert items["risk.daily_loss_limit"]["reload"] == "hot"
+        # 热改提示必须指向真实入口（POST /api/risk/overrides）
+        assert "risk/overrides" in items["risk.daily_loss_limit"]["reload_hint"]
+        assert items["okx.secret"]["reload"] == "env_only"
+        assert items["engine.bar"]["reload"] == "restart"
+        assert items["engine.bar"]["reload_hint"]
+
+    def test_hot_reload_rules_cover_risk_and_env(self) -> None:
+        rules = {item["pattern"]: item for item in hot_reload_rules()}
+
+        assert rules["risk."]["mode"] == "hot"
+        assert rules["okx."]["mode"] == "env_only"
+        assert rules["redis."]["mode"] == "restart"
 
     def test_broken_toml_degrades_to_default(self, tmp_path) -> None:
         """配置语法错误不该让整页 500：值仍来自已加载的 settings。"""
