@@ -2473,6 +2473,8 @@ function EnginePanel({
   const [bindings, setBindings] = useState<StrategyBinding[]>([]);
   const [defaultBar, setDefaultBar] = useState("1H");
   const [multiBinding, setMultiBinding] = useState(true);
+  // Pine 偏离门禁覆盖状态：未覆盖时不该显示成「有门禁在保护」
+  const [pineGate, setPineGate] = useState("not_covered");
   const [newInst, setNewInst] = useState("");
   const [newBar, setNewBar] = useState("");
   const [bindingBusy, setBindingBusy] = useState("");
@@ -2677,6 +2679,7 @@ function EnginePanel({
       setBindings(res.bindings);
       setDefaultBar(res.default_bar);
       setMultiBinding(res.multi_binding ?? true);
+      setPineGate(res.pine_gate ?? "not_covered");
       setNewBar((prev) => prev || res.default_bar);
     },
     [strategyId]
@@ -3061,6 +3064,17 @@ function EnginePanel({
           <div className="kill-msg kill-msg-bad">
             已开启单组合回滚（multi_binding=false），引擎只跑配置里的主组合，
             此矩阵不生效
+          </div>
+        )}
+        {pineGate === "not_covered" && (
+          <div className="kill-msg kill-msg-bad">
+            当前参数集未做 Pine 交叉验证，偏离门禁未覆盖：启用绑定不会被
+            5% 偏离度检查拦截。切实盘前请先补一次基线对比。
+          </div>
+        )}
+        {pineGate === "blocked" && (
+          <div className="kill-msg kill-msg-bad">
+            当前参数集与 Pine 基线偏离度超过 5%，启用新绑定会被后端拒绝。
           </div>
         )}
         {bindings.length === 0 ? (

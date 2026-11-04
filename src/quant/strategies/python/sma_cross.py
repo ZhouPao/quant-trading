@@ -1,9 +1,18 @@
-"""SMA Cross 策略 Python 副本（spec §5.3）。
+"""SMA Cross 策略：生产执行实现（spec §5.3）。
 
-与 `strategies/pine/sma_cross.pine` 严格对齐：
+基准口径（2026-11-04 决策）：**本实现 + `config/strategies/*.toml` 是唯一基准**，
+实盘信号与回测都由这里决定。`strategies/pine/sma_cross.pine` 只是「基线策略
+副本」（纯 SMA 交叉），用于验证最基础的交叉逻辑，参数与生产配置不同，
+不镜像生产逻辑，也不能反过来要求生产实现向它对齐。
+
+与基线一致的核心语义：
 - fast/slow 均为简单移动平均（不用 EMA）
 - 金叉（fast 上穿 slow）买入；死叉（fast 下穿 slow）平多
 - 使用上一根窗口计算 prev_fast/prev_slow，避免未来数据
+
+生产扩展（Pine 基线没有）：EMA/ATR 趋势过滤、支撑压力止盈止损、手续费预留。
+已知漂移由 `tests/strategies/test_pine_python_consistency.py` 显式登记，
+新增漂移会让测试失败。
 """
 from __future__ import annotations
 

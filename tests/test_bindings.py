@@ -369,6 +369,8 @@ class TestApi:
         assert [(b["inst_id"], b["bar"], b["enabled"]) for b in body["bindings"]] == [
             (INST, "1H", True)
         ]
+        # 没做过 Pine 交叉验证时必须显式返回「未覆盖」，不能静默 fail-open
+        assert body["pine_gate"] == "not_covered"
 
     async def test_put_disables_and_rebuilds_cache(self, api) -> None:
         app, store, redis, settings = api

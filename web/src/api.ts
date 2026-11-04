@@ -587,6 +587,8 @@ export type BindingsResponse = {
   // false 表示回滚开关打开，引擎只跑 [engine] 单组合
   multi_binding?: boolean;
   bindings: StrategyBinding[];
+  /** Pine 偏离门禁覆盖状态：passed / blocked / not_covered（旧后端可缺省） */
+  pine_gate?: string;
 };
 
 export type BindingResponse = {

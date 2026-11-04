@@ -295,6 +295,51 @@ class TestOptimize:
             )
 
 
+class TestPineGate:
+    """M4-16 偏离门禁三态：没做过对比 ≠ 对比通过（决策②）。"""
+
+    def test_not_covered_without_baseline(self, param_service) -> None:
+        service, _store = param_service
+
+        assert service.pine_gate("sma_cross") == "not_covered"
+
+    def test_blocked_when_deviation_exceeds_limit(
+        self, param_service, monkeypatch
+    ) -> None:
+        service, store = param_service
+        monkeypatch.setattr(
+            store,
+            "worst_pine_deviation",
+            lambda *_a: {"run_id": "r1", "deviation": "0.10"},
+        )
+
+        assert service.pine_gate("sma_cross") == "blocked"
+
+    def test_passed_when_deviation_within_limit(
+        self, param_service, monkeypatch
+    ) -> None:
+        service, store = param_service
+        monkeypatch.setattr(
+            store,
+            "worst_pine_deviation",
+            lambda *_a: {"run_id": "r1", "deviation": "0.01"},
+        )
+
+        assert service.pine_gate("sma_cross") == "passed"
+
+    def test_unparsable_deviation_is_not_covered(
+        self, param_service, monkeypatch
+    ) -> None:
+        service, store = param_service
+        monkeypatch.setattr(
+            store,
+            "worst_pine_deviation",
+            lambda *_a: {"run_id": "r1", "deviation": "bad"},
+        )
+
+        assert service.pine_gate("sma_cross") == "not_covered"
+
+
 class TestStrategyParamWrites:
     async def test_get_reports_toml_sources(self, param_service) -> None:
         service, _store = param_service

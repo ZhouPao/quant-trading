@@ -2127,6 +2127,56 @@ reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"
 唯一基准）；其余复核发现（Pine 门禁三态、CLI 校验、错误详情解析、AbortError 竞态等）
 按批次乙/丙顺序处理。
 
+### 8.70 M3 批次丁：两个口径决策落地（2026-11-04）
+
+**这是设计决策落地，不是 bug 修复**，两条都已由用户拍板。
+
+**决策① CLI 回测参数：共用函数，不共用数据源**
+- 设计文档 MS4-C §3.2 要求「回测与实盘共用 `resolve_params`」，但 CLI 三条路径
+  （`backtest`/`walkforward`/`optimize`）一直是 `load_strategy_class` +
+  `parse_params` 原样合并，无注释说明是有意设计 —— 属改造遗漏。
+- 落地：新增 `cli/_params.py::resolve_cli_params`，三条 CLI 统一走
+  `resolve_strategy`，自动获得类型/范围/未知键/NaN 校验；**默认 `store=None`
+  （纯 toml 基线）**，保证同一条命令结果可复现、寻优网格不被在线值污染；
+  新增 `--use-db-params` 显式开关用于「验证当前实盘参数」，并尊重全局回滚
+  开关 `params.resolve_from_db=false`。看板 M3-16 一键回测本就读 DB 覆盖。
+- **行为变化（需知悉）**：`--params` 里「toml 中不存在的键」现在会被拒绝
+  （与看板路径一致）；需要覆盖这类参数时，正确做法是在 toml 里声明该键。
+- 测试 `tests/test_cli_params.py`（8 例）：默认忽略 DB 覆盖、开关读取、全局
+  开关优先、显式参数优先且被 coerce、费率敏感性仍可用、越界/NaN/注入键被拒。
+
+**决策② 以 Python 为唯一基准（修订一条原始设计设定）**
+- 事实：`pine_compare.py` 原写「Pine 为主回测，Python 副本用于交叉验证」，
+  但实盘执行主体是 Python，且 Python 已扩展 EMA/ATR 过滤、`SrExitMixin`、
+  手续费预留（Pine 未复刻）。改 Python 去追 Pine 会**直接改变实盘信号**并污染
+  既有审计/回测历史；改 Pine 零运行风险。
+- 落地：
+  - 文档修订：`sma_cross.py` 文件头、`pine/README.md`、`pine_compare.py`
+    docstring 统一改为「**Python + 真实 toml 是唯一生产基准，Pine 是只验证
+    最基础逻辑的基线策略副本，不镜像生产参数/逻辑**」；两个 `.pine` 文件头
+    声明基线定位与已知差异。
+  - **门禁三态**：`BacktestService.pine_gate()` 返回
+    `passed / blocked / not_covered`，`GET /bindings` 带出该字段，前端启停矩阵
+    面板在 `not_covered` 时显式提示「当前参数集未做 Pine 交叉验证，偏离门禁
+    未覆盖，启用不会被 5% 检查拦截」——消除 `pine_block` fail-open 的虚假安全感
+    （`pine_block` 本身仍按原语义不拦，没做过对比不等于对比不通过）。
+    查询异常降级为 `not_covered` 并告警，不拖垮矩阵接口。
+  - **静态一致性登记**：新增
+    `tests/strategies/test_pine_python_consistency.py`，把 Pine ↔ toml 的
+    参数名/默认值差异、以及 `PARAM_SPEC` 默认值 ↔ toml 默认值的差异
+    （`slow_len 50 vs 100`、`ema_filter false vs true`）显式登记，
+    任何新增漂移都会让测试失败；同时要求每个 `.pine` 文件头声明基线定位。
+
+**验证**：`pytest` 全量 **1733 passed**（+16）；`npx tsc --noEmit` 通过；
+`npm test` **33 passed**；`npm run build` 通过；`ruff` 全过。
+
+**M3 第二轮复核剩余（批次乙/丙，按优先级）**：P1 `paramGroups` 按 `kind`
+过滤、两套最优口径统一（`extreme` vs `bestValue`）、`formatParams` 嵌套键排序、
+`getJson`/`postWrite` 错误详情解析（compare 400 中文原因被吞）；P2 三处
+`.catch` 未过滤 `AbortError`、共享 controller 无序号、compare 重复 id、
+回滚 `git_commit` 恒 NULL、`history_scan` 硬编码与历史键无 TTL、
+`bindings` 路由参数校验、缓存重建串行化；P3 注释/文档漂移与 a11y。
+
 ---
 
 ## 9. 相关文档

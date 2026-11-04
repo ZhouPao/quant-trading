@@ -60,6 +60,14 @@ def _add_backtest_args(sub, name: str) -> None:
         help='覆盖策略参数，如 "fast_len=10;slow_len=50"',
     )
     p.add_argument(
+        "--use-db-params",
+        action="store_true",
+        help=(
+            "读取看板在线调参（strategy_params）；默认只用 toml 基线，"
+            "保证同一条命令的回测结果可复现"
+        ),
+    )
+    p.add_argument(
         "--warmup-bars",
         type=int,
         default=300,

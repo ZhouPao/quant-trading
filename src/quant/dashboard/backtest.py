@@ -583,6 +583,8 @@ class BacktestService:
             # false 时引擎只跑 [engine] 单组合，页面需要提示矩阵未生效
             "multi_binding": self._settings.engine.multi_binding,
             "bindings": [_binding_payload(row) for row in rows],
+            # 门禁覆盖状态：让「没做过对比」显性化，别把 fail-open 当成安全
+            "pine_gate": self.pine_gate(strategy_id),
         }
 
     def _set_binding_sync(
@@ -691,6 +693,48 @@ class BacktestService:
             "over_limit": result["over_limit"],
             "persisted": sorted(columns),
         }
+
+    def pine_gate(self, strategy_id: str) -> str:
+        """当前参数集的 Pine 偏离门禁覆盖状态（M4-16）。
+
+        Returns:
+            ``passed``      — 有基线记录且偏离度未超限
+            ``blocked``     — 有基线记录且超 5%，禁止启用
+            ``not_covered`` — 这份参数集从未做过 Pine 交叉验证
+
+        `pine_block` 对「没有记录」返回 None（不拦），语义是「没做过对比
+        不等于对比不通过」；但只看门禁返回值，页面上完全看不出「当前
+        根本没有任何保护」。这里把三态显式暴露给看板，消除虚假安全感。
+        """
+        if self._store is None:
+            return "not_covered"
+        try:
+            params, _sources = resolve_params(
+                strategy_id,
+                self._config_dir,
+                self._store,
+                resolve_from_db=self._settings.params.resolve_from_db,
+            )
+        except (StrategyConfigError, ParamError):
+            return "not_covered"
+        params_text = json.dumps(_jsonable_params(params), sort_keys=True)
+        try:
+            row = self._store.worst_pine_deviation(strategy_id, params_text)
+        except Exception as e:  # noqa: BLE001
+            # 门禁查询失败不该让整个启停矩阵接口 500；按「未覆盖」提示
+            log.warning(f"pine gate read failed: {e}")
+            return "not_covered"
+        if row is None:
+            return "not_covered"
+        try:
+            deviation = float(row["deviation"])
+        except (TypeError, ValueError):
+            return "not_covered"
+        return (
+            "blocked"
+            if deviation > float(DEFAULT_DEVIATION_LIMIT)
+            else "passed"
+        )
 
     def pine_block(self, strategy_id: str) -> dict[str, object] | None:
         """当前生效参数集是否因偏离度超限被禁止启用（M4-16）。

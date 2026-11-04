@@ -19,13 +19,14 @@ from quant.backtest.runner import (
     format_metric,
     load_bars,
     parse_grid,
-    parse_params,
     parse_range,
 )
 from quant.backtest.walkforward import WalkForward
+from quant.cli._params import resolve_cli_params
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger, setup_logger
-from quant.strategies.loader import StrategyConfigError, load_strategy_class
+from quant.strategies.loader import StrategyConfigError
+from quant.strategies.params import ParamError
 
 _RANGE_FMT = "%Y-%m-%d %H:%M"
 
@@ -50,15 +51,12 @@ def main(args) -> int:
             end_ts,
             args.warmup_bars,
         )
-        strategy_cls, config_params = load_strategy_class(
-            args.strategy, args.config_dir
-        )
-        fixed_params = parse_params(args.params)
+        strategy_cls, base_params, _sources = resolve_cli_params(settings, args)
         grid = parse_grid(args.grid)
     except BacktestSetupError as e:
         log.error(str(e))
         return 1
-    except StrategyConfigError as e:
+    except (StrategyConfigError, ParamError) as e:
         log.error(str(e))
         return 1
 
@@ -72,7 +70,7 @@ def main(args) -> int:
         matcher=build_matcher(settings),
         window_size=settings.backtest.window_size,
         warmup_bars=args.warmup_bars,
-        base_params={**config_params, **fixed_params},
+        base_params=base_params,
         metric=args.metric,
     )
 

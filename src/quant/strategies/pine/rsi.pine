@@ -1,4 +1,8 @@
 //@version=5
+// 基线策略副本：仅验证最基础的 RSI 阈值逻辑，不是生产参数镜像。
+// 生产基准 = src/quant/strategies/python/rsi.py + config/strategies/rsi.toml
+// 已知差异：本副本参数名 period，生产为 rsi_period；生产另有 commission_rate。
+//           生产还有 SrExitMixin 支撑压力出场，本副本未复刻。
 strategy("RSI", overlay=false)
 period = input(14, "RSI Period")
 oversold = input(30, "Oversold")

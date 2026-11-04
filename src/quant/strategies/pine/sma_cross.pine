@@ -1,4 +1,8 @@
 //@version=5
+// 基线策略副本：仅验证最基础的 SMA 交叉逻辑，不是生产参数镜像。
+// 生产基准 = src/quant/strategies/python/sma_cross.py + config/strategies/sma_cross.toml
+// 已知差异：本副本 slow_len=50、无 EMA/ATR 过滤、无手续费预留；
+//           生产 slow_len=100 且开启 EMA 趋势过滤。差异由一致性测试登记。
 strategy("SMA Cross", overlay=true)
 fast_len = input(10, "Fast SMA")
 slow_len = input(50, "Slow SMA")
