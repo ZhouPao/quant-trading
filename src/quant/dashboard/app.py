@@ -91,6 +91,12 @@ from quant.dashboard.config_view import (
     hot_reload_rules,
 )
 from quant.dashboard.credentials import credential_status
+from quant.dashboard.factors import (
+    FactorError,
+    FactorNotFound,
+    FactorService,
+    parse_params,
+)
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
@@ -229,6 +235,7 @@ def create_app(
     config_path: Path | None = None,
 ) -> FastAPI:
     backtests = BacktestService(service.settings, service.store, service.redis)
+    factor_service = FactorService(service.settings)
     # 回测失败要发邮件（M9-11）：这里用真实 SMTP 配置，而不是 service 里
     # 那个「只查不发」的 no-op alerter
     backtest_alerts = AlertService(
@@ -505,6 +512,84 @@ def create_app(
     ) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
         return JSONResponse(await service.resolve_reconciliation(rec_id))
+
+    @app.get("/api/factors")
+    async def factors() -> JSONResponse:
+        """因子列表（M5-15）。"""
+        return JSONResponse(
+            {"factors": await asyncio.to_thread(factor_service.list)}
+        )
+
+    @app.get("/api/factors/correlations")
+    async def factor_correlations(
+        inst: str = Query(...),
+        bar: str = Query("1H"),
+        start: str = Query(...),
+        end: str = Query(...),
+        ids: str = Query(...),
+    ) -> JSONResponse:
+        try:
+            return JSONResponse(
+                await asyncio.to_thread(
+                    factor_service.correlations, ids, inst, bar, start, end
+                )
+            )
+        except FactorError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.get("/api/factors/{factor_id}/values")
+    async def factor_values(
+        factor_id: str,
+        inst: str = Query(...),
+        bar: str = Query("1H"),
+        start: str = Query(...),
+        end: str = Query(...),
+        params: str | None = Query(None),
+    ) -> JSONResponse:
+        try:
+            return JSONResponse(
+                await asyncio.to_thread(
+                    factor_service.values,
+                    factor_id,
+                    inst,
+                    bar,
+                    start,
+                    end,
+                    parse_params(params),
+                )
+            )
+        except FactorNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except FactorError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.get("/api/factors/{factor_id}/evaluate")
+    async def factor_evaluate(
+        factor_id: str,
+        insts: str = Query(""),
+        bar: str = Query("1H"),
+        start: str = Query(...),
+        end: str = Query(...),
+        horizon: int = Query(1, ge=1, le=20),
+        quantiles: int = Query(5, ge=2, le=10),
+    ) -> JSONResponse:
+        try:
+            return JSONResponse(
+                await asyncio.to_thread(
+                    factor_service.evaluate,
+                    factor_id,
+                    insts,
+                    bar,
+                    start,
+                    end,
+                    horizon=horizon,
+                    quantiles=quantiles,
+                )
+            )
+        except FactorNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except FactorError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.get("/api/config")
     async def config_view() -> JSONResponse:

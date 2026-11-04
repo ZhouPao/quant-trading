@@ -2944,6 +2944,32 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 值曲线/IC 时序/分层柱状图/相关性热力图，以及回测/实盘把 `FactorProvider`
 结果填进 `Context.factors`。
 
+### 8.95 M5 第四批 7-4a：因子看板后端（2026-11-04）
+
+**新增 `dashboard/factors.py::FactorService` + 4 个只读路由**：
+- `GET /api/factors`：列表（id/name/category/scope/lookback/default_params/
+  description/aliases）；
+- `GET /api/factors/{id}/values?inst=&bar=&start=&end=[&params=JSON]`：
+  区间因子值，`Decimal` 以**文本**下发（`None` 保留）；
+- `GET /api/factors/{id}/evaluate?insts=&bar=&start=&end=&horizon=&quantiles=`：
+  多品种宽表评价，返回 IC/RankIC/ICIR、分层、多空、衰减、换手；
+- `GET /api/factors/correlations?ids=&inst=&bar=&start=&end`：相关性矩阵 +
+  `redundant` 冗余对。
+- 上限：单次最多 **10 个品种 / 8 个因子**；计算在 `to_thread` 里跑，不阻塞事件循环。
+- 错误语义：未知因子 **404**（`FactorNotFound`），参数/区间错误 **400**；
+  `params` 只接受 JSON 对象。
+
+**测试**：`tests/test_factor_api.py` 11 条——列表含内置、值序列预热为 `None`、
+未知因子 404、坏日期 400、评价指标与衰减/换手、品种上限、相关性对角为 1、
+`params` 空/坏 JSON/非对象。
+
+**验证**：`pytest` 全量 **1888 passed**（+11）；`ruff` 全过。
+
+**账本**：M5 达 **13 ✅ / 2 🟡 / 0 ⬜**（M5-15 后端就绪、前端待做；M5-13 引擎接入
+待做）；合计 **129/150（86.0%）**。
+
+**下一项**：7-4b 前端因子页（列表 / 值曲线 / IC 时序 / 分层柱状图 / 相关性热力图）。
+
 ---
 
 ## 9. 相关文档
