@@ -21,6 +21,10 @@ import {
   fetchReconciliations,
   fetchConfig,
   fetchCredentials,
+  fetchFactors,
+  fetchFactorValues,
+  fetchFactorEvaluation,
+  fetchFactorCorrelations,
   fetchProcesses,
   fetchProcessCommands,
   controlProcess as controlProcessApi,
@@ -111,6 +115,10 @@ import {
   type PositionRow,
   type ConfigResponse,
   type CredentialsResponse,
+  type FactorCorrelationsResponse,
+  type FactorEvaluationResponse,
+  type FactorSummary,
+  type FactorValuesResponse,
   type ProcessCommand,
   type ProcessesResponse,
   type RiskLimitRule,
@@ -129,7 +137,9 @@ import {
   type CompareSort,
 } from "./compare";
 import { CandleChart } from "./chart/CandleChart";
+import { EChart } from "./chart/EChart";
 import { IndicatorBar } from "./chart/IndicatorBar";
+import type { EChartsOption } from "echarts";
 import { loadSettings, saveSettings } from "./chart/settings";
 import type { ChartSettings } from "./chart/types";
 import "./styles.css";
@@ -1455,9 +1465,9 @@ export default function App() {
 
         {tab === "settings" && <SettingsPanel />}
 
-        {(tab === "factors" || tab === "portfolio") && (
-          <ModulePlaceholder tab={tab} />
-        )}
+        {tab === "factors" && <FactorPanel />}
+
+        {tab === "portfolio" && <ModulePlaceholder tab={tab} />}
       </main>
       </div>
 
@@ -1542,6 +1552,305 @@ function CredentialPanel() {
         </div>
       )}
     </>
+  );
+}
+
+/** 日期输入 → YYYY-MM-DD（UTC，offset 以天为单位）。 */
+function isoDay(offset: number): string {
+  return new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+function fmtSigned(value: number | null | undefined, digits = 3): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  return value.toFixed(digits);
+}
+
+function fmtPct(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+/** M5-15：因子页（列表 / 值曲线 / IC / 分层 / 相关性）。 */
+function FactorPanel() {
+  const [factors, setFactors] = useState<FactorSummary[]>([]);
+  const [selected, setSelected] = useState("");
+  const [inst, setInst] = useState("BTC-USDT");
+  const [bar, setBar] = useState("1H");
+  const [start, setStart] = useState(() => isoDay(-30));
+  const [end, setEnd] = useState(() => isoDay(0));
+  const [values, setValues] = useState<FactorValuesResponse | null>(null);
+  const [evaluation, setEvaluation] =
+    useState<FactorEvaluationResponse | null>(null);
+  const [correlations, setCorrelations] =
+    useState<FactorCorrelationsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchFactors(controller.signal)
+      .then((rows) => {
+        setFactors(rows);
+        setSelected((current) => current || rows[0]?.factor_id || "");
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!selected) return;
+    const controller = new AbortController();
+    setBusy(true);
+    setError(null);
+    const insts = [inst, "BTC-USDT", "ETH-USDT", "SOL-USDT"]
+      .filter((value, index, array) => array.indexOf(value) === index)
+      .join(",");
+    Promise.all([
+      fetchFactorValues(controller.signal, selected, {
+        inst,
+        bar,
+        start,
+        end,
+      }),
+      fetchFactorEvaluation(controller.signal, selected, {
+        insts,
+        bar,
+        start,
+        end,
+      }),
+    ])
+      .then(([valueData, evalData]) => {
+        setValues(valueData);
+        setEvaluation(evalData);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      })
+      .finally(() => setBusy(false));
+    return () => controller.abort();
+  }, [selected, inst, bar, start, end]);
+
+  useEffect(() => {
+    if (!selected || factors.length === 0) return;
+    const ids = [
+      selected,
+      ...factors
+        .filter((item) => item.factor_id !== selected)
+        .slice(0, 3)
+        .map((item) => item.factor_id),
+    ].join(",");
+    const controller = new AbortController();
+    fetchFactorCorrelations(controller.signal, {
+      ids,
+      inst,
+      bar,
+      start,
+      end,
+    })
+      .then(setCorrelations)
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setCorrelations(null);
+      });
+    return () => controller.abort();
+  }, [selected, factors, inst, bar, start, end]);
+
+  const spec = factors.find((item) => item.factor_id === selected);
+
+  const valueOption = useMemo<EChartsOption>(() => {
+    const rows = values?.values ?? [];
+    return {
+      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+      tooltip: { trigger: "axis" },
+      xAxis: {
+        type: "category",
+        data: rows.map((row) => new Date(row.ts).toLocaleDateString()),
+      },
+      yAxis: { type: "value", scale: true },
+      series: [
+        {
+          type: "line" as const,
+          showSymbol: false,
+          data: rows.map((row) =>
+            row.value === null ? null : Number(row.value),
+          ),
+        },
+      ],
+    };
+  }, [values]);
+
+  const icOption = useMemo<EChartsOption>(() => {
+    const rows = evaluation?.ic ?? [];
+    return {
+      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+      tooltip: { trigger: "axis" },
+      xAxis: {
+        type: "category",
+        data: rows.map((row) => new Date(row.ts).toLocaleDateString()),
+      },
+      yAxis: { type: "value", scale: true },
+      series: [
+        {
+          type: "line" as const,
+          showSymbol: false,
+          data: rows.map((row) => row.value),
+        },
+      ],
+    };
+  }, [evaluation]);
+
+  const quantileOption = useMemo<EChartsOption>(() => {
+    // tsconfig 的 lib 不含 ES2022，不能用 Array.prototype.at
+    const rows = evaluation?.quantile_returns ?? [];
+    const latest = rows.length > 0 ? rows[rows.length - 1].values : [];
+    return {
+      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+      tooltip: {},
+      xAxis: {
+        type: "category",
+        data: ["Q1", "Q2", "Q3", "Q4", "Q5"],
+      },
+      yAxis: { type: "value", scale: true },
+      series: [
+        {
+          type: "bar" as const,
+          data: latest,
+          itemStyle: { color: "#38bdf8" },
+        },
+      ],
+    };
+  }, [evaluation]);
+
+  const heatOption = useMemo<EChartsOption>(() => {
+    const ids = correlations?.factor_ids ?? [];
+    const points = (correlations?.matrix ?? []).map((cell) => [
+      ids.indexOf(cell.a),
+      ids.indexOf(cell.b),
+      cell.corr,
+    ]);
+    return {
+      grid: { left: 96, right: 24, top: 20, bottom: 64 },
+      tooltip: {},
+      xAxis: {
+        type: "category",
+        data: ids,
+        axisLabel: { rotate: 30 },
+      },
+      yAxis: { type: "category", data: ids },
+      visualMap: {
+        min: -1,
+        max: 1,
+        calculable: true,
+        orient: "horizontal",
+        left: "center",
+        bottom: 0,
+        inRange: { color: ["#3b82f6", "#f8fafc", "#ef4444"] },
+      },
+      series: [
+        {
+          type: "heatmap" as const,
+          data: points,
+          label: { show: true, fontSize: 10 },
+        },
+      ],
+    };
+  }, [correlations]);
+
+  return (
+    <section className="card reveal">
+      <div className="card-head">
+        <h2>因子库</h2>
+        <span className="card-note">
+          {busy ? "计算中…" : `${factors.length} 个因子 · 只读`}
+        </span>
+      </div>
+      <div className="bt-form">
+        <label className="bt-field">
+          <span>因子</span>
+          <select
+            value={selected}
+            onChange={(event) => setSelected(event.target.value)}
+          >
+            {factors.map((item) => (
+              <option key={item.factor_id} value={item.factor_id}>
+                {item.name}（{item.factor_id}）
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="bt-field">
+          <span>品种</span>
+          <input
+            value={inst}
+            onChange={(event) => setInst(event.target.value)}
+          />
+        </label>
+        <label className="bt-field">
+          <span>周期</span>
+          <input value={bar} onChange={(event) => setBar(event.target.value)} />
+        </label>
+        <label className="bt-field">
+          <span>起始</span>
+          <input
+            type="date"
+            value={start}
+            onChange={(event) => setStart(event.target.value)}
+          />
+        </label>
+        <label className="bt-field">
+          <span>结束</span>
+          <input
+            type="date"
+            value={end}
+            onChange={(event) => setEnd(event.target.value)}
+          />
+        </label>
+      </div>
+      {error && <div className="kill-msg kill-msg-bad">{error}</div>}
+      {spec && (
+        <div className="chart-foot">
+          <span className="mono">类别 {spec.category}</span>
+          <span className="mono">scope {spec.scope}</span>
+          <span className="mono">lookback {spec.lookback}</span>
+          <span className="mono">IC {fmtSigned(evaluation?.ic_mean)}</span>
+          <span className="mono">RankIC {fmtSigned(evaluation?.rank_ic_mean)}</span>
+          <span className="mono">ICIR {fmtSigned(evaluation?.icir, 2)}</span>
+          <span className="mono">换手 {fmtPct(evaluation?.turnover)}</span>
+        </div>
+      )}
+      <div className="bt-sub">
+        <span>因子值</span>
+      </div>
+      <EChart option={valueOption} height={200} />
+      <div className="bt-sub">
+        <span>IC 时序（horizon=1）</span>
+      </div>
+      <EChart option={icOption} height={180} />
+      <div className="bt-sub">
+        <span>五档分层收益（最近一期）</span>
+      </div>
+      <EChart option={quantileOption} height={180} />
+      <div className="bt-sub">
+        <span>相关性（|corr| &gt; 0.8 标冗余）</span>
+      </div>
+      <EChart option={heatOption} height={240} />
+      {(correlations?.redundant ?? []).length > 0 && (
+        <div className="bt-note">
+          冗余对：
+          {correlations?.redundant
+            .map((pair) => `${pair.a} / ${pair.b}`)
+            .join("；")}
+        </div>
+      )}
+    </section>
   );
 }
 

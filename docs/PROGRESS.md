@@ -2970,6 +2970,32 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 
 **下一项**：7-4b 前端因子页（列表 / 值曲线 / IC 时序 / 分层柱状图 / 相关性热力图）。
 
+### 8.96 M5 第四批 7-4b：因子页（M5-15 闭环）（2026-11-04）
+
+**前端因子 Tab 从占位卡换成真实页面**：
+- `api.ts` 补 4 个请求：`fetchFactors` / `fetchFactorValues` /
+  `fetchFactorEvaluation` / `fetchFactorCorrelations`，统一 `factorQuery`
+  拼参（空值不传）。
+- 新增 `web/src/chart/EChart.tsx`：轻量 echarts 容器（只注册 line/bar/heatmap
+  与必要组件），`setOption(option, true)` 全量替换，`ResizeObserver` 自适应。
+- 新增 `FactorPanel`：
+  - 筛选：因子下拉（名称+ID）、品种、周期、起止日期（默认近 30 天）；
+  - 摘要：类别 / scope / lookback / IC 均值 / RankIC / ICIR / 换手；
+  - 三张图：因子值曲线、IC 时序（horizon=1）、五档分层收益（最近一期）；
+  - 相关性热力图：当前因子 + 其余前 3 个因子，`|corr|>0.8` 在下方列出冗余对；
+  - 品种默认 `BTC/ETH/SOL` 去重后传给评价接口（IC 需要 ≥3 个横截面样本）。
+- **测试边界如实说明**：前端无组件 harness，本项靠 `tsc --noEmit` + `build` +
+  代码审查兜底（与既有 UI 项同一口径）；后端接口已有 11 条测试。
+
+**验证**：`pytest` 全量 **1888 passed**（无后端改动）；`npx tsc --noEmit` 通过；
+`npm test` **38 passed**；`npm run build` 通过。
+
+**账本**：M5 达 **14 ✅ / 1 🟡 / 0 ⬜**（仅剩 M5-13 引擎接入）；
+合计 **130/150（86.7%）**。
+
+**下一项**：7-4c 引擎接入（M5-13 收尾）——回测与实盘把 `FactorProvider`
+结果填进 `Context.factors`，配置开关 `[factors]`，测试「用因子/不用因子」可切换。
+
 ---
 
 ## 9. 相关文档

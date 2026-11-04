@@ -1093,6 +1093,130 @@ export type ProcessesResponse = {
   degraded: string[];
 };
 
+export type FactorSummary = {
+  factor_id: string;
+  name: string;
+  category: string;
+  scope: string;
+  lookback: number;
+  default_params: Record<string, unknown>;
+  description: string;
+  aliases: string[];
+};
+
+/** M5-15：已注册因子列表。 */
+export async function fetchFactors(signal: AbortSignal) {
+  const data = await getJson<{ factors: FactorSummary[] }>(
+    "/api/factors",
+    signal,
+  );
+  return data.factors ?? [];
+}
+
+export type FactorValue = { ts: number; value: string | null };
+
+export type FactorValuesResponse = {
+  factor_id: string;
+  inst: string;
+  bar: string;
+  start_ts: number;
+  end_ts: number;
+  values: FactorValue[];
+};
+
+export type FactorQuery = {
+  inst?: string;
+  bar?: string;
+  start: string;
+  end: string;
+  params?: string;
+};
+
+function factorQuery(query: Record<string, string | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === "") continue;
+    params.set(key, value);
+  }
+  return params.toString();
+}
+
+/** M5-15：单因子值序列。 */
+export async function fetchFactorValues(
+  signal: AbortSignal,
+  factorId: string,
+  query: FactorQuery,
+) {
+  const qs = factorQuery({
+    inst: query.inst,
+    bar: query.bar,
+    start: query.start,
+    end: query.end,
+    params: query.params,
+  });
+  return getJson<FactorValuesResponse>(
+    `/api/factors/${encodeURIComponent(factorId)}/values?${qs}`,
+    signal,
+  );
+}
+
+export type FactorPoint = { ts: number; value: number | null };
+
+export type FactorEvaluationResponse = {
+  factor_id: string;
+  insts: string[];
+  bar: string;
+  horizon: number;
+  ic: FactorPoint[];
+  rank_ic: FactorPoint[];
+  ic_mean: number | null;
+  rank_ic_mean: number | null;
+  icir: number | null;
+  quantile_returns: { ts: number; values: (number | null)[] }[];
+  long_short: FactorPoint[];
+  decay: { lag: number; ic: number | null }[];
+  turnover: number | null;
+};
+
+/** M5-15：因子评价（IC/分层/衰减/换手）。 */
+export async function fetchFactorEvaluation(
+  signal: AbortSignal,
+  factorId: string,
+  query: { insts?: string; bar?: string; start: string; end: string; horizon?: number },
+) {
+  const qs = factorQuery({
+    insts: query.insts,
+    bar: query.bar,
+    start: query.start,
+    end: query.end,
+    horizon: query.horizon === undefined ? undefined : String(query.horizon),
+  });
+  return getJson<FactorEvaluationResponse>(
+    `/api/factors/${encodeURIComponent(factorId)}/evaluate?${qs}`,
+    signal,
+  );
+}
+
+export type FactorCorrelationsResponse = {
+  inst: string;
+  bar: string;
+  factor_ids: string[];
+  matrix: { a: string; b: string; corr: number | null }[];
+  redundant: { a: string; b: string }[];
+};
+
+/** M5-15：多因子相关性矩阵。 */
+export async function fetchFactorCorrelations(
+  signal: AbortSignal,
+  query: { ids: string; inst: string; bar: string; start: string; end: string },
+) {
+  const qs = factorQuery(query);
+  return getJson<FactorCorrelationsResponse>(
+    `/api/factors/correlations?${qs}`,
+    signal,
+  );
+}
+
 export type CredentialCheck = {
   name: string;
   status: string;
