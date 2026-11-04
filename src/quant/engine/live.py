@@ -287,6 +287,8 @@ class LiveSignalEngine:
         signals: list[Signal] = []
         for bar in bars:
             ctx.timestamp = bar.ts
+            # 每根 bar 清空：避免上一根的拦截原因被当成这一根的
+            ctx.last_block_reason = ""
             ctx.bars_window.append(bar)
             if len(ctx.bars_window) > window:
                 del ctx.bars_window[: len(ctx.bars_window) - window]
@@ -324,7 +326,13 @@ class LiveSignalEngine:
 
         if not signals:
             await self._mark(binding, newest.ts)
-            return EngineTick("no_signal", newest.ts, catch_up=catch_up)
+            # 策略可以说明「为什么没信号」（M3-5）；空串表示确实没有条件成立
+            return EngineTick(
+                "no_signal",
+                newest.ts,
+                reason=ctx.last_block_reason,
+                catch_up=catch_up,
+            )
 
         queued: list[Signal] = []
         for signal in signals:

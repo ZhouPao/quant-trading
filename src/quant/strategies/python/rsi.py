@@ -66,14 +66,17 @@ class RsiStrategy(SrExitMixin, Strategy):
         rsi = self._update_rsi(bar)
         self.last_rsi = rsi
         if rsi is None:
+            ctx.last_block_reason = "warmup: rsi not ready"
             return None
 
         if rsi < self.oversold and ctx.position.is_flat:
             stop, _ = self._sr_freeze(bar.close, ctx)
             if not self._sr_allows_entry(stop):
+                ctx.last_block_reason = "oversold but no support level"
                 return None
             qty = self._position_qty(ctx.cash, bar.close)
             if qty <= 0:
+                ctx.last_block_reason = "oversold but insufficient cash"
                 return None
             return Signal(
                 strategy_id=self.strategy_id,
@@ -94,6 +97,10 @@ class RsiStrategy(SrExitMixin, Strategy):
                 ts=bar.ts,
             )
 
+        ctx.last_block_reason = (
+            f"rsi={rsi:.2f} not in entry zone "
+            f"(<{self.oversold} flat / >{self.overbought} long)"
+        )
         return None
 
     def _update_rsi(self, bar: Bar) -> Decimal | None:

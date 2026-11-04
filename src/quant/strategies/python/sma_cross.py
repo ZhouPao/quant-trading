@@ -93,6 +93,9 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
         if self.ema_filter and self.ema_band_atr > 0:
             need = max(need, self.atr_len + 1)
         if len(ctx.bars_window) < need:
+            ctx.last_block_reason = (
+                f"warmup: need {need} bars, have {len(ctx.bars_window)}"
+            )
             return None
 
         closes = [b.close for b in ctx.bars_window]
@@ -103,18 +106,21 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
         prev_fast = sum(prev[-self.fast_len :]) / self.fast_len
         prev_slow = sum(prev[-self.slow_len :]) / self.slow_len
 
+        crossed_up = prev_fast <= prev_slow and fast > slow
+        crossed_down = prev_fast >= prev_slow and fast < slow
+
         # 金叉：空仓时买入（开启趋势过滤时还要求越过趋势门槛）
-        if (
-            prev_fast <= prev_slow
-            and fast > slow
-            and ctx.position.is_flat
-            and self._trend_ok(ctx.bars_window)
-        ):
+        if crossed_up and ctx.position.is_flat:
+            if not self._trend_ok(ctx.bars_window):
+                ctx.last_block_reason = "golden cross but trend filter blocked"
+                return None
             stop, _ = self._sr_freeze(bar.close, ctx)
             if not self._sr_allows_entry(stop):
+                ctx.last_block_reason = "golden cross but no support level"
                 return None
             qty = self._position_qty(ctx.cash, bar.close)
             if qty <= 0:
+                ctx.last_block_reason = "golden cross but insufficient cash"
                 return None
             return Signal(
                 strategy_id=self.strategy_id,
@@ -126,7 +132,7 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
             )
 
         # 死叉：持多时平仓
-        if prev_fast >= prev_slow and fast < slow and ctx.position.is_long:
+        if crossed_down and ctx.position.is_long:
             return Signal(
                 strategy_id=self.strategy_id,
                 side="sell",
@@ -136,6 +142,10 @@ class SmaCrossStrategy(SrExitMixin, Strategy):
                 ts=bar.ts,
             )
 
+        if crossed_up:
+            ctx.last_block_reason = "golden cross ignored: already long"
+        elif crossed_down:
+            ctx.last_block_reason = "death cross ignored: no position"
         return None
 
     def _trend_ok(self, bars: list[Bar]) -> bool:

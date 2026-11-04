@@ -35,6 +35,10 @@ class Context:
     params: dict[str, Any] = field(default_factory=dict)
     cash: Decimal = Decimal("0")
     timestamp: int = 0
+    #: 最近一次 on_bar 返回 None 的具体原因（M3-5）：策略写入，引擎在
+    #: 无信号时透出到 EngineTick.reason，便于回答「为什么没开仓」。
+    #: 选字段而不是改 on_bar 返回类型：现有一百多处策略实现无需改动。
+    last_block_reason: str = ""
 
     @property
     def equity_at_price(self) -> Decimal:

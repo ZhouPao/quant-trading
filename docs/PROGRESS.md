@@ -2805,6 +2805,31 @@ README 说明导出命令与环境变量。
 **下一项**：5-1 信号拦截原因契约（M3-5）——`Context.last_block_reason`，
 让引擎卡能显示「被趋势过滤/撑压条件挡住」，而不是笼统的 `no_signal`。
 
+### 8.90 MS5 收尾 5-1/5-2：信号拦截原因（M3-5 闭环）（2026-11-04）
+
+**契约选择**：`Context.last_block_reason` 字段，而不是改 `on_bar` 返回类型——
+现有一百多处策略实现无需改动，向后兼容。
+- `sma_cross`：`warmup: need N bars`、`golden cross but trend filter blocked`、
+  `golden cross but no support level`、`insufficient cash`、
+  `golden cross ignored: already long`、`death cross ignored: no position`。
+- `rsi`：`warmup: rsi not ready`、`oversold but no support level`、
+  `insufficient cash`、`rsi=xx not in entry zone (<30 flat />70 long)`。
+- 引擎：逐 bar **先清空**再回放（避免上一根原因残留），无信号时把
+  `ctx.last_block_reason` 写进 `EngineTick.reason`，`publish_status` 原样透出。
+- **5-2 无需改前端**：引擎卡已有 `engine-reason` 元素消费 `reason` 字段，
+  只是此前 reason 恒为空；现在会显示具体拦截条件。
+- 未开仓时不再只有笼统的 `no_signal`，「为什么没信号」可直接在页面读到。
+
+**测试**：`tests/test_strategy_reasons.py` 5 条——SMA 预热/无交叉不编造原因/
+趋势过滤/已持多忽略金叉、RSI 中性区间显示数值（逐根驱动，符合引擎调用方式）。
+
+**验证**：`pytest` 全量 **1833 passed**（+5）；`ruff` 全过。纯后端（前端复用现有展示）。
+
+**账本**：M3-5 🟡 → ✅；M3 达 17 ✅ / 1 🟡 / 0 ⬜；合计 **115/150（76.7%）**，
+MS5 剩余 🟡 仅 M3-13、M4-8、M8-7、M8-8。
+
+**下一项**：6-1 `quant check-strategies --strict`（M3-13 双副本一致性 CLI）。
+
 ---
 
 ## 9. 相关文档
