@@ -2591,6 +2591,34 @@ sha256 + manifest）。
 **下一项**：3-4 `M10-6 进程启停`（Redis 命令通道 + 审计；按拍板默认只允许
 `demo=true` 的进程启停，实盘需额外开关）。
 
+### 8.82 MS5 收尾 3-4a：supervisor 启停命令通道（2026-11-04）
+
+**M10-6 的后端可测部分**（API 与前端按钮留给 3-4b）：
+- **命令队列**：看板 `LPUSH quant:control:supervisor`，supervisor 在每秒轮询
+  开头 `LPOP` 消费（`_drain_commands`）。命令格式
+  `{command_id, action: stop|start, name, operator, issued_at}`。
+- **期望状态**：`_Child.desired`（默认 True）。`stop` → `terminate()` +
+  `desired=False`；进程退出后**保持停止**，不再进入自动重启；`start` →
+  `desired=True` 并立即拉起。
+- **不破坏自愈**：未被 stop 的进程崩溃仍走原有指数退避重启（有专门用例）。
+- **审计**：每条命令写 `quant:control:audit`（LPUSH + LTRIM 1000），含
+  `command_id/action/name/operator/issued_at/status/error/ts`；未知进程/动作
+  记 `rejected`，坏 JSON 只告警、不中断轮询。
+- **进程表**：`quant:supervisor` 的每个子进程新增 `desired` 字段，看板可区分
+  「用户主动停止」与「异常离线」。
+- **安全边界**：本批只做了通道与执行；**入口（API）还没开**，因此当前想停进程
+  只能手工 LPUSH。3-4b 会加 `POST /api/processes/{name}/stop|start`，并按拍板
+  默认只允许 `okx.demo=true` 时使用。
+
+**测试**：`tests/test_supervisor.py` 11 条——指数退避、stop 终止且不再重启、
+start 拉起、未知进程/动作 rejected、坏命令不崩、正常崩溃仍重启。
+
+**验证**：`pytest` 全量 **1780 passed**（本轮新增 11 条已定向核对全过）；
+`ruff` 全过。
+
+**下一项**：3-4b——API（写守卫 + demo 限制）+ 前端进程表启停按钮（二次确认）
++ 审计展示；随后回到 2-1 配置视图。
+
 ---
 
 ## 9. 相关文档

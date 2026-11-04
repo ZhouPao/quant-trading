@@ -37,6 +37,11 @@ RESTART_BASE_SECONDS = 2.0
 RESTART_MAX_SECONDS = 60.0
 SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
+#: 看板 -> supervisor 的控制命令队列（LPUSH 入队、supervisor LPOP 消费）
+CONTROL_KEY = "quant:control:supervisor"
+#: 命令审计（定长 1000 条，含 accepted/rejected 与时间）
+CONTROL_AUDIT_KEY = "quant:control:audit"
+
 
 @dataclass(frozen=True)
 class ProcessSpec:
@@ -55,6 +60,8 @@ class _Child:
     started_at: float = 0.0
     failures: int = 0
     next_start_at: float = 0.0
+    #: 用户期望状态：False 表示被主动 stop，退出后不再自动重启（M10-6）
+    desired: bool = True
 
 
 def restart_delay(
@@ -148,13 +155,22 @@ class Supervisor:
     # internal
 
     def _poll_once(self, now: float) -> None:
+        # 先消费看板下发的启停命令，再按最新期望状态推断是否重启
+        self._drain_commands()
         for name, child in list(self._children.items()):
             if child.proc is None:
-                if now >= child.next_start_at:
+                if child.desired and now >= child.next_start_at:
                     self._children[name] = self._spawn(child.spec, child.failures)
                 continue
             code = child.proc.poll()
             if code is None:
+                continue
+            if not child.desired:
+                # 主动停掉的子进程：正常退出后保持停止，不进入重启退避
+                self._log.info(f"process stopped name={name} code={code}")
+                self._children[name] = _Child(
+                    spec=child.spec, proc=None, desired=False
+                )
                 continue
             uptime = now - child.started_at
             failures = 0 if uptime >= STABLE_UPTIME_SECONDS else child.failures + 1
@@ -170,6 +186,73 @@ class Supervisor:
                 next_start_at=now + delay,
             )
         self._publish_process_table()
+
+    def _drain_commands(self) -> None:
+        """消费看板下发的 stop/start 命令；格式非法只告警不中断轮询。"""
+        if self._redis is None:
+            return
+        while True:
+            try:
+                raw = self._redis.lpop(CONTROL_KEY)
+            except Exception as e:  # noqa: BLE001
+                self._log.warning(f"read control command failed: {e}")
+                return
+            if raw is None:
+                return
+            try:
+                command = json.loads(raw)
+            except (TypeError, ValueError):
+                self._log.warning(f"ignore malformed control command: {raw!r}")
+                continue
+            self._apply_command(command)
+
+    def _apply_command(self, command: dict) -> None:
+        name = str(command.get("name", ""))
+        action = str(command.get("action", ""))
+        child = self._children.get(name)
+        if child is None:
+            self._record_command(command, "rejected", f"unknown process {name!r}")
+            return
+        if action == "stop":
+            if child.proc is not None and child.proc.poll() is None:
+                child.proc.terminate()
+            child.desired = False
+            self._children[name] = child
+            self._record_command(command, "accepted", "")
+            return
+        if action == "start":
+            child.desired = True
+            if child.proc is None or child.proc.poll() is not None:
+                self._children[name] = self._spawn(child.spec, failures=0)
+            else:
+                self._children[name] = child
+            self._record_command(command, "accepted", "")
+            return
+        self._record_command(command, "rejected", f"unknown action {action!r}")
+
+    def _record_command(
+        self, command: dict, status: str, error: str
+    ) -> None:
+        """把命令处理结果写审计队列（定长 1000，含操作人与时间）。"""
+        if self._redis is None:
+            return
+        entry = {
+            "command_id": command.get("command_id"),
+            "action": command.get("action"),
+            "name": command.get("name"),
+            "operator": command.get("operator", ""),
+            "issued_at": command.get("issued_at"),
+            "status": status,
+            "error": error,
+            "ts": int(time.time() * 1000),
+        }
+        try:
+            self._redis.lpush(
+                CONTROL_AUDIT_KEY, json.dumps(entry, ensure_ascii=False)
+            )
+            self._redis.ltrim(CONTROL_AUDIT_KEY, 0, 999)
+        except Exception as e:  # noqa: BLE001
+            self._log.warning(f"record control command failed: {e}")
 
     def _publish_process_table(self) -> None:
         """把子系统 pid/重启次数写到 Redis（TTL 15s）。
@@ -193,6 +276,8 @@ class Supervisor:
                 ),
                 "restarts": child.failures,
                 "last_exit": proc.poll() if proc else None,
+                # false = 被用户主动 stop（看板显示「已停止」而非「离线」）
+                "desired": child.desired,
             }
         payload = {"ts": now_ms, "pid": os.getpid(), "children": children}
         try:
