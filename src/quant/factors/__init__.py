@@ -9,6 +9,14 @@
 from __future__ import annotations
 
 from quant.factors import builtin  # noqa: F401  导入即注册内置因子
+from quant.factors.evaluate import (
+    CorrelationResult,
+    EvaluationResult,
+    correlation_matrix,
+    evaluate,
+    percentile,
+    zscore,
+)
 from quant.factors.params import param_hash
 from quant.factors.protocol import CATEGORIES, SCOPES, Factor
 from quant.factors.provider import FILL_MODES, FactorProvider
@@ -24,12 +32,18 @@ __all__ = [
     "CATEGORIES",
     "FILL_MODES",
     "SCOPES",
+    "CorrelationResult",
+    "EvaluationResult",
     "Factor",
     "FactorProvider",
     "FactorStore",
+    "correlation_matrix",
+    "evaluate",
     "factor",
     "get_factor",
     "list_factors",
     "param_hash",
+    "percentile",
     "register",
+    "zscore",
 ]

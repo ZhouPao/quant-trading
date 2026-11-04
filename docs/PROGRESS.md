@@ -2910,6 +2910,40 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 **下一项**：7-3 因子评价（M5-6~11）——横截面标准化、IC/RankIC/ICIR、分层收益、
 衰减、换手、相关性矩阵。
 
+### 8.94 M5 第三批 7-3：因子评价（2026-11-04）
+
+**新增 `factors/evaluate.py`**（M5-6~11），输入是宽表
+`factor_values[inst][ts]` + `prices[inst][ts]`，全部按 ts 横截面计算：
+- **横截面标准化**（M5-6）：`zscore` / `percentile`，缺失品种不参与该 ts 统计；
+- **IC / RankIC / ICIR**（M5-7）：Pearson IC、平均排名后 Pearson 得 RankIC，
+  ICIR = 均值/样本标准差（标准差为 0 返回 **None**，不产生 inf）；
+- **分层收益**（M5-8）：按因子值升序分 N 档（默认 5），`long_short = 最高档 - 最低档`；
+- **衰减**（M5-9）：`decay` 返回 lag 1..N 的 IC 均值；
+- **换手**（M5-10）：相邻 ts 分档变化比例（只统计两边都出现的品种）；
+- **相关性矩阵**（M5-11）：`correlation_matrix`，`|corr| > 0.8` 记入 `redundant`。
+- 指标本身是统计量，内部转 float；**金额/价格不在这里落库**。
+
+**测试**：`tests/test_factor_eval.py` 15 条——`_pearson` 样本不足/完全相关、
+`_icir` 恒定 IC 为 None、z-score/百分位/缺失跳过、完美因子 IC≈1、
+分层单调 + 多空为正、衰减 lag 齐全且递减、换手在 [0,1]、相关性冗余标记、
+对角为 1、缺失配对丢弃。
+
+**过程如实记录（两个被测试抓到的 bug）**：
+1. `zscore` 的字典推导里用了原始 `Decimal` 参与 `Decimal - float`，直接
+   `TypeError`；已改为用 `present[k]`（float）计算。
+2. `_turnover` 里 `zip(buckets, buckets[1:], strict=True)` 长度天然差 1，
+   `ValueError`；已改 `strict=False`（同时满足 ruff B905）。
+
+**验证**：`pytest` 全量 **1877 passed**（+15）；`ruff` 全过；
+`import quant.factors` 正常（`__all__` 17 项）。
+
+**账本**：M5 达 **13 ✅ / 1 🟡 / 1 ⬜**（仅剩 M5-15 因子页；M5-13 引擎接入仍 🟡）；
+合计 **129/150（86.0%）**。
+
+**下一项**：7-4 因子页（M5-15）+ 引擎接入（M5-13 收尾）——看板 Tab、因子列表/
+值曲线/IC 时序/分层柱状图/相关性热力图，以及回测/实盘把 `FactorProvider`
+结果填进 `Context.factors`。
+
 ---
 
 ## 9. 相关文档
