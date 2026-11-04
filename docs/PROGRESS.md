@@ -2779,6 +2779,32 @@ MS5 剩余仅 M3-7（M3-13 仍 🟡）。
 
 **下一项**：4-2 `notebooks/` 模板 + README（M3-7 收尾）。
 
+### 8.89 MS5 收尾 4-2：notebook 模板（M3-7 闭环）（2026-11-04）
+
+**新增 `notebooks/` 模板**（M3-7 第二部分）：
+- `README.md`：数据从 `quant research export` 来、启动方式、目录结构、
+  `QUANT_RESEARCH_DIR` 环境变量、Decimal 文本注意点。
+- `explore.ipynb`：4 个代码单元 + 2 个说明单元，**只用 pandas**（不引入
+  matplotlib/jupyter 之外的新依赖）：
+  1. 读 `bars.parquet` → 行数/时间范围/缺失检查；
+  2. 读 `trades.parquet` → 按方向统计笔数/数量/手续费/名义；
+  3. 读 `backtest.json`（存在才读）→ run 参数与指标；
+  4. 下一步提示（用 `--run-id` 做参数对比、需要画图时再装 matplotlib）。
+- **原则写进模板与测试**：notebook 只读导出目录，**不直连 SQLite/Redis/OKX**，
+  研究代码不影响实盘进程。
+
+**测试**：`tests/test_notebook_template.py` 3 条——ipynb JSON 结构合法且所有代码
+单元可 `compile`（挡手写 JSON 的语法错）、代码里不出现 sqlite3/redis/okx、
+README 说明导出命令与环境变量。
+
+**验证**：`pytest` 全量 **1828 passed**（+3）；`ruff` 全过。
+
+**账本**：M3-7 从 ⬜ 改为 ✅，M3 达 16 ✅ / 2 🟡 / 0 ⬜；合计 **114/150（76.0%）**，
+**MS5 已无未开始项**，剩余 29 条全部是 MS7+（M5/M6）。
+
+**下一项**：5-1 信号拦截原因契约（M3-5）——`Context.last_block_reason`，
+让引擎卡能显示「被趋势过滤/撑压条件挡住」，而不是笼统的 `no_signal`。
+
 ---
 
 ## 9. 相关文档
