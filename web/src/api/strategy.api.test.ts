@@ -17,6 +17,13 @@ const okResponse = (data: unknown) =>
     json: async () => data,
   }) as Response;
 
+const failResponse = (detail: unknown, status = 400) =>
+  ({
+    ok: false,
+    status,
+    json: async () => ({ detail }),
+  }) as Response;
+
 describe("策略页接口空值兜底", () => {
   const signal = new AbortController().signal;
 
@@ -59,5 +66,37 @@ describe("策略页接口空值兜底", () => {
     expect(calls[0].init.method).toBe("DELETE");
     expect(calls[0].url).toContain("/bindings/BTC-USDT");
     expect((calls[0].init.headers as Record<string, string>)["X-Dashboard-Token"]).toBe("tk");
+  });
+
+  it("字符串 detail 原样透出（业务 400 的可读原因）", async () => {
+    vi.mocked(fetch).mockImplementation(
+      (async () =>
+        failResponse("该组合已绑定 1H，请先解绑再改周期")) as never,
+    );
+
+    await expect(deleteBinding("sma_cross", "BTC-USDT")).rejects.toThrow(
+      /请先解绑/,
+    );
+  });
+
+  it("Pydantic 422 数组 detail 解析成字段级文案（P1）", async () => {
+    vi.mocked(fetch).mockImplementation(
+      (async () =>
+        failResponse(
+          [
+            {
+              loc: ["body", "reason"],
+              msg: "String should have at most 200 characters",
+              type: "string_too_long",
+            },
+          ],
+          422,
+        )) as never,
+    );
+
+    // 原先只认 string detail → 用户只看到「HTTP 422」，不知道哪个字段出错
+    await expect(deleteBinding("sma_cross", "BTC-USDT")).rejects.toThrow(
+      /reason: String should have at most 200 characters/,
+    );
   });
 });

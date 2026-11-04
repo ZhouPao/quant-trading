@@ -2521,7 +2521,12 @@ function EnginePanel({
     const controller = new AbortController();
     fetchParamChanges(controller.signal, strategyId)
       .then((res) => setChanges(res.changes))
-      .catch(() => setChanges([]));
+      .catch((err) => {
+        // abort 导致的 reject 不该清空状态：新 effect 可能已拿到新数据，
+        // 旧 catch 后到会把列表覆盖成空（P2）
+        if ((err as Error).name === "AbortError") return;
+        setChanges([]);
+      });
     return () => controller.abort();
   }, [strategyId, refreshKey]);
 
@@ -2553,7 +2558,10 @@ function EnginePanel({
         limit: HISTORY_LIMIT,
       })
         .then((res) => setRecentRuns(res.runs))
-        .catch(() => setRecentRuns([]));
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setRecentRuns([]);
+        });
     };
     load();
     const timer = window.setInterval(load, POLL_MS);
@@ -2581,7 +2589,9 @@ function EnginePanel({
       }
     >();
     for (const run of recentRuns) {
-      if (run.status !== "done") continue;
+      // 只比单次回测：walk-forward/batch 的 params 是 base+grid 结构、
+      // 指标口径不同，混进同组排名会得出错误结论（P1）
+      if (run.status !== "done" || run.kind !== "backtest") continue;
       const key = `${run.inst}|${run.bar}|${run.start}|${run.end}`;
       const entry = groups.get(key) ?? {
         inst: run.inst,
@@ -2687,7 +2697,10 @@ function EnginePanel({
 
   useEffect(() => {
     const controller = new AbortController();
-    loadBindings(controller.signal).catch(() => setBindings([]));
+    loadBindings(controller.signal).catch((err) => {
+      if ((err as Error).name === "AbortError") return;
+      setBindings([]);
+    });
     return () => controller.abort();
   }, [loadBindings, refreshKey]);
 
@@ -3288,18 +3301,13 @@ function EnginePanel({
                   ? raw
                   : null;
               };
-              const extreme = (key: string, higherBetter: boolean) => {
-                const values = group.versions
-                  .map((v) => metricValue(v.run, key))
-                  .filter((v): v is number => v !== null);
-                if (values.length === 0) return null;
-                return higherBetter
-                  ? Math.max(...values)
-                  : Math.min(...values);
-              };
-              const bestReturn = extreme("total_return", true);
-              const bestDrawdown = extreme("max_drawdown", false);
-              const bestSharpe = extreme("sharpe", true);
+              // 与回测页共用同一套最优口径（bestValue）：回撤越小越好、
+              // 有效值少于 2 个不标最优。原先这里内联 extreme()，单值也标、
+              // higherBetter 硬编码，同一指标在详情页与回测页高亮不一致（P1）
+              const versions = group.versions.map((v) => v.run);
+              const bestReturn = bestValue(versions, "total_return");
+              const bestDrawdown = bestValue(versions, "max_drawdown");
+              const bestSharpe = bestValue(versions, "sharpe");
               const cellClass = (
                 value: number | null,
                 best: number | null
@@ -4876,7 +4884,6 @@ function BacktestHistory({
 
 /** 多条回测横向对比：每个指标高亮最优值（回撤取最小，其余取最大）。 */
 function CompareTable({ runs }: { runs: BacktestRun[] }) {
-  const ranges = new Set(runs.map((run) => `${run.start} ~ ${run.end}`));
   const head = [
     "指标",
     ...runs.map(
@@ -4918,13 +4925,10 @@ function CompareTable({ runs }: { runs: BacktestRun[] }) {
     <>
       <div className="bt-sub">
         <span>横向对比（{runs.length} 条）</span>
-        <span>高亮为该指标最优值；品种 / 周期 / 区间由后端校验一致</span>
+        <span>
+          高亮为该指标最优值；品种 / 周期 / 区间不一致时后端直接拒绝，原因显示在上方
+        </span>
       </div>
-      {ranges.size > 1 && (
-        <div className="kill-msg kill-msg-bad">
-          所选回测区间不一致，后端会拒绝对比；请改选同一品种、周期与区间的记录
-        </div>
-      )}
       <Table head={head} rows={rows} empty={false} emptyHint="" />
     </>
   );

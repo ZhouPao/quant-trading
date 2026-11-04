@@ -2177,6 +2177,51 @@ reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"
 回滚 `git_commit` 恒 NULL、`history_scan` 硬编码与历史键无 TTL、
 `bindings` 路由参数校验、缓存重建串行化；P3 注释/文档漂移与 a11y。
 
+### 8.71 M3 批次乙：三批半成品收口（2026-11-04）
+
+对第二轮复核发现的前端/契约尾巴逐项收口，共 8 项。
+
+**P1 错误详情被前端吞掉（根因级）**：`getJson` 完全不解析 `detail`、`postWrite`
+只认字符串 detail。Pydantic 422 的 `detail` 是数组，一律显示成「HTTP 422」——
+用户看不到「哪个字段超长」，**直接抵消批次一所有校验的可读性**。修复：抽出
+`errorMessage()` 统一解析（字符串原样透出；数组按 `loc` 拼成 `字段: 原因`；
+无 detail 回退状态码），`postWrite`/`getJson`/`postJson`/`deleteGuarded`/急停
+五处重复块全部接入；新增两种形态的契约测试。
+
+**P2 AbortError 竞态**：变更历史/最近回测/绑定列表三处 `.catch` 未过滤
+`AbortError`——cleanup abort 触发的 reject 会执行 `setX([])`，若新 effect 的
+请求先返回，旧 catch 后到会把列表覆盖成空（表格闪空）。修复：三处统一先判
+`AbortError` 再清状态。
+
+**P1 两套最优口径**：`EnginePanel` 内联 `extreme()`（单值也标最优、`higherBetter`
+硬编码）与回测页 `bestValue`（<2 个有效值不标、按 `LOWER_IS_BETTER` 判断）并存，
+同一指标两处高亮规则不一致。修复：详情页改用共享 `bestValue`，删除 `extreme`。
+
+**P1 参数版本对比混入非单次回测**：`paramGroups` 只判 `status === "done"`，
+walk-forward/batch 的 `params` 是 `base+grid` 结构、指标口径不同，混进同组排名
+会得出错误结论。修复：`run.kind !== "backtest"` 直接跳过。
+
+**P2 嵌套参数签名仍不稳定**：`formatParams` 上一批只排顶层键，`base`/`grid`
+嵌套对象仍按 `JSON.stringify` 原序——键序不同即生成不同签名、制造假版本。
+修复：递归稳定序列化（对象键排序、数组保序）+ 测试。
+
+**P2 评估历史键永不过期**：解绑/改绑后该键不再被读取，Redis 里永久残留。
+修复：写入后 `expire` 7 天（`EVAL_HISTORY_TTL_SECONDS`）；`service.py` 的
+`history_scan = 50` 硬编码改为引用 `EVAL_HISTORY_LIMIT`（单一来源）。
+
+**P2 死代码（复核后删除而非保留）**：`CompareTable` 的「所选回测区间不一致」
+提示在批次一后端补上区间校验后**永不可达**（不一致直接 400，组件不渲染）。
+删除该分支，说明文案改为指向真正可见的 `compareError`。
+
+**验证**：`pytest` 全量 **1733 passed**（TTL 断言并入既有引擎用例）；
+`npx tsc --noEmit` 通过；`npm test` **36 passed**（+3：字符串 detail、
+Pydantic 数组 detail、嵌套键序）；`npm run build` 通过；`ruff` 全过。
+
+**批次丙遗留**：诊断/体验小项——评估列表 `degraded` 未展示、合并区间注释漂移、
+`total ?? 0` 在旧后端显示「共 0 条，显示最近 20 条」、回滚 `git_commit` 恒 NULL、
+回滚 TOCTOU、bindings 路由参数校验、缓存重建串行化、compare 重复 id 去重；
+以及待拍板的操作人 `"owner"` 口径。
+
 ---
 
 ## 9. 相关文档

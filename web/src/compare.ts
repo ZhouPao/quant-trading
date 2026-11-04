@@ -29,12 +29,33 @@ export function bestValue(
 }
 
 /**
- * 参数签名：键排序后拼接。
+ * 稳定序列化：对象键排序、数组保序。
+ *
+ * walk-forward / batch 的 params 含嵌套 `base` / `grid`，直接 `JSON.stringify`
+ * 会受键序影响——同一组参数可能生成不同签名，对比表出现重复版本（P2）。
+ */
+function stableValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableValue).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableValue(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * 参数签名：递归键排序后拼接。
  *
  * 同一组参数若来自不同合并路径（toml / DB 覆盖 / 请求覆盖），对象键序可能
  * 不同；直接按 Object.entries 顺序拼接会把它们当成两个版本，对比表出现
- * 重复行、名次被稀释（P1）。嵌套对象（walk-forward 的 base / grid）按原样
- * JSON 序列化，避免显示成 [object Object]。
+ * 重复行、名次被稀释（P1）。嵌套对象同样排序，避免 walk-forward 的
+ * base/grid 键序差异制造假版本（P2）。
  */
 export function formatParams(params: Record<string, unknown>): string {
   const entries = Object.entries(params).sort(([left], [right]) =>
@@ -44,7 +65,7 @@ export function formatParams(params: Record<string, unknown>): string {
   return entries
     .map(([key, value]) => {
       if (value !== null && typeof value === "object") {
-        return `${key}=${JSON.stringify(value)}`;
+        return `${key}=${stableValue(value)}`;
       }
       return `${key}=${String(value)}`;
     })

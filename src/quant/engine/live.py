@@ -69,6 +69,10 @@ TickStatus = Literal[
 #: 轮次全挤掉。看板端折叠连续重复状态后再取最近 10 条。
 EVAL_HISTORY_LIMIT = 50
 
+#: 评估历史键的存活时长：解绑/改绑后该键不再被读取，靠 TTL 自动清理，
+#: 避免 Redis 里按「已解绑组合」永久残留（P2）。
+EVAL_HISTORY_TTL_SECONDS = 7 * 24 * 3600
+
 
 def _eval_history_key(status_key: str, strategy_id: str, inst_id: str) -> str:
     """评估历史在 Redis 中的键；与看板读取端保持同一格式。"""
@@ -571,6 +575,8 @@ class LiveSignalEngine:
         try:
             await self._redis.lpush(history_key, json.dumps(payload))
             await self._redis.ltrim(history_key, 0, EVAL_HISTORY_LIMIT - 1)
+            # 解绑后该键不会再被读，TTL 防止 Redis 残留（P2）
+            await self._redis.expire(history_key, EVAL_HISTORY_TTL_SECONDS)
         except Exception as e:  # noqa: BLE001
             log.warning(f"write engine evaluation history failed: {e}")
 

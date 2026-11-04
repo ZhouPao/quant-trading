@@ -140,6 +140,44 @@ export type FlattenResult = {
   failed: number;
 };
 
+/**
+ * 把 FastAPI 错误响应转成可读文案。
+ *
+ * `detail` 有两种形态：业务错误是字符串（400/404 中文原因），Pydantic 校验
+ * 失败是数组（`[{loc, msg, type}]`）。原先多处只认字符串，422 一律显示成
+ * 「HTTP 422」，用户看不到「哪个字段超长/非法」，等于把后端校验的可读性
+ * 全部吞掉（P1）。
+ */
+async function errorMessage(response: Response, path = ""): Promise<string> {
+  const fallback = path
+    ? `${path} -> HTTP ${response.status}`
+    : `HTTP ${response.status}`;
+  let detail: unknown;
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    detail = payload.detail;
+  } catch {
+    return fallback;
+  }
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (!item || typeof item !== "object") return String(item);
+        const row = item as { loc?: unknown; msg?: unknown };
+        const field = Array.isArray(row.loc)
+          ? row.loc.filter((part) => part !== "body").join(".")
+          : "";
+        const msg = typeof row.msg === "string" ? row.msg : "";
+        if (!msg) return "";
+        return field ? `${field}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (parts.length > 0) return parts.join("; ");
+  }
+  return fallback;
+}
+
 async function postWrite<T>(
   path: string,
   body: unknown,
@@ -156,14 +194,7 @@ async function postWrite<T>(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const payload = (await response.json()) as { detail?: unknown };
-      if (typeof payload.detail === "string") detail = payload.detail;
-    } catch {
-      // 非 JSON 响应，保留状态码即可
-    }
-    throw new Error(detail);
+    throw new Error(await errorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -752,7 +783,8 @@ export function metricText(key: string, value: number | null | undefined): strin
 async function getJson<T>(path: string, signal: AbortSignal): Promise<T> {
   const response = await fetch(path, { signal, headers: { Accept: "application/json" } });
   if (!response.ok) {
-    throw new Error(`${path} -> HTTP ${response.status}`);
+    // 解析 detail：compare/runs 的业务 400/404 原因要能显示到页面（P1）
+    throw new Error(await errorMessage(response, path));
   }
   return (await response.json()) as T;
 }
@@ -774,14 +806,7 @@ async function postGuarded<T>(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const payload = (await response.json()) as { detail?: unknown };
-      if (typeof payload.detail === "string") detail = payload.detail;
-    } catch {
-      // 非 JSON 响应，保留状态码
-    }
-    throw new Error(detail);
+    throw new Error(await errorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -797,14 +822,7 @@ async function deleteGuarded<T>(path: string, token = ""): Promise<T> {
     },
   });
   if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const payload = (await response.json()) as { detail?: unknown };
-      if (typeof payload.detail === "string") detail = payload.detail;
-    } catch {
-      // 非 JSON 响应，保留状态码
-    }
-    throw new Error(detail);
+    throw new Error(await errorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -1438,14 +1456,7 @@ export async function setKillSwitch(
     body: JSON.stringify({ action, reason, cancel_orders: cancelOrders }),
   });
   if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
-    } catch {
-      // 非 JSON 响应，保留状态码即可
-    }
-    throw new Error(detail);
+    throw new Error(await errorMessage(response));
   }
   return (await response.json()) as KillSwitchState;
 }

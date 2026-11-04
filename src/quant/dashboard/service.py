@@ -19,6 +19,7 @@ from pathlib import Path
 
 from redis.asyncio import Redis
 
+from quant.engine.live import EVAL_HISTORY_LIMIT
 from quant.execution.dead_letter import DeadLetterService
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import Settings, SmtpSettings
@@ -1114,8 +1115,8 @@ class DashboardService:
         """
         now = int(time.time() * 1000)
         limit = max(1, min(limit, 10))
-        # 与 engine.live.EVAL_HISTORY_LIMIT 对齐：扫描全部原始轮次再折叠
-        history_scan = 50
+        # 扫描全部原始轮次再折叠；条数直接引用引擎常量，改一处即同步
+        history_scan = EVAL_HISTORY_LIMIT
         degraded: list[str] = []
 
         try:

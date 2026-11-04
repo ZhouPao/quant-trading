@@ -630,6 +630,14 @@ class TestStatusPublish:
             )
             assert len(history) == 1
             assert json.loads(history[0])["bar_ts"] == bars[-1].ts
+            # 解绑后该键不会再被读，靠 TTL 自动清理（P2）
+            assert (
+                await redis.ttl(
+                    f"{settings.engine.status_key}:history:"
+                    f"{settings.engine.strategy}:{settings.engine.inst}"
+                )
+                > 0
+            )
         finally:
             store.close()
             await redis.aclose()

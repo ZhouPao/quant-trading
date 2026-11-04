@@ -37,6 +37,15 @@ describe("M3-18 参数版本对比纯函数", () => {
     expect(text).toContain("fast_len=8");
   });
 
+  it("formatParams 嵌套键序也稳定（walk-forward 的 base/grid，P2）", () => {
+    expect(formatParams({ grid: { b: 2, a: 1 } })).toBe(
+      formatParams({ grid: { a: 1, b: 2 } }),
+    );
+    expect(formatParams({ grid: [{ b: 2, a: 1 }] })).toBe(
+      formatParams({ grid: [{ a: 1, b: 2 }] }),
+    );
+  });
+
   it("bestValue 按口径取最优，trade_count 不参与，单值/NaN 不高亮", () => {
     const runs = [
       run("a", { total_return: 0.1, max_drawdown: 0.2 }),
