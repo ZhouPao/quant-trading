@@ -2883,6 +2883,33 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 **下一项**：7-2 批量计算与增量更新（M5-5/12/13/14）——批量入口、回退
 `lookback` 重叠计算、缺失/极值三选一、`FactorProvider`，以及全量=增量一致性测试。
 
+### 8.93 M5 第二批 7-2：批量计算与增量（2026-11-04）
+
+**新增 `factors/provider.py`**（M5-4/5/12/14，M5-13 的提供器部分）：
+- `FactorProvider.compute(factor_id, inst, bar, start, end, params, fill,
+  clip_quantile)`：
+  - **命中缓存**：请求区间内每根 bar 都有缓存值（含 `None`）则直接返回，
+    不调用 `compute`；
+  - **增量**：从 `last_cached_ts - lookback * bar_ms` 起算，**回退 lookback 根
+    做重叠计算**，避免滚动指标在拼接处跳变；
+  - **缺失/极值**：`fill=nan|prev|skip` 三选一 + `clip_quantile` 分位裁剪；
+  - **缓存只存原始值**，fill/clip 只在返回时应用——避免把展示口径写进缓存。
+- `values_for(...)`：把因子值对齐到给定 bar 窗口，是 M5-13「回测与实盘同一
+  裁剪规则」的落点；**引擎接入（自动填 `Context.factors`）留到 7-3**，M5-13 保持 🟡。
+- 周期定义复用 `backtest.runner.BAR_MS`，不引入第三份时间段映射。
+
+**测试**：`tests/test_factor_provider.py` 9 条——冷启动与直接计算一致、二次调用
+不重算、**增量与全量逐点相等**（M5-14）、增量只算尾部（61/40 根而非 100）、
+参数隔离、`fill=prev`、`fill=skip`、`clip_quantile`、非法 fill 报错。
+
+**验证**：`pytest` 全量 **1862 passed**（+9）；`ruff` 全过。
+
+**账本**：M5 达 **7 ✅ / 1 🟡 / 7 ⬜**（M5-4/5/12/14 本轮闭环）；
+合计 **123/150（82.0%）**。
+
+**下一项**：7-3 因子评价（M5-6~11）——横截面标准化、IC/RankIC/ICIR、分层收益、
+衰减、换手、相关性矩阵。
+
 ---
 
 ## 9. 相关文档

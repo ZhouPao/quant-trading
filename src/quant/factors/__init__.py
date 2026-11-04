@@ -11,6 +11,7 @@ from __future__ import annotations
 from quant.factors import builtin  # noqa: F401  导入即注册内置因子
 from quant.factors.params import param_hash
 from quant.factors.protocol import CATEGORIES, SCOPES, Factor
+from quant.factors.provider import FILL_MODES, FactorProvider
 from quant.factors.registry import (
     factor,
     get_factor,
@@ -21,8 +22,10 @@ from quant.factors.storage import FactorStore
 
 __all__ = [
     "CATEGORIES",
+    "FILL_MODES",
     "SCOPES",
     "Factor",
+    "FactorProvider",
     "FactorStore",
     "factor",
     "get_factor",
