@@ -15,6 +15,7 @@ from decimal import Decimal
 from quant.backtest.runner import BAR_MS
 from quant.factors.registry import get_factor
 from quant.factors.storage import FactorStore
+from quant.foundation.config import Settings
 from quant.models.bar import Bar
 from quant.storage.bar_storage import BarStorage
 
@@ -171,4 +172,32 @@ class FactorProvider:
         return [by_ts.get(item.ts) for item in bars]
 
 
-__all__ = ["FILL_MODES", "FactorProvider"]
+def factor_series_for(
+    settings: Settings,
+    inst: str,
+    bar: str,
+    start_ts: int,
+    end_ts: int,
+) -> dict[str, dict[int, Decimal]]:
+    """按 `[factors]` 配置构造回测/实盘用的因子序列（M5-13）。
+
+    未启用或没配 `ids` 时返回空字典——调用方据此跳过因子接入，
+    保证「不开因子」与接入前逐点一致。
+    """
+    cfg = settings.factors
+    if not cfg.enabled or not cfg.ids:
+        return {}
+    provider = FactorProvider(
+        FactorStore(settings.storage.data_dir),
+        BarStorage(settings.storage.data_dir),
+    )
+    result: dict[str, dict[int, Decimal]] = {}
+    for factor_id in cfg.ids:
+        rows = provider.compute(factor_id, inst, bar, start_ts, end_ts)
+        result[factor_id] = {
+            ts: value for ts, value in rows if value is not None
+        }
+    return result
+
+
+__all__ = ["FILL_MODES", "FactorProvider", "factor_series_for"]

@@ -66,6 +66,17 @@ class StorageSettings(BaseModel):
     dead_letter_persist: bool = True
 
 
+class FactorsSettings(BaseModel):
+    """因子接入（M5-13）：默认关闭，不影响既有回测结果。
+
+    `ids` 为空或 `enabled=false` 时，`Context.factors` 保持空字典，
+    策略行为与接入前逐点一致。
+    """
+
+    enabled: bool = False
+    ids: list[str] = Field(default_factory=list)
+
+
 class RateLimitSettings(BaseModel):
     timeout_seconds: float = 10.0
 
@@ -371,6 +382,7 @@ class Settings(BaseModel):
 
     okx: OKXSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    factors: FactorsSettings = Field(default_factory=FactorsSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
@@ -426,6 +438,7 @@ class Settings(BaseModel):
 __all__ = [
     "Settings",
     "OKXSettings",
+    "FactorsSettings",
     "StorageSettings",
     "RateLimitSettings",
     "LoggingSettings",

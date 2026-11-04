@@ -33,6 +33,7 @@ from quant.backtest.order import Fill
 from quant.backtest.signal import Signal
 from quant.execution.account import read_account_field
 from quant.execution.kill_switch import KillSwitch
+from quant.factors.provider import factor_series_for
 from quant.foundation.config import Settings
 from quant.foundation.heartbeat import Heartbeat
 from quant.foundation.logger import get_logger
@@ -282,6 +283,18 @@ class LiveSignalEngine:
         ctx = Context(position=position, params=params, cash=cash)
         strategy.on_init(ctx)
 
+        # M5-13：与回测共用同一个 FactorProvider；未启用时为空，行为不变
+        factor_series: dict[str, dict[int, Decimal]] = {}
+        if self._settings.factors.enabled and self._settings.factors.ids:
+            factor_series = await asyncio.to_thread(
+                factor_series_for,
+                self._settings,
+                binding.inst_id,
+                binding.bar,
+                bars[0].ts,
+                bars[-1].ts,
+            )
+
         # 整个窗口都要回放（让指标就绪），但只在 pending 范围内收集信号
         pending_ts = {bar.ts for bar in pending}
         signals: list[Signal] = []
@@ -317,6 +330,14 @@ class LiveSignalEngine:
                 )
                 continue
 
+            # 因子值按当前窗口对齐（与回测的 _advance 同口径）
+            if factor_series:
+                ctx.factors = {
+                    factor_id: [
+                        values.get(item.ts) for item in ctx.bars_window
+                    ]
+                    for factor_id, values in factor_series.items()
+                }
             out = strategy.on_bar(bar, ctx)
             if out is None or bar.ts not in pending_ts:
                 continue

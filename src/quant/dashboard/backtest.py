@@ -56,6 +56,7 @@ from quant.backtest.runner import (
     parse_range,
 )
 from quant.backtest.walkforward import SegmentResult, WalkForward, WalkForwardResult
+from quant.factors.provider import factor_series_for
 from quant.foundation.config import Settings
 from quant.foundation.gitinfo import git_commit
 from quant.foundation.logger import get_logger
@@ -888,6 +889,14 @@ class BacktestService:
                 params=params,
                 warmup_bars=warmup,
                 funding=funding,
+                # M5-13：未启用 [factors] 时为空 dict，结果与接入前一致
+                factor_series=factor_series_for(
+                    self._settings,
+                    inst,
+                    req.bar,
+                    warmup[0].ts if warmup else bars[0].ts,
+                    bars[-1].ts,
+                ),
             ).run(bars, should_stop=should_stop)
         except ValueError as e:
             raise BacktestRequestError(str(e)) from e

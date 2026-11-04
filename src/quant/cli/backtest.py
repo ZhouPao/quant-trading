@@ -24,6 +24,7 @@ from quant.backtest.runner import (
     report_paths,
 )
 from quant.cli._params import resolve_cli_params
+from quant.factors.provider import factor_series_for
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger, setup_logger
 from quant.strategies.loader import StrategyConfigError
@@ -69,6 +70,14 @@ def main(args) -> int:
         params=params,
         warmup_bars=warmup,
         funding=funding,
+        # M5-13：未启用 [factors] 时为空，行为与接入前一致
+        factor_series=factor_series_for(
+            settings,
+            args.inst,
+            args.bar,
+            warmup[0].ts if warmup else bars[0].ts,
+            bars[-1].ts,
+        ),
     ).run(bars)
 
     log.info(

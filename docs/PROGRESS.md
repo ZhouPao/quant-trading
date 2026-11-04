@@ -2996,6 +2996,31 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 **下一项**：7-4c 引擎接入（M5-13 收尾）——回测与实盘把 `FactorProvider`
 结果填进 `Context.factors`，配置开关 `[factors]`，测试「用因子/不用因子」可切换。
 
+### 8.97 M5 第四批 7-4c：引擎接入（M5-13 闭环，M5 收官）（2026-11-04）
+
+**回测与实盘共用同一因子提供器**：
+- `Backtest.__init__` 新增 `factor_series: Mapping[str, Mapping[int, Decimal | None]]`；
+  `_advance` 里逐 bar 追加、随 `bars_window` 裁剪——长度始终与窗口一致，缺值保持 `None`。
+- `factors/provider.py::factor_series_for(settings, inst, bar, start, end)`：
+  读 `[factors]` 配置，未启用/无 `ids` 返回空 dict。
+- 新增 `FactorsSettings`（`[factors] enabled=false`、`ids=[]`）：**默认关闭**，
+  不改变任何既有回测结果（有逐点回归测试）。
+- 接入点：CLI 单次回测、看板单次回测、worker `_run_binding`（逐 bar 用窗口对齐）。
+  **寻优/批量/walk-forward 暂不接**——它们复用同一 `Backtest`，未传 `factor_series`
+  即保持原行为；需要时再按同一函数接入，不影响已交付部分。
+
+**测试**：`tests/test_factor_engine.py` 5 条——因子序列按窗口对齐（长度 1,2,3,3,3）
+且最后值正确、不传时 `ctx.factors` 为空、策略不读因子时指标逐点相等、
+`factor_series_for` 关闭返回空/开启返回 20 个有效值（前 20 根预热）。
+
+**验证**：`pytest` 全量 **1893 passed**（+5）；`ruff` 全过。
+
+**账本**：**M5 达 15 ✅ / 0 🟡 / 0 ⬜ —— M5 因子库收官**；
+合计 **131/150（87.3%）**，剩余 19 条 = M6 14 条 + M4-8/M8 的 4 条 🟡。
+
+**下一项**：M6 组合管理第一批（8-1 组合模型与约束）。开工前先读 PRD 4.6 的
+M6-1~14，对齐「四种分配方式 / 再平衡 / 冷却期 / 失败回滚」的契约再动手。
+
 ---
 
 ## 9. 相关文档

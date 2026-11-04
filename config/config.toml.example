@@ -17,6 +17,12 @@ retention_enabled = true            # monitor 每日自动清理；false 时只�
 retention_at = "03:30"              # 本地时间 HH:MM
 dead_letter_persist = true            # 死信双写 SQLite，供看板查看与重放
 
+[factors]
+# M5-13：默认关闭；开启后回测/实盘会把因子值填进 Context.factors。
+# 关闭时行为与接入前逐点一致（有回归测试保证）。
+enabled = false
+ids = []                             # 例如 ["momentum_20", "volatility_20"]
+
 [rate_limit]
 timeout_seconds = 10.0
 

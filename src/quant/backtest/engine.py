@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -72,6 +72,7 @@ class Backtest:
         params: dict[str, Any] | None = None,
         warmup_bars: list[Bar] | None = None,
         funding: FundingSchedule | None = None,
+        factor_series: Mapping[str, Mapping[int, Decimal | None]] | None = None,
     ) -> None:
         if initial_cash <= 0:
             raise ValueError(f"initial_cash must be positive, got {initial_cash}")
@@ -84,6 +85,11 @@ class Backtest:
         self.params = dict(params) if params else {}
         self.warmup_bars = list(warmup_bars) if warmup_bars else []
         self.funding = funding
+        #: 因子 ID -> {ts: 因子值}（M5-13）；空表示不向策略暴露因子
+        self.factor_series = {
+            factor_id: dict(values)
+            for factor_id, values in (factor_series or {}).items()
+        }
 
     def run(
         self,
@@ -229,6 +235,13 @@ class Backtest:
         ctx.bars_window.append(bar)
         if len(ctx.bars_window) > self.window_size:
             del ctx.bars_window[: len(ctx.bars_window) - self.window_size]
+        # 因子序列与窗口同步（M5-13）：缺值保持 None，长度始终等于 bars_window
+        if self.factor_series:
+            for factor_id, values in self.factor_series.items():
+                series = ctx.factors.setdefault(factor_id, [])
+                series.append(values.get(bar.ts))
+                if len(series) > len(ctx.bars_window):
+                    del series[: len(series) - len(ctx.bars_window)]
 
     @staticmethod
     def _validate_bars(bars: list[Bar]) -> None:
