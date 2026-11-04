@@ -120,8 +120,9 @@ class ParamUpdateRequest(BaseModel):
     """参数覆盖入参：只提交要改的键，未提交的保持原样。"""
 
     values: dict[str, object] = Field(default_factory=dict)
-    reason: str = ""
-    by: str = "owner"
+    # 审计字段落 SQLite 并在页面展示，不设上限会撑大库/表格（P2）
+    reason: str = Field("", max_length=200)
+    by: str = Field("owner", max_length=64)
 
 
 class BacktestRequest(BaseModel):
@@ -536,8 +537,16 @@ class BacktestService:
         now = _now_ms()
         changed: list[str] = []
         for name, value in parsed.items():
-            if name in current and current[name] == value:
-                continue  # 与当前生效值一致：不写库，也不产生审计噪音
+            if name in current:
+                try:
+                    # toml 里的 float 0.1 与 coerce 出的 Decimal("0.1") 直接
+                    # 比较为 False（浮点不精确），会把「提交与生效值相同」误判
+                    # 成变更、白写一条 DB 覆盖 + 审计记录。先按同一 spec 归一。
+                    baseline = coerce_value(spec_map[name], current[name])
+                except ParamError:
+                    baseline = None
+                if baseline is not None and baseline == value:
+                    continue  # 与当前生效值一致：不写库，也不产生审计噪音
             if self._store.set_strategy_param(
                 strategy_id,
                 name,

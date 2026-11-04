@@ -346,6 +346,38 @@ class TestStrategyParamWrites:
         assert store.list_param_changes("sma_cross")[1] == 0
         assert store.get_strategy_params("sma_cross") == []
 
+    async def test_same_value_writes_nothing_when_types_differ(
+        self, param_service, tmp_path
+    ) -> None:
+        """toml float 0.1 与 coerce 出的 Decimal("0.1") 相等：不能误判为变更。
+
+        Python 里 `Decimal("0.1") == 0.1` 是 False，直接比较会白写一条 DB
+        覆盖 + 审计记录，还会把 sources 从 toml 改成 db（P2）。
+        """
+        service, store = param_service
+        _write_strategy(
+            tmp_path,
+            name="rsi",
+            text=(
+                "[strategy]\n"
+                'strategy_id = "rsi"\n'
+                'class = "quant.strategies.python.rsi.RsiStrategy"\n\n'
+                "[params]\n"
+                "rsi_period = 14\n"
+                "oversold = 0.1\n"  # decimal spec，toml 里是非精确浮点
+                "overbought = 70\n"
+            ),
+        )
+
+        detail = await service.set_params(
+            "rsi", ParamUpdateRequest(values={"oversold": "0.1"})
+        )
+
+        assert detail["changed"] == []
+        assert store.get_strategy_params("rsi") == []
+        assert store.list_param_changes("rsi")[1] == 0
+        assert detail["sources"]["oversold"] == "toml"
+
     async def test_rejects_uneditable_param(self, param_service) -> None:
         service, _store = param_service
 
@@ -627,6 +659,32 @@ class TestApp:
 
         # base_url 是 test 主机，先被 Host 白名单拦下
         assert response.status_code == 403
+
+    async def test_overlong_audit_fields_are_422(self, app) -> None:
+        """审计字段无上限会撑大 SQLite 与页面表格：超长应 422（P2）。"""
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            too_long = await client.put(
+                "/api/strategies/sma_cross/params",
+                headers=LOCAL_WRITE,
+                json={"values": {"fast_len": 8}, "reason": "x" * 201},
+            )
+            too_long_by = await client.put(
+                "/api/strategies/sma_cross/params",
+                headers=LOCAL_WRITE,
+                json={"values": {"fast_len": 8}, "by": "x" * 65},
+            )
+            too_long_rollback = await client.post(
+                "/api/strategies/sma_cross/param-changes/1/rollback",
+                headers=LOCAL_WRITE,
+                json={"reason": "x" * 201},
+            )
+
+        assert too_long.status_code == 422
+        assert too_long_by.status_code == 422
+        assert too_long_rollback.status_code == 422
 
     async def test_put_params_persists_and_records_history(self, app) -> None:
         async with httpx.AsyncClient(

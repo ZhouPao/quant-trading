@@ -1324,6 +1324,87 @@ class TestEvaluations:
         assert data["items"][0]["status"] == "duplicate"
 
 
+class TestEvaluationsCollapse:
+    """M3-15 评估历史：连续重复状态不能把有信号的轮次挤出去（P2）。"""
+
+    async def test_collapses_consecutive_waiting_data(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        key = (
+            f"{settings.engine.status_key}:history:"
+            f"{settings.engine.strategy}:{settings.engine.inst}"
+        )
+        # 数据落后时每轮都是 waiting_data，定长列表会被它占满
+        for i in range(10):
+            await redis.lpush(
+                key,
+                json.dumps(
+                    {
+                        "inst": settings.engine.inst,
+                        "bar": settings.engine.bar,
+                        "status": "waiting_data",
+                        "bar_ts": 10_000 + i * 3_600_000,
+                        "reason": "local bars behind",
+                        "signal_count": 0,
+                        "ts": 10_000 + i * 3_600_000,
+                    }
+                ),
+            )
+        # 比它们更早的一轮有信号：折叠前根本进不了前 10 条
+        await redis.lpush(
+            key,
+            json.dumps(
+                {
+                    "inst": settings.engine.inst,
+                    "bar": settings.engine.bar,
+                    "status": "signal",
+                    "bar_ts": 9_000,
+                    "reason": "",
+                    "signal_count": 1,
+                    "ts": 9_500,
+                }
+            ),
+        )
+
+        data = await service.evaluations("sma_cross")
+
+        assert [row["status"] for row in data["items"]] == [
+            "waiting_data",
+            "signal",
+        ]
+        assert data["items"][1]["signal_count"] == 1
+        assert data["degraded"] == []
+
+    async def test_same_status_different_reason_is_kept(self, engine_env) -> None:
+        """同状态但原因不同（状态变化点）不该被折叠掉。"""
+        service, _store, settings, redis = engine_env
+        key = (
+            f"{settings.engine.status_key}:history:"
+            f"{settings.engine.strategy}:{settings.engine.inst}"
+        )
+        for i, reason in enumerate(("no bars", "local bars behind")):
+            await redis.lpush(
+                key,
+                json.dumps(
+                    {
+                        "inst": settings.engine.inst,
+                        "bar": settings.engine.bar,
+                        "status": "waiting_data",
+                        "bar_ts": 20_000 + i * 3_600_000,
+                        "reason": reason,
+                        "signal_count": 0,
+                        "ts": 20_000 + i * 3_600_000,
+                    }
+                ),
+            )
+
+        data = await service.evaluations("sma_cross")
+
+        assert [row["reason"] for row in data["items"]] == [
+            "local bars behind",
+            "no bars",
+        ]
+
+
 class TestEngine:
     HOUR = 3_600_000
 

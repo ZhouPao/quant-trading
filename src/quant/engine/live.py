@@ -64,8 +64,10 @@ TickStatus = Literal[
     "error",         # 策略配置或计算失败
 ]
 
-#: 策略详情页展示的「最近评估」条数（M3-15）
-EVAL_HISTORY_LIMIT = 10
+#: 评估历史保留轮数（M3-15）。看板只显示 10 个「状态变化点」，但原始数据
+#: 要留够：本地 K 线落后时每轮都是 waiting_data，只留 10 轮会把有信号的
+#: 轮次全挤掉。看板端折叠连续重复状态后再取最近 10 条。
+EVAL_HISTORY_LIMIT = 50
 
 
 def _eval_history_key(status_key: str, strategy_id: str, inst_id: str) -> str:

@@ -2054,6 +2054,45 @@ reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"
 `_scan_strategies` glob 收窄、reason 长度上限、前端 M3 纯函数测试
 （`sortCompareVersions`/`bestValue`/`formatParams`）、操作人 `"owner"` 口径待拍板。
 
+### 8.68 M3 批次三：审计收尾（2026-11-04）
+
+**先复核再动手，两处结论与旧审计不同（如实记录）**：
+- **`glob("*.toml")` 误收任意 toml —— 不成立**：`config/strategies/` 里的模板是
+  `.toml.example` 后缀，根本不匹配 `*.toml`；且 `load_strategy_class` 对缺
+  `strategy.class` 的文件抛 `StrategyConfigError`，`_scan_strategies` 已
+  warning + skip。最多是日志噪音，**不改**。
+- **`_scan_strategies` 每请求全量重扫（P2 性能）**：目录只有 2 个有效 toml、
+  `importlib` 有模块缓存，收益可忽略；没有性能证据就不做缓存（避免为改而改），**缓做**。
+- **操作人恒为 `"owner"`**：本地无用户体系下的现实值，属产品口径决策，
+  用户未拍板，**本批不动**（前端 `updateStrategyParams` 与后端默认值一致）。
+
+**本批修复 4 项**：
+- **P2 `_set_params` 跨类型相等误判**：toml 里的 `float 0.1` 与 `coerce_value`
+  返回的 `Decimal("0.1")` 直接比较为 **False**（已实证），提交与生效值相同的
+  decimal 参数会被误判成变更、白写 DB 覆盖 + 审计记录、并把 `sources` 从
+  toml 改成 db。修复：比较前把当前生效值按同一 `PARAM_SPEC` 归一。
+- **P2 评估历史被低信息状态刷屏**：engine 每轮写定长列表（10 轮），数据落后时
+  连续 `waiting_data`、正常运行时高频 `duplicate` 会把有信号的轮次全挤出去。
+  修复：engine 原始历史保留 10 → **50 轮**（数据完整），看板扫描全部轮次后
+  **按 `(inst, status, reason)` 折叠连续重复**、只留状态变化点取前 10 条；
+  UI 文案同步改为「最近 N 个评估状态（连续重复轮次已折叠）」。
+- **P2 审计字段无长度上限**：`ParamUpdateRequest.reason/by`、
+  `RollbackRequest.reason/changed_by` 加 `max_length`（200/64），超长直接 422。
+- **P1 参数版本签名键序敏感 + 前端 M3 零测试**：`formatParams` 按
+  `Object.entries` 顺序拼串，同一组参数来自不同合并路径（toml / DB / 请求覆盖）
+  时键序可能不同 → 对比表把同一版本算成两个、名次被稀释。修复：**键排序后拼接**。
+  顺带把 `bestValue` / `formatParams` / `sortCompareVersions` 及 `CompareSort`
+  抽到 `web/src/compare.ts`（纯函数、可单测），App.tsx 改为引用。
+
+**验证**：`pytest` 全量 **1711 passed**（+4：跨类型相等、超长字段 422、折叠×2）；
+`npx tsc --noEmit` 通过；`npm test` **33 passed**（+4 `compare.test.ts`）；
+`npm run build` 通过；`ruff` 全过。
+
+**M3 审计收尾总账**：P0 无；P1×5 全修（批次一 3 + 批次二 2）；P2×7 修 6、
+1 项（全量重扫）复核后判定收益可忽略而缓做；P3 修 3（评估刷屏、reason 上限、
+语义文案），余项（对比上限静默忽略、compare 单 id 报错文案、equity 降采样尾点
+等）按范围有意保留。M3「策略研究」模块存量审计到此结束。
+
 ---
 
 ## 9. 相关文档

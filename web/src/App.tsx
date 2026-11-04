@@ -84,7 +84,6 @@ import {
   type FillRow,
   type FreshnessResponse,
   type KillSwitchState,
-  type MetricMap,
   type OptimizeJobResponse,
   type OptimizeResponse,
   type OrderRow,
@@ -111,6 +110,12 @@ import {
   type TimelineItem,
   type TimelineResponse,
 } from "./api";
+import {
+  bestValue,
+  formatParams,
+  sortCompareVersions,
+  type CompareSort,
+} from "./compare";
 import { CandleChart } from "./chart/CandleChart";
 import { IndicatorBar } from "./chart/IndicatorBar";
 import { loadSettings, saveSettings } from "./chart/settings";
@@ -291,21 +296,7 @@ const CURVE_VERSION_LIMIT = 3;
 const CURVE_POINTS = 60;
 // M3-18 对比表默认只列前 5 名，其余折叠，避免组内版本多时表格过长
 const COMPARE_ROW_LIMIT = 5;
-// 对比表排序键：点表头切换，名次与首行高亮随之重排
-type CompareSort = "total_return" | "max_drawdown" | "sharpe";
-// 越小越好的指标，其余按越大越好比较
-const LOWER_IS_BETTER = new Set(["max_drawdown"]);
-// 交易次数没有优劣之分，不参与高亮
-const NO_BEST = new Set(["trade_count"]);
-
-function bestValue(runs: { metrics: MetricMap }[], key: string): number | null {
-  if (NO_BEST.has(key)) return null;
-  const values = runs
-    .map((run) => run.metrics[key])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length < 2) return null;
-  return LOWER_IS_BETTER.has(key) ? Math.min(...values) : Math.max(...values);
-}
+// 排序键、最优值/签名/版本排序的纯函数已抽到 ./compare（含单测）
 
 // 任务状态文案：pending/running 会转圈，done/failed/canceled 是终点
 const RUN_STATUS_TEXT: Record<string, string> = {
@@ -3144,7 +3135,7 @@ function EnginePanel({
       <div className="param-panel">
         <div className="param-head">
           <span className="card-note">
-            最近 {evaluations.length} 次评估（含无信号轮次）
+            最近 {evaluations.length} 个评估状态（连续重复轮次已折叠）
           </span>
           <button
             type="button"
@@ -5131,20 +5122,6 @@ function dateOffset(days: number): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-function formatParams(params: Record<string, unknown>): string {
-  const entries = Object.entries(params);
-  if (entries.length === 0) return "—";
-  return entries
-    .map(([key, value]) => {
-      // walk-forward / 寻优的 params 里带嵌套结构（base、grid），直接 String 会变成 [object Object]
-      if (value !== null && typeof value === "object") {
-        return `${key}=${JSON.stringify(value)}`;
-      }
-      return `${key}=${String(value)}`;
-    })
-    .join("; ");
-}
-
 /** 逗号分隔的输入拆成去空白、去重的列表（批量回测的品种/周期）。 */
 function splitList(text: string): string[] {
   return Array.from(
@@ -5155,29 +5132,6 @@ function splitList(text: string): string[] {
         .filter(Boolean),
     ),
   );
-}
-
-/**
- * 对比表排序：按当前排序键从优到劣，缺失值排末尾。
- * 回撤越小越好，其余指标越大越好。
- */
-function sortCompareVersions(
-  versions: { signature: string; run: BacktestRun }[],
-  key: CompareSort
-) {
-  const higherBetter = !LOWER_IS_BETTER.has(key);
-  return [...versions].sort((a, b) => {
-    const left = a.run.metrics[key];
-    const right = b.run.metrics[key];
-    const leftValue =
-      typeof left === "number" && Number.isFinite(left) ? left : null;
-    const rightValue =
-      typeof right === "number" && Number.isFinite(right) ? right : null;
-    if (leftValue === rightValue) return 0;
-    if (leftValue === null) return 1;
-    if (rightValue === null) return -1;
-    return higherBetter ? rightValue - leftValue : leftValue - rightValue;
-  });
 }
 
 function metricTone(

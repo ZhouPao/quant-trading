@@ -69,7 +69,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from quant.dashboard.backtest import (
     BacktestRequest,
@@ -181,8 +181,9 @@ class RiskOverrideRequest(BaseModel):
 class RollbackRequest(BaseModel):
     """参数回滚请求（M3-14）。"""
 
-    reason: str = ""
-    changed_by: str = "owner"
+    # 审计字段落 SQLite 并在页面展示，不设上限会撑大库/表格（P2）
+    reason: str = Field("", max_length=200)
+    changed_by: str = Field("owner", max_length=64)
 
 
 def _host_only(raw: str) -> str:

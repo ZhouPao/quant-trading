@@ -1104,13 +1104,18 @@ class DashboardService:
     async def evaluations(
         self, strategy_id: str, limit: int = 10
     ) -> dict[str, object]:
-        """M3-15 策略详情页：该策略最近 N 次评估（含无信号的轮次）。
+        """M3-15 策略详情页：该策略最近 N 个「评估状态变化点」。
 
-        数据来自 engine 每轮 `publish_status` 时写入 Redis 的定长列表，
-        按绑定的 `inst` 分别读取后合并，按 bar 时间倒序取前 N 条。
+        数据来自 engine 每轮 `publish_status` 写入 Redis 的定长列表，按绑定
+        的 `inst` 分别读取后合并、按 bar 时间倒序。连续相同状态（数据落后时
+        的 waiting_data、正常运行时高频的 duplicate）折叠为最新一条——否则
+        定长列表会被低信息量轮次占满，有信号的轮次根本挤不进来（P2）。
+        原始轮次仍完整留在 Redis，只是展示层折叠。
         """
         now = int(time.time() * 1000)
         limit = max(1, min(limit, 10))
+        # 与 engine.live.EVAL_HISTORY_LIMIT 对齐：扫描全部原始轮次再折叠
+        history_scan = 50
         degraded: list[str] = []
 
         try:
@@ -1134,7 +1139,7 @@ class DashboardService:
         for inst_id, bar in pairs:
             key = f"{status_key}:history:{strategy_id}:{inst_id}"
             try:
-                raw = await self._redis.lrange(key, 0, limit - 1)
+                raw = await self._redis.lrange(key, 0, history_scan - 1)
             except Exception as e:  # noqa: BLE001
                 log.warning(f"evaluations redis read failed: {e}")
                 if "redis" not in degraded:
@@ -1160,10 +1165,22 @@ class DashboardService:
                 )
 
         items.sort(key=lambda row: row["bar_ts"] or 0, reverse=True)
+        # 折叠同一组合连续相同的 (status, reason)：每段只留最新一条
+        collapsed: list[dict[str, object]] = []
+        last_state: dict[str, tuple[str, str]] = {}
+        for row in items:
+            inst = str(row["inst_id"])
+            state = (str(row["status"]), str(row["reason"]))
+            if last_state.get(inst) == state:
+                continue
+            last_state[inst] = state
+            collapsed.append(row)
+            if len(collapsed) >= limit:
+                break
         return {
             "ts": now,
             "strategy_id": strategy_id,
-            "items": items[:limit],
+            "items": collapsed,
             "degraded": degraded,
         }
 
