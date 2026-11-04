@@ -10,6 +10,7 @@ DB 覆盖只在 `PARAM_SPEC` 声明过的参数上生效：未声明的参数（
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -45,11 +46,19 @@ def coerce_value(spec: ParamSpec, raw: Any) -> Any:
         if kind == "int":
             if isinstance(raw, bool):
                 raise ValueError("bool is not int")
+            # JSON 数字 3.7 会被 int() 静默截断，字符串 "3.7" 却报错：
+            # 统一拒绝非整数浮点（P2 口径）
+            if isinstance(raw, float) and not raw.is_integer():
+                raise ValueError("non-integral float")
             value: Any = int(raw)
         elif kind == "float":
             value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError("non-finite float")
         elif kind == "decimal":
             value = Decimal(str(raw))
+            if not value.is_finite():
+                raise ValueError("non-finite decimal")
         elif kind == "bool":
             value = _to_bool(raw)
         elif kind in ("str", "choice"):
@@ -115,10 +124,42 @@ def resolve_strategy(
 
     for name, raw in (overrides or {}).items():
         spec = spec_map.get(name)
-        params[name] = coerce_value(spec, raw) if spec else raw
+        if spec is not None:
+            params[name] = coerce_value(spec, raw)
+        else:
+            # 未声明参数（commission_rate / sr_* 等）仍允许回测请求显式覆盖做
+            # 敏感性研究，但原先 raw 原样直通：任意键、类型混淆、NaN/Inf 都能
+            # 注入并污染回测结果（P1）。限制为「键存在于 toml + 与默认值同类型
+            # + 有限值」，零费率这类研究仍可用且结果 params 可追溯。
+            if name not in toml_params:
+                raise ParamError(
+                    f"unknown param {name!r}: not declared in PARAM_SPEC or [params]"
+                )
+            params[name] = coerce_undeclared(name, raw, toml_params[name])
         sources[name] = REQUEST
 
     return strategy_cls, params, sources
+
+
+def coerce_undeclared(name: str, raw: Any, default: Any) -> Any:
+    """校验未声明参数的显式覆盖：键必须真实存在、类型随 toml 默认值、值有限。"""
+    try:
+        if isinstance(default, bool):
+            return _to_bool(raw)
+        if isinstance(default, int):
+            if isinstance(raw, bool) or (
+                isinstance(raw, float) and not raw.is_integer()
+            ):
+                raise ValueError("non-integral value for int param")
+            return int(raw)
+        if isinstance(default, (float, Decimal)):
+            value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError("non-finite value")
+            return value
+        return str(raw)
+    except (TypeError, ValueError, InvalidOperation) as e:
+        raise ParamError(f"invalid value for {name!r}: {raw!r}: {e}") from e
 
 
 def resolve_params(
@@ -177,11 +218,15 @@ def _check_range(spec: ParamSpec, value: Any) -> None:
         return
     low = Decimal(str(spec.min)) if spec.min is not None else None
     high = Decimal(str(spec.max)) if spec.max is not None else None
-    current = Decimal(str(value))
-    if low is not None and current < low:
-        raise ParamError(f"{value} < min {spec.min}")
-    if high is not None and current > high:
-        raise ParamError(f"{value} > max {spec.max}")
+    try:
+        current = Decimal(str(value))
+        if low is not None and current < low:
+            raise ParamError(f"{value} < min {spec.min}")
+        if high is not None and current > high:
+            raise ParamError(f"{value} > max {spec.max}")
+    except InvalidOperation as e:
+        # NaN 等非法 Decimal 比较会抛 InvalidOperation，不能漏到 HTTP 500（P2）
+        raise ParamError(f"invalid numeric value {value!r}") from e
 
 
 __all__ = [
@@ -189,6 +234,7 @@ __all__ = [
     "REQUEST",
     "TOML",
     "ParamError",
+    "coerce_undeclared",
     "coerce_value",
     "format_value",
     "param_spec_payload",

@@ -1714,6 +1714,72 @@ class TestQualityApi:
         assert "quality" in body["degraded"]
 
 
+class TestRollbackParamValidation:
+    """M3-14 回滚：恢复值必须仍满足当前 PARAM_SPEC（P2）。"""
+
+    LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
+
+    @staticmethod
+    def _use_real_spec(monkeypatch) -> None:
+        from quant.strategies.python.sma_cross import SmaCrossStrategy
+
+        # 不依赖仓库内 config/strategies 文件，测试自洽
+        monkeypatch.setattr(
+            "quant.dashboard.service.load_strategy_class",
+            lambda *_args, **_kwargs: (SmaCrossStrategy, {}),
+        )
+
+    async def test_rejects_value_outside_current_spec(
+        self, env, monkeypatch
+    ) -> None:
+        service, store, _redis, _settings = env
+        self._use_real_spec(monkeypatch)
+        store.set_strategy_param("sma_cross", "fast_len", "9999", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "8", 2000)
+        rows, _ = store.list_param_changes("sma_cross")
+
+        result = await service.rollback_param("sma_cross", rows[0]["id"])
+
+        assert result["ok"] is False
+        assert "message" in result
+        # 没有写下会被 resolve 静默忽略的脏覆盖
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
+
+    async def test_valid_value_still_rolls_back(self, env, monkeypatch) -> None:
+        service, store, _redis, _settings = env
+        self._use_real_spec(monkeypatch)
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "12", 2000)
+        rows, _ = store.list_param_changes("sma_cross")
+
+        result = await service.rollback_param("sma_cross", rows[0]["id"])
+
+        assert result["ok"] is True
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
+
+    async def test_http_endpoint_returns_400_when_vetoed(
+        self, env, monkeypatch, tmp_path
+    ) -> None:
+        """回滚 HTTP 端点此前零测试：被拒时应 400 且带 message（P2）。"""
+        service, store, _redis, _settings = env
+        self._use_real_spec(monkeypatch)
+        store.set_strategy_param("sma_cross", "fast_len", "9999", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "8", 2000)
+        rows, _ = store.list_param_changes("sma_cross")
+        app = create_app(service, tmp_path / "missing-dist")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            res = await client.post(
+                f"/api/strategies/sma_cross/param-changes/{rows[0]['id']}/rollback",
+                json={},
+                headers=self.LOCAL,
+            )
+
+        assert res.status_code == 400
+
+
 class TestKillSwitch:
     LOCAL = {"host": "127.0.0.1:8080", "X-Dashboard-Request": "1"}
 

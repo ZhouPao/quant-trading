@@ -19,6 +19,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -1398,14 +1399,18 @@ class SQLiteStore:
 
         返回 False 表示新旧值相同（不写历史，避免审计表被无意义行淹没）。
         """
-        row = self._query_one(
-            "SELECT value FROM strategy_params WHERE strategy_id = ? AND param = ?",
-            (strategy_id, param),
-        )
-        old_value = row["value"] if row else None
-        if old_value == value:
-            return False
         with self._lock:
+            # 读旧值必须与写入同锁：否则两个并发 PUT 都读到同一个 old_value，
+            # 审计链出现重复记录（读-比-写不原子）（P2）。
+            # 注意：_query_one 自身也会取这把非重入锁，嵌套调用会自锁，
+            # 因此这里在已持锁的前提下直接用连接查询。
+            row = self._conn.execute(
+                "SELECT value FROM strategy_params WHERE strategy_id = ? AND param = ?",
+                (strategy_id, param),
+            ).fetchone()
+            old_value = row["value"] if row else None
+            if old_value == value:
+                return False
             self._conn.execute(
                 """
                 INSERT INTO strategy_params (strategy_id, param, value, updated_at)
@@ -1460,8 +1465,13 @@ class SQLiteStore:
         reason: str = "",
         changed_by: str = "owner",
         git_commit: str | None = None,
+        validate: Callable[[str, str], None] | None = None,
     ) -> tuple[bool, str]:
         """从历史记录恢复参数值（M3-14）。
+
+        Args:
+            validate: 可选的 (param, value) 校验回调，抛异常即拒绝回滚且不写库。
+                由服务层按当前 PARAM_SPEC 校验，避免 store 反向依赖策略模块。
 
         Returns:
             (success, message): success=False 表示找不到记录或值相同
@@ -1483,6 +1493,11 @@ class SQLiteStore:
         # 数据库覆盖值；删除覆盖不在本接口范围内，明确拒绝而不是写坏数据。
         if target_value is None:
             return False, "no previous override to restore (config default)"
+
+        # PARAM_SPEC 可能已收紧：恢复出非法值会被 resolve 静默忽略，
+        # 宁可拒绝回滚也不写一条「显示 db 实际用 toml」的脏覆盖（P2）
+        if validate is not None:
+            validate(param, target_value)
 
         # 调用 set_strategy_param 写入新变更（不删历史）
         changed = self.set_strategy_param(

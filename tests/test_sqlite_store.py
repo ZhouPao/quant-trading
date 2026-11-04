@@ -996,6 +996,20 @@ class TestStrategyParams:
         assert "unchanged" in message
 
 
+class TestRollbackValidator:
+    def test_validator_vetoes_write(self, store) -> None:
+        """校验回调抛异常时不得写库（恢复值过不了当前 PARAM_SPEC，P2）。"""
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "12", 2000)
+
+        def veto(param: str, value: str) -> None:
+            raise ValueError(f"reject {param}={value}")
+
+        with pytest.raises(ValueError, match="reject"):
+            store.rollback_param("sma_cross", 2, 3000, validate=veto)
+        assert store.get_strategy_params("sma_cross")[0]["value"] == "12"
+
+
 class TestBacktestRuns:
     def _create(self, store, run_id: str = "r1", **kwargs) -> None:
         params = {

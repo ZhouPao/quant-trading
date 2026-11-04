@@ -386,6 +386,51 @@ class TestHistory:
             tasks.compare(["a"])
 
 
+class TestCompareValidation:
+    """M3-18 同品种+同周期+同区间+已完成（P1）。"""
+
+    def _run(self, store, run_id: str, *, start: int, status: str = DONE) -> None:
+        store.create_backtest_run(
+            run_id,
+            strategy_id="sma_cross",
+            inst_id=INST,
+            bar="1H",
+            start_ts=start,
+            end_ts=start + HOUR,
+            params="{}",
+            kind="backtest",
+            status=status,
+            created_at=start,
+        )
+
+    async def test_compare_rejects_different_range(self, env) -> None:
+        store, settings, service = env
+        tasks = TaskRunner(store, settings, service)
+        now = 1_700_000_000_000
+        self._run(store, "a", start=now)
+        self._run(store, "b", start=now + 10 * HOUR)
+
+        with pytest.raises(ValueError, match="区间不一致"):
+            tasks.compare(["a", "b"])
+
+    async def test_compare_rejects_unfinished_run(self, env) -> None:
+        store, settings, service = env
+        tasks = TaskRunner(store, settings, service)
+        now = 1_700_000_000_000
+        self._run(store, "a", start=now)
+        self._run(store, "b", start=now, status="failed")
+
+        with pytest.raises(ValueError, match="已完成的回测"):
+            tasks.compare(["a", "b"])
+
+    async def test_compare_rejects_too_many(self, env) -> None:
+        store, settings, service = env
+        tasks = TaskRunner(store, settings, service)
+
+        with pytest.raises(ValueError, match="at most"):
+            tasks.compare([f"r{i}" for i in range(9)])
+
+
 class TestRecover:
     async def test_interrupted_runs_marked_failed(self, env) -> None:
         store, settings, service = env

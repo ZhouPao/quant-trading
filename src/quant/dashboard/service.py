@@ -44,6 +44,8 @@ from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
 from quant.storage.quality import QualityReporter
 from quant.storage.validator import DataValidator
+from quant.strategies.loader import load_strategy_class
+from quant.strategies.params import ParamError, coerce_value
 
 log = get_logger("dashboard.service")
 
@@ -2141,6 +2143,18 @@ class DashboardService:
     ) -> dict[str, object]:
         """从历史记录恢复参数值，产生一条新的变更记录（不删历史）。"""
         now_ms = int(time.time() * 1000)
+
+        def _validate(param: str, value: str) -> None:
+            # PARAM_SPEC 范围可能事后收紧：恢复出的旧值若已非法会被
+            # resolve_strategy 静默忽略 → sources 显示 db 实际用 toml（P2）
+            strategy_cls, _ = load_strategy_class(
+                strategy_id, Path(self._settings.engine.config_dir)
+            )
+            spec = strategy_cls.PARAM_SPEC.get(param)
+            if spec is None:
+                raise ParamError(f"{param} 未在 PARAM_SPEC 声明，无法安全恢复")
+            coerce_value(spec, value)
+
         try:
             ok, message = await asyncio.to_thread(
                 self._store.rollback_param,
@@ -2149,12 +2163,15 @@ class DashboardService:
                 now_ms,
                 reason=reason,
                 changed_by=changed_by,
+                validate=_validate,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"rollback_param failed: {e}")
             return {
                 "ok": False,
                 "error": str(e),
+                # 路由用 message 返回 400 文案，异常分支原先缺这个键（P2）
+                "message": str(e),
                 "ts": now_ms,
             }
         return {

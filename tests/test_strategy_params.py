@@ -168,6 +168,61 @@ class TestCoerce:
             coerce_value(spec, "-1")
 
 
+class TestOverrideValidation:
+    """请求覆盖（回测 params=）的校验：保留研究灵活性，阻断注入（P1）。"""
+
+    def test_undeclared_toml_param_can_be_overridden(self, config_dir, store) -> None:
+        """commission_rate 是 toml 真实参数：费率敏感性研究仍允许。"""
+        params, sources = resolve_params(
+            "sma_cross", config_dir, store, overrides={"commission_rate": 0.0}
+        )
+
+        assert params["commission_rate"] == 0.0
+        assert sources["commission_rate"] == REQUEST
+
+    def test_unknown_param_rejected(self, config_dir, store) -> None:
+        with pytest.raises(ParamError, match="unknown param"):
+            resolve_params(
+                "sma_cross", config_dir, store,
+                overrides={"injected_key": 1},
+            )
+
+    def test_undeclared_nan_rejected(self, config_dir, store) -> None:
+        with pytest.raises(ParamError, match="non-finite"):
+            resolve_params(
+                "sma_cross", config_dir, store,
+                overrides={"commission_rate": float("nan")},
+            )
+
+    def test_undeclared_type_confusion_rejected(self, config_dir, store) -> None:
+        with pytest.raises(ParamError):
+            resolve_params(
+                "sma_cross", config_dir, store,
+                overrides={"commission_rate": "not-a-number"},
+            )
+
+
+class TestCoerceFinite:
+    """NaN/Inf 与浮点截断：原先会漏到 HTTP 500 或静默改值（P2）。"""
+
+    def test_float_rejects_non_finite(self) -> None:
+        spec = SmaCrossStrategy.PARAM_SPEC["ema_band_atr"]
+        for bad in (float("nan"), float("inf"), "nan", "inf"):
+            with pytest.raises(ParamError):
+                coerce_value(spec, bad)
+
+    def test_decimal_rejects_non_finite(self) -> None:
+        spec = RsiStrategy.PARAM_SPEC["oversold"]
+        with pytest.raises(ParamError):
+            coerce_value(spec, "nan")
+
+    def test_int_rejects_fractional_float(self) -> None:
+        spec = SmaCrossStrategy.PARAM_SPEC["fast_len"]
+        with pytest.raises(ParamError):
+            coerce_value(spec, 3.7)
+        assert coerce_value(spec, 3.0) == 3
+
+
 class TestMeta:
     def test_format_value(self) -> None:
         bool_spec = SmaCrossStrategy.PARAM_SPEC["ema_filter"]

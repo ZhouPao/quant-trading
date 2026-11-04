@@ -50,6 +50,9 @@ CANCELED = "canceled"
 
 TERMINAL_STATUSES = frozenset({DONE, FAILED, CANCELED})
 
+#: 单次对比最多 run 数：ids 来自查询参数，不设上限会拉爆产物/指标读取（P1）
+COMPARE_MAX_RUNS = 8
+
 #: 指标表里以整数存的列，其余数值列统一按文本存（避免浮点误差扩散到审计）。
 _INT_METRIC_COLUMNS = frozenset(
     {
@@ -296,10 +299,18 @@ class TaskRunner:
         }
 
     def compare(self, run_ids: list[str]) -> dict[str, Any]:
-        """多组对比；品种或周期不一致直接拒绝，避免拿苹果比橘子。"""
+        """多组对比：品种/周期/区间一致且均为已完成 run，避免拿苹果比橘子。"""
         if len(run_ids) < 2:
             raise ValueError("compare needs at least 2 run ids")
+        if len(run_ids) > COMPARE_MAX_RUNS:
+            raise ValueError(f"compare allows at most {COMPARE_MAX_RUNS} run ids")
         rows = [self._require(run_id) for run_id in run_ids]
+        for row in rows:
+            # pending/failed/canceled 没有可比指标，进对比会误导最优标注（P1）
+            if row["status"] != DONE:
+                raise ValueError(
+                    f"{row['run_id']} 状态为 {row['status']}，只有已完成的回测可对比"
+                )
         first = rows[0]
         for row in rows[1:]:
             if row["inst_id"] != first["inst_id"] or row["bar"] != first["bar"]:
@@ -307,6 +318,14 @@ class TaskRunner:
                     f"{row['run_id']} ({row['inst_id']} {row['bar']}) 与 "
                     f"{first['run_id']} ({first['inst_id']} {first['bar']}) "
                     f"品种或周期不一致，无法对比"
+                )
+            # M3-18 要求同品种+同周期+同区间，原先只实现前两项（P1）
+            if (row["start_ts"], row["end_ts"]) != (
+                first["start_ts"],
+                first["end_ts"],
+            ):
+                raise ValueError(
+                    f"{row['run_id']} 与 {first['run_id']} 回测区间不一致，无法对比"
                 )
         return {
             "inst_id": first["inst_id"],

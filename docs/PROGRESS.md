@@ -1980,6 +1980,47 @@ mtime 缓存需缓存整年 DataFrame（对象字符串列 ≈ 数百 MB/年）�
 **M2 审计至此全部收尾**（批次一~五）：P0×2、P1×12、P2×13 已修；P2-6 复核后不成立
 （8.64 记录）；P3 体验项与「订阅被拒重试」按范围有意保留，明细见各批次「遗留」。
 
+### 8.66 M3「策略研究」审计 + 批次一修复（2026-11-04）
+
+**审计范围**：M3 全部 15 个 ✅ 功能 + M3-5 🟡 已做部分（M3-7/M3-13 ⬜ 跳过）。
+两个只读子代理并行深查前后端，结论：无 P0；**P1×5 / P2×7 / P3×9**，正面确认
+两层参数合并处处同一函数、bindings 键口径一致、`strategy_param_changes` 只追加、
+Decimal 硬规则合规、一键回测后端确用当前 DB 参数。前端 M3 此前零测试覆盖。
+
+**批次一修复**：
+- **P1-1 回测请求参数注入**：`resolve_strategy` 的 overrides 原先对未声明参数
+  `raw` 原样直通（任意键/类型混淆/NaN 都能改回测假设）。定性核实：`commission_rate`
+  是 toml 里的真实参数，请求覆盖承载合法的费率敏感性研究，**不能一刀切禁用**。
+  修复：未声明参数必须①键存在于 toml ②与默认值同类型 ③有限值（`coerce_undeclared`）；
+  零费率研究仍可用且结果 `params` 可追溯，但任意键/NaN/类型混淆被拒。
+- **P1-2 compare 校验补全**：M3-18 要求「同品种+同周期+同区间」原先只实现前两项 →
+  补 `start_ts/end_ts` 一致性；`status != done` 直接拒绝（failed 无可比指标）；
+  `ids` 上限 8（`COMPARE_MAX_RUNS`）。
+- **P2 coerce 加固**：float/decimal 拒绝 NaN/Inf、int 拒绝非整数浮点（原先 JSON 3.7
+  静默截断、字符串报错，口径不一）；`_check_range` 的 `InvalidOperation` 兜底为
+  `ParamError`（原先漏到 HTTP 500）。
+- **P2 回滚与审计原子性**：`rollback_param` 增加可选 `validate` 回调（store 不反向
+  依赖策略模块），服务层按当前 `PARAM_SPEC` 校验恢复值——范围事后收紧时宁可拒绝
+  也不写「显示 db 实际用 toml」的脏覆盖；异常分支补 `message` 键（路由 400 文案）。
+  `set_strategy_param` 读旧值移入锁内，消除并发 PUT 的重复审计记录。
+- **P1-3 前端兜底**：`fetchStrategies/fetchParamChanges/fetchStrategyEvaluations/
+  fetchBindings/fetchBacktestRuns` 五个接口补 `?? []`（原先缺字段会让策略页
+  `undefined.length` 崩进 ErrorBoundary）；新增 `strategy.api.test.ts` 契约测试。
+
+**过程如实记录**：本批一度把 `set_strategy_param` 的读旧值包进 `self._lock`，
+但 `_query_one` 自身也取这把**非重入锁** → 自锁，全量 pytest 挂住、叠加多个后台
+测试进程。已改为「持锁状态下直接用连接查询」并清理挂起进程，修复后全量回归通过。
+这类问题只有坚持跑全量才会暴露。
+
+**验证**：`pytest` 全量 **1705 passed**（+14，含此前零覆盖的 rollback HTTP 端点）；
+`tsc --noEmit` 通过；`npm test` **28 passed**（+2）；`npm run build` 通过；`ruff` 全过。
+
+**批次二（待做）**：加载失败≠参数只读的文案、PUT 失败反馈挪到表单旁、保存后
+`info` 合并而非整体覆盖、**DELETE 绑定路由（解绑入口，功能缺口）**、notice 重拉去重、
+回测页对比同区间提示。批次三：`_set_params` 类型比较、评估刷屏截断、glob 收窄、
+reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"owner"`（本地无用户体系，
+建议保持现状并在界面注明「本地单用户」）。
+
 ---
 
 ## 9. 相关文档

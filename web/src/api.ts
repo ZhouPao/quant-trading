@@ -1535,7 +1535,9 @@ export type BatchResponse = {
 };
 
 export async function fetchStrategies(signal: AbortSignal) {
-  return getJson<StrategiesResponse>("/api/strategies", signal);
+  const data = await getJson<StrategiesResponse>("/api/strategies", signal);
+  // 兜底：策略页多处直接 .find/.length，缺字段会 undefined 崩溃（P1）
+  return { ...data, strategies: data.strategies ?? [] };
 }
 
 export async function updateStrategyParams(
@@ -1556,10 +1558,11 @@ export async function fetchParamChanges(
   signal: AbortSignal,
   strategyId: string
 ) {
-  return getJson<ParamChangesResponse>(
+  const data = await getJson<ParamChangesResponse>(
     `/api/strategies/${encodeURIComponent(strategyId)}/param-changes?limit=5`,
     signal
   );
+  return { ...data, changes: data.changes ?? [], total: data.total ?? 0 };
 }
 
 export type RollbackResult = {
@@ -1606,17 +1609,23 @@ export async function fetchStrategyEvaluations(
   strategyId: string,
   limit = 10
 ) {
-  return getJson<StrategyEvaluationsResponse>(
+  const data = await getJson<StrategyEvaluationsResponse>(
     `/api/strategies/${encodeURIComponent(strategyId)}/evaluations?limit=${limit}`,
     signal
   );
+  return { ...data, items: data.items ?? [], degraded: data.degraded ?? [] };
 }
 
 export async function fetchBindings(signal: AbortSignal, strategyId: string) {
-  return getJson<BindingsResponse>(
+  const data = await getJson<BindingsResponse>(
     `/api/strategies/${encodeURIComponent(strategyId)}/bindings`,
     signal
   );
+  return {
+    ...data,
+    bindings: data.bindings ?? [],
+    default_bar: data.default_bar ?? "1H",
+  };
 }
 
 export async function updateBinding(
@@ -1666,10 +1675,11 @@ export async function fetchBacktestRuns(
     params.set(key, String(value));
   }
   const qs = params.toString();
-  return getJson<BacktestRunsResponse>(
+  const data = await getJson<BacktestRunsResponse>(
     `/api/backtest/runs${qs ? `?${qs}` : ""}`,
     signal,
   );
+  return { ...data, runs: data.runs ?? [], total: data.total ?? 0 };
 }
 
 export async function fetchBacktestRun(signal: AbortSignal, runId: string) {
