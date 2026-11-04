@@ -28,6 +28,7 @@ from quant.cli.monitor import main as monitor_main
 from quant.cli.optimize import main as optimize_main
 from quant.cli.paper_report import main as paper_report_main
 from quant.cli.prune import main as prune_main
+from quant.cli.restore import main as restore_main
 from quant.cli.run_engine import main as run_engine_main
 from quant.cli.run_worker import main as run_worker_main
 from quant.cli.serve_webhook import main as serve_webhook_main
@@ -637,6 +638,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # restore
+    p_restore = sub.add_parser(
+        "restore",
+        help="从 quant backup 目录恢复状态库（M10-7，恢复前自动备份）",
+    )
+    p_restore.add_argument(
+        "--backup", required=True, help="quant backup 生成的目录"
+    )
+    p_restore.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只校验清单与版本，不写任何文件",
+    )
+    p_restore.add_argument(
+        "--force",
+        action="store_true",
+        help="目标库 WAL 非空时仍然恢复（确认已停 dashboard/worker）",
+    )
+    p_restore.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     return parser
 
 
@@ -647,6 +670,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "backup":
         return backup_main(args)
+    elif args.command == "restore":
+        return restore_main(args)
     elif args.command == "fetch-candles":
         return fetch_candles_main(args)
     elif args.command == "fetch-instruments":

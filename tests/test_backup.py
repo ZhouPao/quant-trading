@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from quant.foundation.backup import BackupError, create_backup
+from quant.foundation.backup import (
+    BackupError,
+    RestoreError,
+    create_backup,
+    restore_backup,
+)
 from quant.foundation.config import BacktestSettings, OKXSettings, Settings, StorageSettings
 from quant.state.sqlite_store import SQLiteStore
 
@@ -87,6 +92,101 @@ class TestCreateBackup:
             create_backup(settings, out_dir=tmp_path / "backups", now_ms=NOW)
 
     def test_schema_version_is_copied(self, tmp_path) -> None:
+        """schema_version 直接读 PRAGMA，避免与 sqlite_store 循环依赖。"""
+        settings = _settings(tmp_path)
+        _seed_db(settings.state.db_path)
+
+        result = create_backup(
+            settings, out_dir=tmp_path / "backups", now_ms=NOW
+        )
+
+        conn = sqlite3.connect(str(result.database))
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
+        assert manifest["schema_version"] == version
+
+
+class TestRestoreBackup:
+    def _make(self, tmp_path) -> tuple[Settings, object]:
+        settings = _settings(tmp_path)
+        _seed_db(settings.state.db_path)
+        backup = create_backup(
+            settings, out_dir=tmp_path / "backups", now_ms=NOW
+        )
+        return settings, backup
+
+    def _drop_binding(self, settings: Settings) -> None:
+        store = SQLiteStore(settings.state.db_path)
+        try:
+            store.delete_binding("sma_cross", "BTC-USDT")
+            assert store.list_bindings() == []
+        finally:
+            store.close()
+
+    def test_roundtrip_restores_data_and_backs_up_first(self, tmp_path) -> None:
+        settings, backup = self._make(tmp_path)
+        self._drop_binding(settings)
+
+        result = restore_backup(settings, backup.dir, now_ms=NOW + 1_000)
+
+        assert result.dry_run is False
+        # 恢复前必须先备份当前（空）状态，出错可退回
+        assert result.pre_backup is not None
+        assert (result.pre_backup / "quant.db").is_file()
+
+        store = SQLiteStore(settings.state.db_path)
+        try:
+            rows = store.list_bindings()
+        finally:
+            store.close()
+        assert [(r["strategy_id"], r["inst_id"]) for r in rows] == [
+            ("sma_cross", "BTC-USDT")
+        ]
+
+    def test_dry_run_does_not_touch_db(self, tmp_path) -> None:
+        settings, backup = self._make(tmp_path)
+        self._drop_binding(settings)
+        before = settings.state.db_path.read_bytes()
+
+        result = restore_backup(settings, backup.dir, dry_run=True)
+
+        assert result.dry_run is True
+        assert result.pre_backup is None
+        assert settings.state.db_path.read_bytes() == before
+
+    def test_tampered_backup_is_rejected(self, tmp_path) -> None:
+        settings, backup = self._make(tmp_path)
+        (backup.dir / "quant.db").write_bytes(b"tampered")
+
+        with pytest.raises(RestoreError, match="mismatch"):
+            restore_backup(settings, backup.dir, dry_run=True)
+
+    def test_busy_wal_requires_force(self, tmp_path) -> None:
+        settings, backup = self._make(tmp_path)
+        wal = settings.state.db_path.with_name(
+            f"{settings.state.db_path.name}-wal"
+        )
+        wal.write_bytes(b"pending")
+
+        with pytest.raises(RestoreError, match="--force"):
+            restore_backup(settings, backup.dir, now_ms=NOW + 1_000)
+
+        # 确认已停进程后 --force 才能通过
+        result = restore_backup(
+            settings, backup.dir, force=True, now_ms=NOW + 2_000
+        )
+        assert result.dry_run is False
+
+    def test_missing_manifest_is_rejected(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        empty = tmp_path / "empty-backup"
+        empty.mkdir()
+
+        with pytest.raises(RestoreError, match="manifest not found"):
+            restore_backup(settings, empty, dry_run=True)
         """schema_version 直接读 PRAGMA，避免与 sqlite_store 循环依赖。"""
         settings = _settings(tmp_path)
         _seed_db(settings.state.db_path)

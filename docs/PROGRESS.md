@@ -2543,6 +2543,30 @@ sha256 + manifest）。
 
 **下一项**：3-2 `quant restore`（dry-run 校验、拒绝覆盖运行中的库、恢复前自动备份）。
 
+### 8.80 MS5 收尾 3-2：`quant restore`（2026-11-04）
+
+**新增 `restore_backup` + `quant restore`**（M10-7 第二项）：
+- **恢复前校验链**：`manifest.json` 必须存在；每个文件的 size 与 sha256 必须与
+  清单一致（篡改/半截复制直接拒绝，不会把坏库写回）。
+- **版本检查**：备份的 `PRAGMA user_version` **高于当前代码**时拒绝——降级恢复
+  会丢掉新 schema 的列，宁可让人先升级代码。
+- **运行中保护**：目标库 `-wal` 非空时拒绝（说明仍有进程在写），提示先停
+  dashboard/worker；确认可覆盖时用 `--force`。
+- **恢复前自动备份**：目标库存在时先 `create_backup` 到
+  `<db>/backups/pre-restore/<stamp>/`，恢复出错还能退回。
+- **在线回写**：`sqlite3.Connection.backup` 把备份库写回目标库，不直接覆盖文件。
+- **`--dry-run`**：只跑校验链与版本检查，不写任何文件。
+- CLI：`quant restore --backup DIR [--dry-run] [--force] [--config ...]`，
+  恢复后提示重启 worker/dashboard 让连接指向新库。
+
+**测试**：`tests/test_backup.py` 新增 5 条——往返恢复（且先自动备份）、dry-run
+不改文件、篡改备份被拒、WAL 非空需 `--force`、清单缺失被拒。
+
+**验证**：`pytest` 全量 **1780 passed**（+5）；`ruff` 全过。
+
+**下一项**：3-3 `quant doctor`（端口/Redis/DB/schema/凭证/数据新鲜度/磁盘自检，
+`--json` 输出）。
+
 ---
 
 ## 9. 相关文档
