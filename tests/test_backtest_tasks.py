@@ -215,6 +215,31 @@ class TestSubmit:
         assert tasks.trades("nope") == {"total": 0, "trades": []}
 
 
+class TestTradesWindow:
+    def test_returns_most_recent_trades(self, env, monkeypatch) -> None:
+        """「最近 N 笔」= 尾部窗口，原先正序取最早 N 笔（P1）。"""
+        store, _settings_, service = env
+        tasks = TaskRunner(store, service._settings, service)
+        frame = pd.DataFrame(
+            {
+                "ts": list(range(5)),
+                "side": ["buy"] * 5,
+                "qty": ["1"] * 5,
+                "price": ["100"] * 5,
+                "fee": ["0.1"] * 5,
+            }
+        )
+        monkeypatch.setattr(tasks, "_artifact_path", lambda *a: "fake")
+        monkeypatch.setattr(
+            "quant.dashboard.tasks._read_parquet", lambda _p: frame
+        )
+
+        result = tasks.trades("x", limit=2)
+
+        assert result["total"] == 5
+        assert [row["ts"] for row in result["trades"]] == [3, 4]
+
+
 class TestCancelBeforeFirstBar:
     def test_immediate_stop_produces_valid_payload(self, env) -> None:
         """取消发生在首根 bar：equity_curve 为空，build 不能 IndexError（P1）。"""

@@ -1010,6 +1010,47 @@ class TestRollbackValidator:
         assert store.get_strategy_params("sma_cross")[0]["value"] == "12"
 
 
+class TestRunFiltersFuzzy:
+    def test_strategy_filter_matches_partial_name(self, store) -> None:
+        """前端是自由文本框：输入部分策略名应能命中（P2）。"""
+        for run_id, strategy in (("r1", "sma_cross"), ("r2", "rsi")):
+            store.create_backtest_run(
+                run_id,
+                strategy_id=strategy,
+                inst_id="BTC-USDT",
+                bar="1H",
+                start_ts=0,
+                end_ts=1,
+                params="{}",
+                kind="backtest",
+                status="done",
+                created_at=0,
+            )
+
+        rows, total = store.list_backtest_runs(strategy_id="sma")
+
+        assert total == 1
+        assert rows[0]["run_id"] == "r1"
+
+    def test_status_filter_stays_exact(self, store) -> None:
+        store.create_backtest_run(
+            "r1",
+            strategy_id="sma_cross",
+            inst_id="BTC-USDT",
+            bar="1H",
+            start_ts=0,
+            end_ts=1,
+            params="{}",
+            kind="backtest",
+            status="done",
+            created_at=0,
+        )
+
+        _rows, total = store.list_backtest_runs(status="don")
+
+        assert total == 0
+
+
 class TestBacktestRuns:
     def _create(self, store, run_id: str = "r1", **kwargs) -> None:
         params = {

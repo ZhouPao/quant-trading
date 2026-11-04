@@ -1690,6 +1690,8 @@ export type BacktestRunsQuery = {
   inst?: string;
   bar?: string;
   status?: string;
+  /** backtest / walkforward / batch */
+  kind?: string;
 };
 
 export async function fetchBacktestRuns(
@@ -1706,7 +1708,12 @@ export async function fetchBacktestRuns(
     `/api/backtest/runs${qs ? `?${qs}` : ""}`,
     signal,
   );
-  const runs = data.runs ?? [];
+  // 逐条兜底 metrics：对比表/最优标注直接解引用 run.metrics[key]，
+  // 旧后端缺字段会让整页进 ErrorBoundary（P1）
+  const runs = (data.runs ?? []).map((run) => ({
+    ...run,
+    metrics: run.metrics ?? {},
+  }));
   // total 缺失时回退到本页条数：写死 0 会显示「共 0 条，显示最近 20 条」（P2）
   return { ...data, runs, total: data.total ?? runs.length };
 }
@@ -1744,10 +1751,18 @@ export async function fetchBacktestCompare(
   signal: AbortSignal,
   runIds: string[],
 ) {
-  return getJson<BacktestCompareResponse>(
+  const data = await getJson<BacktestCompareResponse>(
     `/api/backtest/compare?ids=${encodeURIComponent(runIds.join(","))}`,
     signal,
   );
+  // 同 fetchBacktestRuns：对比表逐条解引用 metrics，缺字段会整页崩
+  return {
+    ...data,
+    runs: (data.runs ?? []).map((run) => ({
+      ...run,
+      metrics: run.metrics ?? {},
+    })),
+  };
 }
 
 /** 提交批量回测任务（M4-7），立即返回 run_id。 */
@@ -1803,6 +1818,8 @@ export type PineCompareResponse = {
   max_deviation: number | null;
   over_limit: boolean;
   persisted: string[];
+  /** 分母为 0 等无法计算偏离时的说明（后端 note） */
+  notes?: string[];
 };
 
 export async function importPine(

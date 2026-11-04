@@ -2464,17 +2464,27 @@ def _run_filters(
     since_ms: int | None,
     until_ms: int | None,
 ) -> tuple[str, tuple]:
-    """拼 backtest_runs 的 WHERE 子句（全为等值/区间条件，无需转义）。"""
+    """拼 backtest_runs 的 WHERE 子句。
+
+    策略/品种/周期是前端自由文本框输入，用 LIKE 模糊匹配——原先等值匹配
+    时输入部分策略名必然 0 条且无提示（P2）。状态/类型是枚举，保持等值。
+    所有值仍走参数化，不做字符串拼接。
+    """
     clauses: list[str] = []
     params: list[object] = []
-    for column, value in (
-        ("strategy_id", strategy_id),
-        ("inst_id", inst_id),
-        ("bar", bar),
-        ("status", status),
-        ("kind", kind),
+    for column, value, fuzzy in (
+        ("strategy_id", strategy_id, True),
+        ("inst_id", inst_id, True),
+        ("bar", bar, True),
+        ("status", status, False),
+        ("kind", kind, False),
     ):
-        if value is not None:
+        if value is None:
+            continue
+        if fuzzy:
+            clauses.append(f"{column} LIKE ?")
+            params.append(f"%{value}%")
+        else:
             clauses.append(f"{column} = ?")
             params.append(value)
     if since_ms is not None:

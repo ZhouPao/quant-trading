@@ -2365,6 +2365,48 @@ kind、inf 防护、turnover roundtrip）；`ruff` 全过。纯后端，前端�
 非事务、回测 `git_commit` 从不写入、`trades` 取最早 100 笔但文案写「最近」、
 产物读取无异常兜底。
 
+### 8.75 M4 批次丙：口径/前端族（2026-11-04）
+
+**P1 日报回测与实盘参数不同源（M4-8）**：`report/daily.py` 用 `load_strategy` 只读
+toml，看板改过参数后模拟盘用 DB 参数、日报回测用 toml → 偏离报告第一步就不同源、
+**会误判 FAIL**。修复：改用 `resolve_strategy`（toml ← DB 覆盖），尊重全局
+`params.resolve_from_db`；回测补传 `funding`（模拟盘真实成交含资金费），只校验
+对比窗口的费率覆盖（早期历史成本不影响窗口内 fills 对比）。
+
+**P1 详情视图不按 `run.kind` 分流**：渲染只看当前 `mode`——在批量模式点开单次回测会
+渲染 `BatchResultView` 并报「所有格子都失败了」，反之指标全「—」。修复：按
+`run.kind` 选视图（`batch` → 批量表，其余 → 单次详情），仅 `batch/backtest` 两个
+模式展示详情，寻优模式不受影响。
+
+**P1 对比最优集合不全**：`LOWER_IS_BETTER` 只有 `max_drawdown`，于是 `funding_cost`
+（净支出）、`max_consecutive_losses`、`max_consecutive_loss_amount`、`turnover`
+会**把最差值标绿**。修复：补齐集合；`avg_holding_bars` 加入 `NO_BEST`（无优劣）。
+
+**P1 寻优结果每行都标「最优」**：无条件 `bt-best` 使高亮完全失效。修复：只第 1 名
+加高亮，其余用 `mono`。
+
+**P1 成交「最近 N 笔」取的是最早 N 笔**：`frame.iloc[offset:offset+limit]` 是正序
+前段，与 UI 文案相反。修复：改尾部窗口（`offset` 从最新往旧偏移），返回仍按时间
+正序。
+
+**P2 筛选契约不符（M4-10）**：前端是自由文本框、后端等值匹配 → 输入部分策略名
+必然 0 条且无提示。修复：`strategy_id`/`inst_id`/`bar` 改 **LIKE 模糊匹配**
+（参数化，不拼字符串），状态/类型保持等值；前端补「类型筛选」下拉
+（`backtest`/`walkforward`/`batch`），`BacktestRunsQuery` 加 `kind`。
+
+**P1 两处白屏隐患**：`fetchBacktestRuns`/`fetchBacktestCompare` 逐条兜底
+`metrics ?? {}`（对比表/最优标注直接解引用）；`PineComparePanel` 的
+`rows/unmatched/persisted` 加 `?? []`，并展示后端 `notes`（分母为 0 的说明）。
+
+**验证**：`pytest` 全量 **1758 passed**（+5：日报同源 2、成交窗口 1、筛选 2）；
+`npx tsc --noEmit` 通过；`npm test` **37 passed**（+1 最优集合）；`npm run build`
+通过；`ruff` 全过。
+
+**批次丙遗留（放到批次丁）**：M4-10 时间区间筛选（后端已支持 since/until，前端
+未接）、日报 PASS/FAIL 判定维度仍不含 PnL/持仓/成交价、`rerun` 参数类型漂移、
+4 张表写入非事务、回测 `git_commit` 从不写入、产物读取异常兜底，以及两条未做
+功能（M4-4 报告导出、M4-6 walk-forward 入口）。
+
 ---
 
 ## 9. 相关文档

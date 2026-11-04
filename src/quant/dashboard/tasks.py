@@ -376,9 +376,14 @@ class TaskRunner:
         if path is None:
             return {"total": 0, "trades": []}
         frame = _read_parquet(path)
-        window = frame.iloc[offset : offset + limit]
+        total = len(frame)
+        # 「最近 N 笔」= 尾部窗口：原先正序取 offset:offset+limit 是最早的
+        # N 笔，与 UI 文案相反（P1）。offset 从最新往旧偏移，返回仍按时间正序。
+        end = max(0, total - offset)
+        start = max(0, end - limit)
+        window = frame.iloc[start:end]
         return {
-            "total": int(len(frame)),
+            "total": total,
             "trades": [dict(row) for row in window.to_dict("records")],
         }
 

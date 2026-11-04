@@ -7,11 +7,22 @@ import type { BacktestRun, MetricMap } from "./api";
 /** 对比表排序键：点表头切换，名次与首行高亮随之重排 */
 export type CompareSort = "total_return" | "max_drawdown" | "sharpe";
 
-/** 越小越好的指标，其余按越大越好比较 */
-export const LOWER_IS_BETTER = new Set(["max_drawdown"]);
+/**
+ * 越小越好的指标，其余按越大越好比较。
+ *
+ * 原先只有 `max_drawdown`：`funding_cost`（净支出）、连亏次数/金额、换手率
+ * 会**把最差值标成最优**（P1）。
+ */
+export const LOWER_IS_BETTER = new Set([
+  "max_drawdown",
+  "funding_cost",
+  "max_consecutive_losses",
+  "max_consecutive_loss_amount",
+  "turnover",
+]);
 
-/** 交易次数没有优劣之分，不参与高亮 */
-export const NO_BEST = new Set(["trade_count"]);
+/** 没有优劣之分的指标，不参与高亮 */
+export const NO_BEST = new Set(["trade_count", "avg_holding_bars"]);
 
 export function bestValue(
   runs: { metrics: MetricMap }[],

@@ -27,13 +27,15 @@ from quant.analysis.deviation import (
 )
 from quant.backtest.engine import Backtest
 from quant.backtest.matcher import Matcher
+from quant.backtest.runner import BacktestSetupError, load_funding_schedule
 from quant.foundation.config import Settings
 from quant.foundation.logger import get_logger
 from quant.foundation.schedule import is_due, parse_at
 from quant.monitor.alerter import EmailAlerter
 from quant.state.sqlite_store import SQLiteStore
 from quant.storage.bar_storage import BarStorage
-from quant.strategies.loader import StrategyConfigError, load_strategy
+from quant.strategies.loader import StrategyConfigError
+from quant.strategies.params import ParamError, resolve_strategy
 
 log = get_logger("report.daily")
 
@@ -63,12 +65,27 @@ class DailyResult:
     report: DeviationReport
 
 
-def _load_strategy(strategy_id: str, config_dir: Path):
-    """从 {config_dir}/{id}.toml 加载策略类与参数，转为 ReportError。"""
+def _load_strategy(
+    strategy_id: str,
+    config_dir: Path,
+    store: SQLiteStore,
+    resolve_from_db: bool,
+):
+    """按与实盘相同的两层合并解析策略（toml ← DB 覆盖）。
+
+    原先用 `load_strategy` 只读 toml：看板改过参数后，模拟盘用 DB 参数、
+    日报回测用 toml 参数，偏离报告从第一步就不同源、会误判 FAIL（P1）。
+    """
     try:
-        return load_strategy(strategy_id, config_dir)
-    except StrategyConfigError as e:
+        strategy_cls, params, _sources = resolve_strategy(
+            strategy_id,
+            config_dir,
+            store,
+            resolve_from_db=resolve_from_db,
+        )
+    except (StrategyConfigError, ParamError) as e:
         raise ReportError(str(e)) from e
+    return strategy_cls(), params
 
 
 def build_report(
@@ -117,8 +134,19 @@ def build_report(
         )
 
     strategy_obj, params = _load_strategy(
-        strategy, Path(config_dir or settings.report.config_dir)
+        strategy,
+        Path(config_dir or settings.report.config_dir),
+        store,
+        settings.params.resolve_from_db,
     )
+    try:
+        # 模拟盘真实成交含资金费，回测侧不传会系统性偏离（P1）；
+        # 只校验对比窗口的覆盖，早期历史成本不影响窗口内 fills 对比
+        funding = load_funding_schedule(
+            settings, inst, start_ts=start_ts, end_ts=end_ts
+        )
+    except BacktestSetupError as e:
+        raise ReportError(str(e)) from e
     # 必须从本地最早一根 bar 开始连续成交，而不是只回看 window_size 根。
     # 模拟盘在窗口起点可能持有很早建立的仓位，回看段太短时回测会「空仓起步」，
     # 首笔平仓就对不上：实测 200 根回看会产生 52% 的假偏离，全量历史为 0%。
@@ -132,6 +160,7 @@ def build_report(
         initial_cash=settings.backtest.initial_cash,
         window_size=settings.backtest.window_size,
         params=params,
+        funding=funding,
     ).run(bars)
 
     backtest_fills = [t for t in result.trades if start_ts <= t.ts <= end_ts]

@@ -3802,6 +3802,7 @@ function BacktestPanel({
     inst: "",
     bar: "",
     status: "",
+    kind: "",
   });
   const [historyVersion, setHistoryVersion] = useState(0);
   const [picked, setPicked] = useState<string[]>([]);
@@ -4338,26 +4339,28 @@ function BacktestPanel({
       {notice && <div className="bt-notice">{notice}</div>}
       {error && <div className="bt-error">{error}</div>}
 
-      {mode === "batch" ? (
+      {mode === "batch" || mode === "backtest" ? (
         run ? (
-          <BatchResultView
-            run={run}
-            rows={batchRows}
-            onCancel={() => void cancelRun(run.run_id)}
-          />
-        ) : (
+          // 按 run.kind 而不是当前 mode 选视图：在批量模式下点开单次回测，
+          // 原先会渲染 BatchResultView 并报「所有格子都失败了」（P1）
+          run.kind === "batch" ? (
+            <BatchResultView
+              run={run}
+              rows={batchRows}
+              onCancel={() => void cancelRun(run.run_id)}
+            />
+          ) : (
+            <BacktestRunView
+              run={run}
+              equity={equity}
+              trades={trades}
+              onCancel={() => void cancelRun(run.run_id)}
+            />
+          )
+        ) : mode === "batch" ? (
           <div className="empty">
             选好品种、周期与网格后点「运行批量回测」，汇总表会显示在这里
           </div>
-        )
-      ) : mode === "backtest" ? (
-        run ? (
-          <BacktestRunView
-            run={run}
-            equity={equity}
-            trades={trades}
-            onCancel={() => void cancelRun(run.run_id)}
-          />
         ) : (
           <div className="empty">
             填好区间后点「运行回测」，任务先入队，指标与权益曲线随后显示
@@ -4673,10 +4676,10 @@ function PineComparePanel({ run }: { run: BacktestRunDetail }) {
       {result && (
         <>
           <Table
-            empty={result.rows.length === 0}
+            empty={(result.rows ?? []).length === 0}
             emptyHint="没有可比对的指标"
             head={["指标", "Pine", "Python", "偏离度"]}
-            rows={result.rows.map((row) => [
+            rows={(result.rows ?? []).map((row) => [
               METRIC_LABELS[row.metric] ?? row.metric,
               num(row.pine, 4),
               row.python === null ? "—" : num(row.python, 4),
@@ -4695,10 +4698,12 @@ function PineComparePanel({ run }: { run: BacktestRunDetail }) {
                     ? ""
                     : `（最大 ${(result.max_deviation * 100).toFixed(2)}%）`
                 }`}
-            {result.unmatched.length > 0 &&
-              `；未匹配：${result.unmatched.join("、")}`}
-            {result.persisted.length > 0 &&
-              `；已落库：${result.persisted.join("、")}`}
+            {(result.unmatched ?? []).length > 0 &&
+              `；未匹配：${(result.unmatched ?? []).join("、")}`}
+            {(result.persisted ?? []).length > 0 &&
+              `；已落库：${(result.persisted ?? []).join("、")}`}
+            {(result.notes ?? []).length > 0 &&
+              `；${(result.notes ?? []).join("；")}`}
           </div>
         </>
       )}
@@ -4722,7 +4727,13 @@ function BacktestHistory({
 }: {
   runs: BacktestRun[];
   total: number;
-  filters: { strategy: string; inst: string; bar: string; status: string };
+  filters: {
+    strategy: string;
+    inst: string;
+    bar: string;
+    status: string;
+    kind: string;
+  };
   picked: string[];
   activeId: string | null;
   compare: BacktestCompareResponse | null;
@@ -4732,6 +4743,7 @@ function BacktestHistory({
     inst: string;
     bar: string;
     status: string;
+    kind: string;
   }) => void;
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
@@ -4790,6 +4802,18 @@ function BacktestHistory({
                 {RUN_STATUS_TEXT[item] ?? item}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="bt-field">
+          <span>类型筛选</span>
+          <select
+            value={filters.kind}
+            onChange={(e) => onFilter({ ...filters, kind: e.target.value })}
+          >
+            <option value="">全部</option>
+            <option value="backtest">单次回测</option>
+            <option value="walkforward">Walk-forward</option>
+            <option value="batch">批量回测</option>
           </select>
         </label>
       </div>
@@ -4998,7 +5022,16 @@ function OptimizeResult({ data }: { data: OptimizeResponse }) {
         rows={data.results.map((row) => [
           String(row.rank),
           ...names.map((name) => row.params[name] ?? "—"),
-          <b className="bt-best">{metricText(data.metric, row.metrics[data.metric])}</b>,
+          // 只有第 1 名标最优：原先每行都加 bt-best，高亮完全失效（P1）
+          row.rank === 1 ? (
+            <b className="bt-best">
+              {metricText(data.metric, row.metrics[data.metric])}
+            </b>
+          ) : (
+            <span className="mono">
+              {metricText(data.metric, row.metrics[data.metric])}
+            </span>
+          ),
           ...extras.map((key) => metricText(key, row.metrics[key])),
         ])}
       />

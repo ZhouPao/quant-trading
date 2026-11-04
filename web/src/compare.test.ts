@@ -46,6 +46,27 @@ describe("M3-18 参数版本对比纯函数", () => {
     );
   });
 
+  it("成本/连亏/换手按越小越好，不再把最差标最优（P1）", () => {
+    const runs = [
+      run("a", {
+        funding_cost: 10,
+        max_consecutive_losses: 3,
+        turnover: 5,
+      }),
+      run("b", {
+        funding_cost: 2,
+        max_consecutive_losses: 1,
+        turnover: 1,
+      }),
+    ];
+
+    expect(bestValue(runs, "funding_cost")).toBe(2);
+    expect(bestValue(runs, "max_consecutive_losses")).toBe(1);
+    expect(bestValue(runs, "turnover")).toBe(1);
+    // 持仓时长没有优劣之分
+    expect(bestValue(runs, "avg_holding_bars")).toBeNull();
+  });
+
   it("bestValue 按口径取最优，trade_count 不参与，单值/NaN 不高亮", () => {
     const runs = [
       run("a", { total_return: 0.1, max_drawdown: 0.2 }),

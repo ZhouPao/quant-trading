@@ -39,6 +39,44 @@ HOUR = 3_600_000
 BASE_TS = 1_700_000_000_000
 
 
+class TestParamSource:
+    """M4-8：日报回测必须与实盘用同一套参数（toml ← DB 覆盖）。"""
+
+    def test_load_strategy_reads_db_override(self, tmp_path) -> None:
+        from quant.report.daily import _load_strategy
+
+        settings = _settings(tmp_path)
+        store = SQLiteStore(settings.state.db_path)
+        try:
+            store.set_strategy_param("sma_cross", "fast_len", "5", 1000)
+
+            _cls, params = _load_strategy(
+                "sma_cross", settings.report.config_dir, store, True
+            )
+        finally:
+            store.close()
+
+        # 看板改过参数后，日报回测不能再只读 toml（会误判 FAIL）
+        assert params["fast_len"] == 5
+        assert params["slow_len"] == 50
+
+    def test_load_strategy_can_ignore_db(self, tmp_path) -> None:
+        from quant.report.daily import _load_strategy
+
+        settings = _settings(tmp_path)
+        store = SQLiteStore(settings.state.db_path)
+        try:
+            store.set_strategy_param("sma_cross", "fast_len", "5", 1000)
+
+            _cls, params = _load_strategy(
+                "sma_cross", settings.report.config_dir, store, False
+            )
+        finally:
+            store.close()
+
+        assert params["fast_len"] == 10
+
+
 def _bars(count: int = 400) -> list[Bar]:
     """缓慢震荡的 K线，触发 sma_cross 交易。"""
     bars = []
