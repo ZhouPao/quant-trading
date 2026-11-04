@@ -37,6 +37,7 @@ from quant.dashboard.backtest import (
     WalkforwardRequest,
 )
 from quant.foundation.config import Settings
+from quant.foundation.gitinfo import git_commit
 from quant.foundation.logger import get_logger
 from quant.monitor.alert_service import AlertEvent, AlertService
 from quant.state.sqlite_store import SQLiteStore
@@ -139,6 +140,7 @@ class TaskRunner:
             status=PENDING,
             created_at=now,
             warmup_bars=req.warmup_bars,
+            git_commit=git_commit(),
         )
         await self._queue.put((run_id, req))
         self._ensure_worker()
@@ -174,6 +176,7 @@ class TaskRunner:
             status=PENDING,
             created_at=now,
             warmup_bars=req.warmup_bars,
+            git_commit=git_commit(),
         )
         await self._queue.put((run_id, req))
         self._ensure_worker()
@@ -213,6 +216,7 @@ class TaskRunner:
             status=PENDING,
             created_at=now,
             warmup_bars=req.warmup_bars,
+            git_commit=git_commit(),
         )
         await self._queue.put((run_id, req))
         self._ensure_worker()
@@ -488,12 +492,14 @@ class TaskRunner:
             await self._notify_failure(run_id, error)
             return
 
-        self._store.save_backtest_metrics(run_id, _metric_row(payload))
-        for kind, path in artifacts:
-            self._store.add_backtest_artifact(
-                run_id, kind, str(path), _size(path), now
-            )
-        self._store.update_run_status(run_id, DONE, finished_at=_now_ms())
+        # 指标 + 产物清单 + 状态必须一次事务写入：原先三步各自 commit，
+        # 中途失败会留下「有产物无指标」或「有指标无 artifact」的中间态（P1）
+        self._store.complete_backtest_run(
+            run_id,
+            _metric_row(payload),
+            [(kind, str(path), _size(path)) for kind, path in artifacts],
+            _now_ms(),
+        )
 
     async def _notify_failure(self, run_id: str, error: str) -> None:
         """回测失败进告警（M9-11）。
@@ -690,7 +696,7 @@ def _request_from_row(row: dict) -> BacktestRequest:
             bars=list(data.get("bars") or []),
             start=common["start"],
             end=common["end"],
-            params=_params_text(data.get("base") or {}),
+            params=data.get("base") or {},
             grid=_grid_text(data.get("grid") or {}),
             metric=data.get("metric", "sharpe"),
             warmup_bars=row["warmup_bars"],
@@ -699,18 +705,16 @@ def _request_from_row(row: dict) -> BacktestRequest:
         # walkforward 的 params 存的是「基础参数 + 网格 + 切分」结构
         return WalkforwardRequest(
             **common,
-            params=_params_text(data.get("base") or {}),
+            params=data.get("base") or {},
             grid=_grid_text(data.get("grid") or {}),
             metric=data.get("metric", "sharpe"),
             is_bars=int(data.get("is_bars", 1500)),
             oos_bars=int(data.get("oos_bars", 500)),
             step_bars=data.get("step_bars"),
         )
-    return BacktestRequest(**common, params=_params_text(data))
-
-
-def _params_text(params: dict) -> str:
-    return ";".join(f"{name}={value}" for name, value in params.items())
+    # 直接传原 JSON 对象：原先拼成 "k=v" 再由 parse_params 猜类型，
+    # Decimal 会变 float、字符串 "10" 会变 int、值含 ;/= 直接崩（P1）
+    return BacktestRequest(**common, params=data)
 
 
 def _grid_text(grid: dict) -> str:
@@ -799,7 +803,12 @@ def _size(path: Path) -> int | None:
 
 
 def _read_parquet(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path)
+    """读产物 parquet；文件损坏/被清理时返回空表并按「无数据」降级（P2）。"""
+    try:
+        return pd.read_parquet(path)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"read parquet failed path={path}: {e}")
+        return pd.DataFrame()
 
 
 __all__ = [

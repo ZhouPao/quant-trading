@@ -296,6 +296,19 @@ const CURVE_VERSION_LIMIT = 3;
 const CURVE_POINTS = 60;
 // M3-18 对比表默认只列前 5 名，其余折叠，避免组内版本多时表格过长
 const COMPARE_ROW_LIMIT = 5;
+
+/** 日期输入（YYYY-MM-DD）→ UTC 当天起点毫秒；空/非法返回 undefined。 */
+function dayStartMs(value: string): number | undefined {
+  if (!value) return undefined;
+  const ts = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(ts) ? ts : undefined;
+}
+
+/** 日期输入 → UTC 当天终点毫秒（含当天）。 */
+function dayEndMs(value: string): number | undefined {
+  const start = dayStartMs(value);
+  return start === undefined ? undefined : start + 86_400_000 - 1;
+}
 // 排序键、最优值/签名/版本排序的纯函数已抽到 ./compare（含单测）
 
 // 任务状态文案：pending/running 会转圈，done/failed/canceled 是终点
@@ -3803,6 +3816,8 @@ function BacktestPanel({
     bar: "",
     status: "",
     kind: "",
+    since: "",
+    until: "",
   });
   const [historyVersion, setHistoryVersion] = useState(0);
   const [picked, setPicked] = useState<string[]>([]);
@@ -3833,7 +3848,13 @@ function BacktestPanel({
   // 历史列表按筛选条件重新拉取；任务结束后 historyVersion 自增触发刷新
   useEffect(() => {
     const controller = new AbortController();
-    fetchBacktestRuns(controller.signal, { limit: HISTORY_LIMIT, ...filters })
+    const { since, until, ...rest } = filters;
+    fetchBacktestRuns(controller.signal, {
+      limit: HISTORY_LIMIT,
+      ...rest,
+      since: dayStartMs(since),
+      until: dayEndMs(until),
+    })
       .then((res) => {
         setHistory(res.runs);
         setHistoryTotal(res.total);
@@ -4733,6 +4754,8 @@ function BacktestHistory({
     bar: string;
     status: string;
     kind: string;
+    since: string;
+    until: string;
   };
   picked: string[];
   activeId: string | null;
@@ -4744,6 +4767,8 @@ function BacktestHistory({
     bar: string;
     status: string;
     kind: string;
+    since: string;
+    until: string;
   }) => void;
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
@@ -4815,6 +4840,22 @@ function BacktestHistory({
             <option value="walkforward">Walk-forward</option>
             <option value="batch">批量回测</option>
           </select>
+        </label>
+        <label className="bt-field">
+          <span>起始日期</span>
+          <input
+            type="date"
+            value={filters.since}
+            onChange={(e) => onFilter({ ...filters, since: e.target.value })}
+          />
+        </label>
+        <label className="bt-field">
+          <span>结束日期</span>
+          <input
+            type="date"
+            value={filters.until}
+            onChange={(e) => onFilter({ ...filters, until: e.target.value })}
+          />
         </label>
       </div>
 

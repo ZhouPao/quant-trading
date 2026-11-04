@@ -1692,6 +1692,9 @@ export type BacktestRunsQuery = {
   status?: string;
   /** backtest / walkforward / batch */
   kind?: string;
+  /** created_at 区间（UTC ms），对应后端 since/until */
+  since?: number;
+  until?: number;
 };
 
 export async function fetchBacktestRuns(

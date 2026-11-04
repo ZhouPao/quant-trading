@@ -215,6 +215,57 @@ class TestSubmit:
         assert tasks.trades("nope") == {"total": 0, "trades": []}
 
 
+class TestRerunParamsFidelity:
+    def test_request_from_row_keeps_native_types(self) -> None:
+        """rerun 直接传原 JSON 对象，不再拼 "k=v" 让 parse_params 猜类型（P1）。"""
+        from quant.dashboard.tasks import _request_from_row
+
+        row = {
+            "params": '{"fast_len": 5, "commission_rate": 0.0005}',
+            "strategy_id": "sma_cross",
+            "start_ts": 0,
+            "end_ts": 86_400_000,
+            "inst_id": "BTC-USDT",
+            "bar": "1H",
+            "warmup_bars": 200,
+            "kind": "backtest",
+        }
+
+        req = _request_from_row(row)
+
+        assert req.params == {"fast_len": 5, "commission_rate": 0.0005}
+        assert isinstance(req.params, dict)
+
+
+class TestRunVersion:
+    async def test_submit_records_git_commit(self, env) -> None:
+        """回测登记必须写代码版本，否则结果不可溯源（P1）。"""
+        store, _settings_, service = env
+        tasks = TaskRunner(store, service._settings, service)
+        try:
+            run_id = await tasks.submit(_request())
+            await _drain(tasks, run_id)
+        finally:
+            await tasks.close()
+
+        assert store.get_backtest_run(run_id)["git_commit"]
+
+
+class TestCorruptArtifacts:
+    def test_corrupt_parquet_degrades_to_empty(
+        self, env, tmp_path, monkeypatch
+    ) -> None:
+        """产物损坏不能让接口 500，按「无数据」降级（P2）。"""
+        store, _settings_, service = env
+        tasks = TaskRunner(store, service._settings, service)
+        bad = tmp_path / "bad.parquet"
+        bad.write_bytes(b"not a parquet")
+        monkeypatch.setattr(tasks, "_artifact_path", lambda *_a: bad)
+
+        assert tasks.equity("x") == []
+        assert tasks.trades("x") == {"total": 0, "trades": []}
+
+
 class TestTradesWindow:
     def test_returns_most_recent_trades(self, env, monkeypatch) -> None:
         """「最近 N 笔」= 尾部窗口，原先正序取最早 N 笔（P1）。"""

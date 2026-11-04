@@ -2407,6 +2407,45 @@ toml，看板改过参数后模拟盘用 DB 参数、日报回测用 toml → �
 4 张表写入非事务、回测 `git_commit` 从不写入、产物读取异常兜底，以及两条未做
 功能（M4-4 报告导出、M4-6 walk-forward 入口）。
 
+### 8.76 M4 批次丁：可靠性/审计收尾（2026-11-04）
+
+**P1 `rerun` 参数类型漂移**：原先把 `backtest_runs.params` 拼成 `k=v` 文本再
+`parse_params` 猜类型——Decimal 变 float、字符串 `"10"` 变 int、值含 `;`/`=` 直接
+崩，**重跑结果可能与原 run 不同源**。修复：`BacktestRequest.params`/
+`BatchRequest.params` 支持 `str | dict`，rerun 直接传原 JSON 对象（`_overrides_of`
+统一归一）；删除 `_params_text`。
+
+**P1 回测完成态非事务**：指标 + 产物清单 + 状态三步各自 commit，中途失败会留下
+「有产物无指标」或「有指标无 artifact」的中间态。修复：新增
+`SQLiteStore.complete_backtest_run`，一个事务内写完三者，异常整体回滚；补成败
+两条测试。
+
+**P1 回测结果不可溯源**：`git_commit` 列有参数但从没写入。修复：单次/walk-forward/
+批量三处登记都写 `git_commit()`（公共 `foundation/gitinfo.py`）。
+
+**P2 产物损坏让接口 500**：`_read_parquet` 直接抛。修复：捕获后返回空表 + WARNING，
+`equity/trades/segments/batches` 按「无数据」降级；补损坏文件测试。
+
+**M4-10 时间区间筛选（前端补齐）**：后端早已支持 `since/until`，前端只有文本+
+下拉。修复：`BacktestRunsQuery` 加 `since/until`（UTC ms），历史筛选区加两个
+`type=date`，`dayStartMs/dayEndMs` 转 UTC 整天；非法/空值不传。
+
+**验证**：`pytest` 全量 **1763 passed**（+5：rerun 类型保真、git_commit、事务成败、
+产物降级）；`npx tsc --noEmit` 通过；`npm test` **37 passed**；`npm run build`
+通过；`ruff` 全过。
+
+**M4 审计收尾总账（批次甲~丁）**：P0×4（CLI 崩溃 / 复合收益虚高 / Pine 百分数 /
+费率覆盖）全修；P1×约 20 全修；P2 修 10+。**复核后不改**：cash 穿负不影响回撤
+（8.74 记录）、`_scan_strategies` 全量重扫收益可忽略（8.68 记录）。
+
+**M4 仍待做（需另排期）**：
+1. **M4-4 报告导出**：后端产物有 HTML，但没有下载路由，前端 `artifacts` 零消费
+   ——属未做功能。
+2. **M4-6 walk-forward 提交入口**：后端接口/任务/逐段表全就绪，前端零请求函数
+   ——属未做功能，工作量较大（表单 + 轮询 + 逐段表）。
+3. **M4-8 判定维度**：仍只比笔数/数量/名义/手续费/方向序列，未含 PnL/持仓/成交价；
+   扩展需同时改 `FillSummary`/`DeviationReport`/CSV/前端日报表。
+
 ---
 
 ## 9. 相关文档

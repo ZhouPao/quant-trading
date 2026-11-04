@@ -1157,6 +1157,36 @@ class TestBacktestRuns:
         assert row["funding_cost"] == "-84.51"
         assert row["sharpe"] == "1.5"
 
+    def test_complete_run_is_atomic(self, store) -> None:
+        """指标 + 产物 + 状态必须一次事务写入，失败时全部回滚（P1）。"""
+        self._create(store)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            # kind 为 None 违反 NOT NULL：前面已插入的指标行必须被回滚
+            store.complete_backtest_run(
+                "r1",
+                {"sharpe": "1.5"},
+                [(None, "/tmp/x", 1)],  # type: ignore[list-item]
+                1000,
+            )
+
+        assert store.get_backtest_run("r1")["status"] != "done"
+        assert store.get_backtest_metrics("r1") is None
+
+    def test_complete_run_writes_all(self, store) -> None:
+        self._create(store)
+
+        store.complete_backtest_run(
+            "r1",
+            {"sharpe": "1.5", "turnover": "2.0"},
+            [("equity", "/tmp/e.parquet", 100)],
+            1000,
+        )
+
+        assert store.get_backtest_run("r1")["status"] == "done"
+        assert store.get_backtest_metrics("r1")["turnover"] == "2.0"
+        assert store.list_backtest_artifacts("r1")[0]["kind"] == "equity"
+
     def test_turnover_roundtrip(self, store) -> None:
         """turnover 早就算出来但表里没列，会被静默丢弃（硬规则 #3）。"""
         self._create(store)

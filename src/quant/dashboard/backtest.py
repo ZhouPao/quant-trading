@@ -75,6 +75,17 @@ from quant.strategies.params import (
 
 log = get_logger("dashboard.backtest")
 
+
+def _overrides_of(params: str | dict[str, object]) -> dict:
+    """请求参数覆盖：文本按 `k=v;...` 解析，dict 原样使用。
+
+    rerun 从 `backtest_runs.params` 恢复时直接传 dict，绕过「文本→猜类型」
+    （Decimal 变 float、`"10"` 变 int、值含 `;`/`=` 直接崩，P1）。
+    """
+    if isinstance(params, dict):
+        return dict(params)
+    return parse_params(params)
+
 #: inst_id 会被拼进 Redis 缓存 field（`{strategy}:{inst}`）与文件路径：
 #: 只允许安全字符，含冒号/斜杠会让缓存解析整体失效（P2）
 _INST_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
@@ -143,7 +154,9 @@ class BacktestRequest(BaseModel):
     end: str
     inst: str | None = None
     bar: str = "1H"
-    params: str = ""
+    # HTTP 传 "k=v;..." 文本；rerun 直接传原 JSON 对象，避免「文本→猜类型」
+    # 的精度/类型漂移（P1）
+    params: str | dict[str, object] = ""
     warmup_bars: int = Field(200, ge=0, le=5000)
 
 
@@ -191,7 +204,7 @@ class BatchRequest(BaseModel):
     bars: list[str] = Field(..., min_length=1)
     start: str
     end: str
-    params: str = ""
+    params: str | dict[str, object] = ""
     grid: str = ""
     metric: str = "sharpe"
     warmup_bars: int = Field(200, ge=0, le=5000)
@@ -1091,7 +1104,7 @@ class BacktestService:
                 req.strategy,
                 self._config_dir,
                 self._store,
-                overrides=parse_params(req.params),
+                overrides=_overrides_of(req.params),
                 resolve_from_db=self._settings.params.resolve_from_db,
             )
             start_ts, end_ts = parse_range(req.start, req.end)
@@ -1183,7 +1196,7 @@ class BacktestService:
                 req.strategy,
                 self._config_dir,
                 self._store,
-                overrides=parse_params(req.params),
+                overrides=_overrides_of(req.params),
                 resolve_from_db=self._settings.params.resolve_from_db,
             )
             start_ts, end_ts = parse_range(req.start, req.end)

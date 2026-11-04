@@ -2000,6 +2000,57 @@ class SQLiteStore:
             (run_id, *columns.values()),
         )
 
+    def complete_backtest_run(
+        self,
+        run_id: str,
+        metrics: dict[str, object],
+        artifacts: list[tuple[str, str, int | None]],
+        now_ms: int,
+    ) -> None:
+        """一次事务写入指标 + 产物清单 + done 状态。
+
+        原先三步各自 commit：中途失败会留下「有产物无指标」或「有指标无
+        artifact」的中间态（P1）。产物文件本身无法回滚，但 DB 侧要么全成、
+        要么全不成。
+        """
+        columns = {k: v for k, v in metrics.items() if k in _METRIC_COLUMNS}
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN")
+                if columns:
+                    names = ", ".join(columns)
+                    marks = ", ".join("?" for _ in columns)
+                    self._conn.execute(
+                        f"""
+                        INSERT INTO backtest_metrics (run_id, {names})
+                        VALUES (?, {marks})
+                        ON CONFLICT(run_id) DO UPDATE SET
+                            {", ".join(f"{k}=excluded.{k}" for k in columns)}
+                        """,
+                        (run_id, *columns.values()),
+                    )
+                for kind, path, size in artifacts:
+                    self._conn.execute(
+                        """
+                        INSERT INTO backtest_artifacts
+                            (run_id, kind, path, size, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(run_id, kind) DO UPDATE SET
+                            path=excluded.path, size=excluded.size,
+                            created_at=excluded.created_at
+                        """,
+                        (run_id, kind, path, size, now_ms),
+                    )
+                self._conn.execute(
+                    "UPDATE backtest_runs SET status = 'done', finished_at = ?"
+                    " WHERE run_id = ?",
+                    (now_ms, run_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def get_backtest_metrics(self, run_id: str) -> dict | None:
         row = self._query_one(
             "SELECT * FROM backtest_metrics WHERE run_id = ?", (run_id,)
