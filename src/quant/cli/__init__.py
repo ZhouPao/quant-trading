@@ -18,6 +18,7 @@ from quant.cli.backtest import main as backtest_main
 from quant.cli.backup import main as backup_main
 from quant.cli.check_data import main as check_data_main
 from quant.cli.check_live import main as check_live_main
+from quant.cli.check_strategies import main as check_strategies_main
 from quant.cli.dashboard import main as dashboard_main
 from quant.cli.doctor import main as doctor_main
 from quant.cli.fetch_candles import main as fetch_candles_main
@@ -680,6 +681,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # check-strategies
+    p_consistency = sub.add_parser(
+        "check-strategies",
+        help="双副本一致性校验：Pine 基线 ↔ Python toml ↔ PARAM_SPEC（M3-13）",
+    )
+    p_consistency.add_argument(
+        "--strict",
+        action="store_true",
+        help="存在未登记漂移时返回非零退出码（CI 用）",
+    )
+    p_consistency.add_argument(
+        "--pine-dir", default=None, help="Pine 目录（默认内置路径）"
+    )
+    p_consistency.add_argument(
+        "--config-dir", default=None, help="策略 toml 目录（默认 config/strategies）"
+    )
+
     # research
     p_research = sub.add_parser(
         "research", help="研究数据导出：K线/成交/回测结果（M3-7）"
@@ -745,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
         return check_data_main(args)
     elif args.command == "check-live":
         return check_live_main(args)
+    elif args.command == "check-strategies":
+        return check_strategies_main(args)
     elif args.command == "align-data":
         return align_data_main(args)
     elif args.command == "serve-webhook":

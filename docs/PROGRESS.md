@@ -2830,6 +2830,30 @@ MS5 剩余 🟡 仅 M3-13、M4-8、M8-7、M8-8。
 
 **下一项**：6-1 `quant check-strategies --strict`（M3-13 双副本一致性 CLI）。
 
+### 8.91 MS5 收尾 6-1：`quant check-strategies`（M3-13 闭环）（2026-11-04）
+
+**把双副本一致性校验从「测试级」提升为「可执行命令」**：
+- 新增 `quant/strategies/consistency.py`：解析 Pine `input(...)`、toml `[params]`、
+  `PARAM_SPEC` 默认值，输出扁平化的 `DriftItem`；`known` 字段区分**已登记**与
+  **未登记**漂移。登记表（`KNOWN_PINE_DRIFT` / `KNOWN_SPEC_DRIFT`）从测试搬入
+  模块，**测试与 CLI 共用同一份**，不会各说各话。
+- 新增 `quant check-strategies [--strict] [--pine-dir] [--config-dir]`：
+  默认列出全部差异并返回 0；`--strict` 时**只要存在未登记漂移就返回 1**（CI 用）。
+  除参数差异外，还会检查「Pine 文件头未声明基线定位」「缺少 toml.example」。
+- `tests/strategies/test_pine_python_consistency.py` 改为复用模块函数（断言不变）。
+
+**测试**：新增 `tests/test_check_strategies.py` 4 条——仓库现状无未登记漂移、
+自造 Pine 多参数在 `--strict` 下失败、非 strict 返回 0、完全一致时提示「未发现
+任何差异」；原一致性测试 4 条保留。
+
+**验证**：`pytest` 全量 **1837 passed**（+4）；`ruff` 全过（顺带修正
+`cli/__init__.py` 的 import 排序）。
+
+**账本**：**M3 达 18 ✅ / 0 🟡 / 0 ⬜**；合计 **116/150（77.3%）**；
+MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
+
+**下一项**：M5 因子库第一批（7-1 因子框架）。
+
 ---
 
 ## 9. 相关文档
