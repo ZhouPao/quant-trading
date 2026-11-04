@@ -55,6 +55,9 @@ class StorageSettings(BaseModel):
 
     data_dir: Path = Path("./data")
     retention_days: int = 365
+    #: 按周期覆盖保留天数（M10-3）：短周期数据量大、价值衰减快，
+    #: 例如 {"1m": 30, "5m": 90, "1H": 365}；未列出的周期用 retention_days
+    retention_by_bar: dict[str, int] = Field(default_factory=dict)
     retention_enabled: bool = True
     retention_at: str = "03:30"             # 本地时间 HH:MM
     retention_last_run_key: str = "quant:retention:last"

@@ -10,6 +10,9 @@ demo = true                         # true=模拟盘，false=实盘；M1 可保�
 [storage]
 data_dir = "./data"
 retention_days = 365                # K线/SQLite 历史/日报 CSV 的保留天数
+# 按周期覆盖保留天数（M10-3）：短周期数据量大、价值衰减快；
+# 未列出的周期沿用 retention_days。示例：retention_by_bar = { "1m" = 30, "5m" = 90 }
+retention_by_bar = {}
 retention_enabled = true            # monitor 每日自动清理；false 时只能 quant prune
 retention_at = "03:30"              # 本地时间 HH:MM
 dead_letter_persist = true            # 死信双写 SQLite，供看板查看与重放

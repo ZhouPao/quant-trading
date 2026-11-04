@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,9 @@ class PurgeResult:
     equity_deleted: int = 0
     report_files_removed: int = 0
     alerts_deleted: int = 0
+    #: M10-3：此前未纳入保留策略的两类数据
+    funding_deleted: int = 0
+    dead_letters_deleted: int = 0
 
     def summary(self) -> str:
         """单行摘要，便于写日志。"""
@@ -57,12 +61,25 @@ class PurgeResult:
             f"bars={self.bars_deleted} bar_files={self.bar_files_removed} "
             f"signals={self.signals_deleted} orders={self.orders_deleted} "
             f"fills={self.fills_deleted} equity={self.equity_deleted} "
-            f"reports={self.report_files_removed} alerts={self.alerts_deleted}"
+            f"reports={self.report_files_removed} alerts={self.alerts_deleted} "
+            f"funding={self.funding_deleted} "
+            f"dead_letters={self.dead_letters_deleted}"
         )
 
 
-def purge_bars(data_dir: Path, cutoff_ms: int) -> tuple[int, int]:
-    """删除 K线中早于 cutoff_ms 的行，返回 (删除行数, 删除文件数)。"""
+def purge_bars(
+    data_dir: Path,
+    cutoff_ms: int,
+    *,
+    now_ms: int | None = None,
+    by_bar: dict[str, int] | None = None,
+) -> tuple[int, int]:
+    """删除 K线中早于 cutoff 的行，返回 (删除行数, 删除文件数)。
+
+    `by_bar` 传入时按周期覆盖保留期（M10-3）：K 线路径是
+    `candles/{type}/{inst}/{bar}/{year}.parquet`，短周期可用更短的天数。
+    未命中该周期、或未传 `now_ms` 时，沿用统一的 `cutoff_ms`。
+    """
     root = Path(data_dir) / "candles"
     if not root.exists():
         return 0, 0
@@ -70,12 +87,17 @@ def purge_bars(data_dir: Path, cutoff_ms: int) -> tuple[int, int]:
     rows = 0
     removed = 0
     for path in sorted(root.rglob("*.parquet")):
+        bar_cutoff = cutoff_ms
+        if by_bar and now_ms is not None:
+            days = by_bar.get(path.parent.name)
+            if days and days > 0:
+                bar_cutoff = now_ms - days * DAY_MS
         try:
             df = pd.read_parquet(path)
         except Exception as e:  # noqa: BLE001
             log.warning(f"prune skip unreadable {path}: {e}")
             continue
-        kept = df[df["ts"] >= cutoff_ms]
+        kept = df[df["ts"] >= bar_cutoff]
         if len(kept) == len(df):
             continue
 
@@ -86,6 +108,39 @@ def purge_bars(data_dir: Path, cutoff_ms: int) -> tuple[int, int]:
             continue
         kept.to_parquet(path, **_PARQUET_WRITE)
     return rows, removed
+
+
+def purge_funding(data_dir: Path, cutoff_ms: int) -> int:
+    """删除资金费率 JSON 中早于 cutoff 的记录，返回删除条数（M10-3）。
+
+    资金费率此前不在保留策略内：`data/funding_rates/{inst}.json` 只增不减。
+    """
+    root = Path(data_dir) / "funding_rates"
+    if not root.exists():
+        return 0
+
+    removed = 0
+    for path in sorted(root.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.warning(f"prune skip unreadable funding {path}: {e}")
+            continue
+        if not isinstance(raw, list):
+            continue
+        kept = [
+            item
+            for item in raw
+            if isinstance(item, dict) and int(item.get("ts", 0)) >= cutoff_ms
+        ]
+        if len(kept) == len(raw):
+            continue
+        removed += len(raw) - len(kept)
+        if not kept:
+            path.unlink()
+            continue
+        path.write_text(json.dumps(kept, ensure_ascii=False), encoding="utf-8")
+    return removed
 
 
 def purge_reports(out_dir: Path, cutoff_ms: int) -> int:
@@ -153,8 +208,15 @@ class RetentionPurger:
     def run(self, now_ms: int) -> PurgeResult:
         """立即执行清理并返回统计。"""
         cutoff = now_ms - self._cfg.retention_days * DAY_MS
-        bars, bar_files = purge_bars(self._settings.storage.data_dir, cutoff)
+        # 短周期按 retention_by_bar 覆盖；未列出的周期沿用全局 cutoff
+        bars, bar_files = purge_bars(
+            self._settings.storage.data_dir,
+            cutoff,
+            now_ms=now_ms,
+            by_bar=self._cfg.retention_by_bar,
+        )
         deleted = self._store.purge_before(cutoff)
+        funding = purge_funding(self._settings.storage.data_dir, cutoff)
         reports = purge_reports(self._settings.report.out_dir, cutoff)
         # 告警按级别分档（M9-12）：ERROR 留得更久，INFO 恢复通知最短
         monitor = self._settings.monitor
@@ -176,6 +238,8 @@ class RetentionPurger:
             equity_deleted=deleted.get("equity_snapshots", 0),
             report_files_removed=reports,
             alerts_deleted=alerts,
+            funding_deleted=funding,
+            dead_letters_deleted=deleted.get("dead_letters", 0),
         )
 
     # internal
@@ -204,5 +268,6 @@ __all__ = [
     "PurgeResult",
     "RetentionPurger",
     "purge_bars",
+    "purge_funding",
     "purge_reports",
 ]

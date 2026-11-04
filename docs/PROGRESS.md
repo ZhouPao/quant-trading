@@ -2732,6 +2732,31 @@ sha256 + manifest）。
 **下一项**：2-4 通知设置（M10-4）——SMTP 热改 + 测试发送（复用 `quant test-email`），
 写入前做连通性校验。
 
+### 8.87 MS5 收尾 2-6：保留策略分档（M10-3）（2026-11-04）
+
+**M10-3 闭环**（此前只有全局天数 + 告警分档）：
+- **按周期分档**：`StorageSettings.retention_by_bar`（如 `{"1m": 30, "5m": 90}`），
+  `purge_bars` 按 K 线路径中的 `{bar}` 目录取对应天数；未列出的周期沿用
+  `retention_days`。短周期数据量大、价值衰减快，统一 365 天是浪费。
+- **死信纳入清理**：`purge_before` 增加 `dead_letters`（按 `created_at`），
+  保留期内仍可回放，过期后随历史清理。
+- **资金费率纳入清理**：新增 `purge_funding`，读 `data/funding_rates/*.json`
+  过滤 `ts < cutoff` 后写回；整文件为空则删除。此前只增不减。
+- `PurgeResult` 增加 `funding_deleted` / `dead_letters_deleted`，`summary()`
+  与 `quant prune` 输出同步。
+- `config/config.toml.example` 补 `retention_by_bar` 注释示例。
+
+**测试**：`tests/test_retention.py` 新增 6 条——1m/1H 同刻不同保留期（前者删、
+后者留）、不传 by_bar 退回全局、资金费率旧记录删除 / 空文件删除 / 目录缺失、
+死信按 created_at 清理；并同步 `purge_before` 的精确字典断言（多 `dead_letters` 键）。
+
+**验证**：`pytest` 全量 **1821 passed**（+6）；`ruff` 全过。纯后端。
+
+**账本同步**：需求表 M10 全部条目更新为 14 ✅ / 1 🚫，合计 113/150（75.3%）；
+MS5 剩余仅 M3-7（M3-13 仍 🟡）。
+
+**下一项**：4-1 `quant research export`（M3-7 第一部分）。
+
 ---
 
 ## 9. 相关文档

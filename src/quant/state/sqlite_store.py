@@ -2333,6 +2333,12 @@ class SQLiteStore:
                 "DELETE FROM reconciliations WHERE ts < ? AND resolved = 1",
                 (cutoff_ms,),
             ),
+            # 死信是排障证据，保留期内可回放；过期后随历史清理（M10-3）
+            (
+                "dead_letters",
+                "DELETE FROM dead_letters WHERE created_at < ?",
+                (cutoff_ms,),
+            ),
         )
         deleted: dict[str, int] = {}
         with self._lock:

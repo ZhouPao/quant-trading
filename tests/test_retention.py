@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from decimal import Decimal
@@ -26,6 +27,7 @@ from quant.storage.bar_storage import BarStorage
 from quant.storage.retention import (
     RetentionPurger,
     purge_bars,
+    purge_funding,
     purge_reports,
 )
 
@@ -47,6 +49,22 @@ def _bar(ts: int, price: str = "100") -> Bar:
         confirm=1,
         inst_id="BTC-USDT",
         bar_size="1H",
+    )
+
+
+def _bar_for(ts: int, bar: str) -> Bar:
+    value = Decimal("100")
+    return Bar(
+        ts=ts,
+        open=value,
+        high=value,
+        low=value,
+        close=value,
+        vol=Decimal("1"),
+        vol_quote=value,
+        confirm=1,
+        inst_id="BTC-USDT",
+        bar_size=bar,
     )
 
 
@@ -139,6 +157,99 @@ class TestPurgeReports:
         assert purge_reports(tmp_path / "nothing", NOW) == 0
 
 
+class TestRetentionByBar:
+    """M10-3：短周期可配置更短的保留期。"""
+
+    def test_short_bar_pruned_more_aggressively(self, tmp_path) -> None:
+        data_dir = tmp_path / "data"
+        storage = BarStorage(data_dir)
+        old = NOW - 100 * DAY
+        recent = NOW - 10 * DAY
+        storage.save_bars([_bar_for(old, "1m"), _bar_for(recent, "1m")])
+        storage.save_bars([_bar_for(old, "1H"), _bar_for(recent, "1H")])
+
+        rows, _files = purge_bars(
+            data_dir,
+            NOW - 365 * DAY,
+            now_ms=NOW,
+            by_bar={"1m": 30, "1H": 365},
+        )
+
+        # 同一时刻：1m 的 100 天前数据过期，1H 的同年数据仍在保留期
+        assert rows == 1
+        assert len(storage.load_bars("BTC-USDT", "1m", 0, NOW)) == 1
+        assert len(storage.load_bars("BTC-USDT", "1H", 0, NOW)) == 2
+
+    def test_without_by_bar_uses_global_cutoff(self, tmp_path) -> None:
+        data_dir = tmp_path / "data"
+        storage = BarStorage(data_dir)
+        storage.save_bars([_bar_for(NOW - 100 * DAY, "1m")])
+
+        rows, _files = purge_bars(data_dir, NOW - 30 * DAY)
+
+        assert rows == 1
+        assert storage.load_bars("BTC-USDT", "1m", 0, NOW) == []
+
+
+class TestFundingPurge:
+    """M10-3：资金费率此前只增不减。"""
+
+    def _write(self, data_dir: Path, items: list[dict]) -> Path:
+        path = data_dir / "funding_rates" / "BTC-USDT-SWAP.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(items), encoding="utf-8")
+        return path
+
+    def test_old_rates_removed(self, tmp_path) -> None:
+        data_dir = tmp_path / "data"
+        path = self._write(
+            data_dir,
+            [
+                {"inst_id": "BTC-USDT-SWAP", "ts": NOW - 400 * DAY, "rate": "0.0001"},
+                {"inst_id": "BTC-USDT-SWAP", "ts": NOW - DAY, "rate": "0.0001"},
+            ],
+        )
+
+        removed = purge_funding(data_dir, NOW - 365 * DAY)
+
+        assert removed == 1
+        left = json.loads(path.read_text(encoding="utf-8"))
+        assert [item["ts"] for item in left] == [NOW - DAY]
+
+    def test_empty_file_removed(self, tmp_path) -> None:
+        data_dir = tmp_path / "data"
+        path = self._write(
+            data_dir,
+            [{"inst_id": "BTC-USDT-SWAP", "ts": NOW - 400 * DAY, "rate": "0.0001"}],
+        )
+
+        removed = purge_funding(data_dir, NOW - 365 * DAY)
+
+        assert removed == 1
+        assert not path.exists()
+
+    def test_missing_dir_is_noop(self, tmp_path) -> None:
+        assert purge_funding(tmp_path / "nothing", NOW) == 0
+
+
+class TestDeadLetterPurge:
+    def test_deletes_old_dead_letters(self, tmp_path) -> None:
+        store = SQLiteStore(tmp_path / "quant.db")
+        try:
+            store.insert_dead_letter(
+                "old", "parse", "bad", "{}", created_at=NOW - 400 * DAY
+            )
+            store.insert_dead_letter(
+                "new", "parse", "bad", "{}", created_at=NOW - DAY
+            )
+
+            deleted = store.purge_before(NOW - 365 * DAY)
+        finally:
+            store.close()
+
+        assert deleted["dead_letters"] == 1
+
+
 class TestPurgeState:
     def test_deletes_old_records(self, tmp_path) -> None:
         store = SQLiteStore(tmp_path / "quant.db")
@@ -173,6 +284,8 @@ class TestPurgeState:
                 "signals": 1,
                 "equity_snapshots": 0,
                 "reconciliations": 0,
+                # M10-3：死信也纳入清理统计
+                "dead_letters": 0,
             }
             assert store.get_signal("old") is None
             assert store.get_signal("new") is not None
