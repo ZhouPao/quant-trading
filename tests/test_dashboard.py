@@ -21,9 +21,11 @@ from quant.backtest.order import Fill, Order
 from quant.backtest.position import Position
 from quant.backtest.signal import Signal
 from quant.dashboard.app import create_app
-from quant.dashboard.service import DashboardService
+from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import OKXSettings, Settings
+from quant.foundation.control import CONTROL_AUDIT_KEY, CONTROL_KEY
+from quant.foundation.heartbeat import SUPERVISOR_KEY
 from quant.models import Bar
 from quant.monitor.alerter import Alert
 from quant.monitor.monitor import Monitor
@@ -1403,6 +1405,84 @@ class TestEvaluationsCollapse:
             "local bars behind",
             "no bars",
         ]
+
+
+class TestProcessControl:
+    """M10-6：进程启停的准入规则与命令入队。"""
+
+    async def test_demo_allows_command_and_enqueues(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        settings.okx.demo = True
+        await redis.set(
+            SUPERVISOR_KEY,
+            json.dumps({"ts": 1, "pid": 1, "children": {}}),
+        )
+
+        result = await service.process_command("worker", "stop", "tester")
+
+        assert result["ok"] is True
+        raw = await redis.lindex(CONTROL_KEY, 0)
+        payload = json.loads(raw)
+        assert payload["action"] == "stop"
+        assert payload["name"] == "worker"
+        assert payload["operator"] == "tester"
+
+    async def test_live_mode_requires_explicit_switch(self, engine_env) -> None:
+        service, _store, settings, _redis = engine_env
+        settings.okx.demo = False
+        settings.dashboard.allow_live_process_control = False
+
+        with pytest.raises(ProcessControlError) as exc:
+            await service.process_command("worker", "stop")
+
+        assert exc.value.status_code == 403
+        assert "allow_live_process_control" in str(exc.value)
+
+    async def test_live_mode_allows_when_switched_on(self, engine_env) -> None:
+        service, _store, settings, redis = engine_env
+        settings.okx.demo = False
+        settings.dashboard.allow_live_process_control = True
+        await redis.set(SUPERVISOR_KEY, json.dumps({"ts": 1, "children": {}}))
+
+        result = await service.process_command("worker", "start")
+
+        assert result["ok"] is True
+
+    async def test_dashboard_cannot_be_stopped(self, engine_env) -> None:
+        service, _store, _settings, _redis = engine_env
+
+        with pytest.raises(ProcessControlError, match="不允许在线启停"):
+            await service.process_command("dashboard", "stop")
+
+    async def test_unknown_process_rejected(self, engine_env) -> None:
+        service, _store, _settings, _redis = engine_env
+
+        with pytest.raises(ProcessControlError, match="不允许在线启停"):
+            await service.process_command("nope", "start")
+
+    async def test_supervisor_offline_is_503(self, engine_env) -> None:
+        service, _store, _settings, redis = engine_env
+        await redis.delete(SUPERVISOR_KEY)
+
+        with pytest.raises(ProcessControlError) as exc:
+            await service.process_command("worker", "stop")
+
+        assert exc.value.status_code == 503
+        assert "supervisor" in str(exc.value)
+
+    async def test_command_audit_is_returned(self, engine_env) -> None:
+        service, _store, _settings, redis = engine_env
+        await redis.lpush(
+            CONTROL_AUDIT_KEY,
+            json.dumps(
+                {"command_id": "c1", "status": "accepted", "name": "worker"}
+            ),
+        )
+
+        data = await service.process_commands(10)
+
+        assert data["commands"][0]["status"] == "accepted"
+        assert data["degraded"] == []
 
 
 class TestEngine:

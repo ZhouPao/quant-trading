@@ -81,11 +81,12 @@ from quant.dashboard.backtest import (
     OptimizeRequest,
     ParamUpdateRequest,
     PineImportRequest,
+    ProcessControlRequest,
     StrategyParamError,
     WalkforwardRequest,
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
-from quant.dashboard.service import DashboardService
+from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
@@ -501,6 +502,38 @@ def create_app(
     @app.get("/api/processes")
     async def processes() -> JSONResponse:
         return JSONResponse(await service.processes())
+
+    @app.get("/api/processes/commands")
+    async def process_commands(
+        limit: int = Query(50, ge=1, le=200),
+    ) -> JSONResponse:
+        """最近的控制命令审计（M10-6）。"""
+        return JSONResponse(await service.process_commands(limit))
+
+    async def _control_process(
+        request: Request, name: str, action: str, req: ProcessControlRequest
+    ) -> JSONResponse:
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse(
+                await service.process_command(name, action, req.operator)
+            )
+        except ProcessControlError as e:
+            raise HTTPException(
+                status_code=e.status_code, detail=str(e)
+            ) from e
+
+    @app.post("/api/processes/{name}/stop")
+    async def stop_process(
+        request: Request, name: str, req: ProcessControlRequest
+    ) -> JSONResponse:
+        return await _control_process(request, name, "stop", req)
+
+    @app.post("/api/processes/{name}/start")
+    async def start_process(
+        request: Request, name: str, req: ProcessControlRequest
+    ) -> JSONResponse:
+        return await _control_process(request, name, "start", req)
 
     @app.get("/api/equity")
     async def equity(

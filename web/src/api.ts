@@ -1078,6 +1078,8 @@ export type ProcessItem = {
   interval_seconds: number;
   /** no_key / not_managed 等判定原因 */
   reason?: string | null;
+  /** M10-6：false = 被用户主动停止；null = 旧 supervisor 未上报 */
+  desired?: boolean | null;
   /** M2-2：仅 worker 启用 --ws 时存在 */
   ws?: WsStatus | null;
 };
@@ -1095,6 +1097,42 @@ export type ProcessesResponse = {
 export async function fetchProcesses(signal: AbortSignal) {
   const data = await getJson<ProcessesResponse>("/api/processes", signal);
   return { ...data, processes: data.processes ?? [] };
+}
+
+/** M10-6：停/启一个常驻进程（后端默认仅 demo 模式允许）。 */
+export async function controlProcess(
+  name: string,
+  action: "stop" | "start",
+  token = "",
+) {
+  return postWrite<{ ok: boolean; command_id: string; status: string }>(
+    `/api/processes/${encodeURIComponent(name)}/${action}`,
+    {},
+    token,
+  );
+}
+
+export type ProcessCommand = {
+  command_id: string | null;
+  action: string;
+  name: string;
+  operator: string;
+  issued_at: number | null;
+  status: string;
+  error: string;
+  ts: number;
+};
+
+/** M10-6：最近的控制命令审计（supervisor 处理结果）。 */
+export async function fetchProcessCommands(
+  signal: AbortSignal,
+  limit = 20,
+) {
+  const data = await getJson<{
+    commands: ProcessCommand[];
+    degraded: string[];
+  }>(`/api/processes/commands?limit=${limit}`, signal);
+  return { ...data, commands: data.commands ?? [] };
 }
 
 /** M1-7 数据新鲜度：引擎实际消费的 inst × bar。 */

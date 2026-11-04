@@ -20,6 +20,8 @@ import {
   fetchQualityReport,
   fetchReconciliations,
   fetchProcesses,
+  fetchProcessCommands,
+  controlProcess as controlProcessApi,
   fetchFreshness,
   fetchTimeline,
   fetchAlertStats,
@@ -105,6 +107,7 @@ import {
   type ReportItem,
   type ReportsResponse,
   type PositionRow,
+  type ProcessCommand,
   type ProcessesResponse,
   type RiskLimitRule,
   type RiskLimitsResponse,
@@ -354,6 +357,10 @@ export default function App() {
   );
   // M1-5 进程健康：进程心跳变化比行情慢，15s 一拉即可
   const [processes, setProcesses] = useState<ProcessesResponse | null>(null);
+  // M10-6 进程启停：busy 防重复点击，commands 展示 supervisor 的处理回执
+  const [processBusy, setProcessBusy] = useState<string | null>(null);
+  const [processError, setProcessError] = useState<string | null>(null);
+  const [processCommands, setProcessCommands] = useState<ProcessCommand[]>([]);
   // M1-7 数据新鲜度与进程健康同频，都是分钟级信号
   const [freshness, setFreshness] = useState<FreshnessResponse | null>(null);
   // M1-6 今日事件流：筛选变化立即重拉，其余时间跟行情同频
@@ -646,6 +653,27 @@ export default function App() {
       window.clearInterval(id);
     };
   }, []);
+
+  const controlProcessAction = async (
+    name: string,
+    action: "stop" | "start",
+  ) => {
+    setProcessBusy(name);
+    setProcessError(null);
+    try {
+      await controlProcessApi(name, action, writeToken());
+      const [next, commands] = await Promise.all([
+        fetchProcesses(new AbortController().signal),
+        fetchProcessCommands(new AbortController().signal, 20),
+      ]);
+      setProcesses(next);
+      setProcessCommands(commands.commands);
+    } catch (err) {
+      setProcessError((err as Error).message);
+    } finally {
+      setProcessBusy(null);
+    }
+  };
 
   const overview = data?.overview;
   const positions = data?.positions.positions ?? [];
@@ -1160,7 +1188,30 @@ export default function App() {
                 : "接口不可用"}
             </span>
           </div>
-          <ProcessGrid processes={processes} />
+          {processError && (
+            <div className="kill-msg kill-msg-bad">{processError}</div>
+          )}
+          <ProcessGrid
+            processes={processes}
+            busy={processBusy}
+            onControl={(name, action) =>
+              void controlProcessAction(name, action)
+            }
+          />
+          {processCommands.length > 0 && (
+            <div className="proc-audit">
+              {processCommands.slice(0, 5).map((command) => (
+                <span
+                  key={`${command.command_id}-${command.ts}`}
+                  className="proc-meta mono"
+                >
+                  {stamp(command.ts)} {command.name} {command.action} ·{" "}
+                  {command.status}
+                  {command.error ? `（${command.error}）` : ""}
+                </span>
+              ))}
+            </div>
+          )}
           {data?.engine && (
             <p className="proc-engine mono">
               engine 当前周期 {data.engine.strategy} · {data.engine.inst} ·{" "}
@@ -7063,8 +7114,17 @@ function FreshnessPanel({ freshness }: { freshness: FreshnessResponse | null }) 
   );
 }
 
-/** M1-5 进程健康：判活与 TTL 全在后端，前端只负责呈现。 */
-function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
+/** M1-5 进程健康：判活与 TTL 全在后端，前端只负责呈现。
+ *  M10-6：非 dashboard 进程支持停/启（后端按 demo 模式做准入）。 */
+function ProcessGrid({
+  processes,
+  onControl,
+  busy,
+}: {
+  processes: ProcessesResponse | null;
+  onControl: (name: string, action: "stop" | "start") => void;
+  busy: string | null;
+}) {
   if (!processes) {
     return <div className="empty">/api/processes 不可用，无法判断进程状态</div>;
   }
@@ -7078,7 +7138,13 @@ function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
           <div className="proc-top">
             <span className="proc-dot" />
             <span className="proc-name mono">{item.name}</span>
-            <span className="proc-state">{item.online ? "在线" : "离线"}</span>
+            <span className="proc-state">
+              {item.desired === false
+                ? "已停止"
+                : item.online
+                  ? "在线"
+                  : "离线"}
+            </span>
           </div>
           <span className="proc-meta mono">
             {item.online
@@ -7105,6 +7171,26 @@ function ProcessGrid({ processes }: { processes: ProcessesResponse | null }) {
           ) : item.name === "worker" && item.online ? (
             <span className="proc-meta mono">WS 状态未知（心跳可能过期）</span>
           ) : null}
+          {item.name !== "dashboard" && (
+            <button
+              type="button"
+              className="pos-chip"
+              disabled={busy === item.name}
+              title={item.desired === false ? "重新启动" : "停止进程"}
+              onClick={() =>
+                onControl(
+                  item.name,
+                  item.desired === false ? "start" : "stop",
+                )
+              }
+            >
+              {busy === item.name
+                ? "处理中…"
+                : item.desired === false
+                  ? "启动"
+                  : "停止"}
+            </button>
+          )}
         </div>
       ))}
     </div>

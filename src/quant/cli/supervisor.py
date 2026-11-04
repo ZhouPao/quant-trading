@@ -28,6 +28,7 @@ from pathlib import Path
 from redis import Redis as SyncRedis
 
 from quant.foundation.config import Settings
+from quant.foundation.control import CONTROL_AUDIT_KEY, CONTROL_KEY
 from quant.foundation.heartbeat import SUPERVISOR_KEY, SUPERVISOR_TTL
 from quant.foundation.logger import get_logger, setup_logger
 
@@ -37,10 +38,7 @@ RESTART_BASE_SECONDS = 2.0
 RESTART_MAX_SECONDS = 60.0
 SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
-#: 看板 -> supervisor 的控制命令队列（LPUSH 入队、supervisor LPOP 消费）
-CONTROL_KEY = "quant:control:supervisor"
-#: 命令审计（定长 1000 条，含 accepted/rejected 与时间）
-CONTROL_AUDIT_KEY = "quant:control:audit"
+
 
 
 @dataclass(frozen=True)

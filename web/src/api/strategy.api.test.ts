@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  controlProcess,
   deleteBinding,
   fetchBacktestRuns,
   fetchBindings,
@@ -77,6 +78,27 @@ describe("策略页接口空值兜底", () => {
     await expect(deleteBinding("sma_cross", "BTC-USDT")).rejects.toThrow(
       /请先解绑/,
     );
+  });
+
+  it("controlProcess 以 POST 打到启停端点并带 token（M10-6）", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.mocked(fetch).mockImplementation(
+      (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return okResponse({ ok: true, command_id: "c1", status: "queued" });
+      }) as never,
+    );
+
+    const result = await controlProcess("worker", "stop", "tk");
+
+    expect(result.status).toBe("queued");
+    expect(calls[0].init.method).toBe("POST");
+    expect(calls[0].url).toContain("/processes/worker/stop");
+    expect(
+      (calls[0].init.headers as Record<string, string>)[
+        "X-Dashboard-Token"
+      ],
+    ).toBe("tk");
   });
 
   it("Pydantic 422 数组 detail 解析成字段级文案（P1）", async () => {

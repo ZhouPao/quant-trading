@@ -14,6 +14,7 @@ import asyncio
 import csv
 import json
 import time
+import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -23,6 +24,11 @@ from quant.engine.live import EVAL_HISTORY_LIMIT
 from quant.execution.dead_letter import DeadLetterService
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import Settings, SmtpSettings
+from quant.foundation.control import (
+    CONTROL_AUDIT_KEY,
+    CONTROL_KEY,
+    CONTROLABLE_PROCESSES,
+)
 from quant.foundation.gitinfo import git_commit
 from quant.foundation.heartbeat import (
     HEARTBEAT_PREFIX,
@@ -50,6 +56,14 @@ from quant.strategies.loader import load_strategy_class
 from quant.strategies.params import ParamError, coerce_value
 
 log = get_logger("dashboard.service")
+
+
+class ProcessControlError(Exception):
+    """进程启停被拒绝；`status_code` 供路由转成 400/403/503。"""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 #: M1-7：落后达到该根数即视为不新鲜。PRD 验收要求「落后超过 1 根必须标红」，
 #: 而落后 1 根时引擎已经错过一根 bar，提前一根报出更有用。
@@ -312,6 +326,7 @@ def _process_item(
     last_exit: int | None,
     child_pid: int | None = None,
     reason: str | None = None,
+    desired: bool | None = None,
 ) -> dict[str, object]:
     """单个进程的判活结果。
 
@@ -339,6 +354,8 @@ def _process_item(
         "last_exit_code": last_exit,
         "interval_seconds": interval_seconds,
         "reason": reason,
+        # false = 被用户主动 stop（M10-6）；None = 旧 supervisor 未上报
+        "desired": desired,
     }
 
 
@@ -1923,6 +1940,71 @@ class DashboardService:
     # 进程健康
     # ------------------------------------------------------------------
 
+    async def process_command(
+        self, name: str, action: str, operator: str = "dashboard"
+    ) -> dict[str, object]:
+        """向 supervisor 下发 stop/start 命令（M10-6）。
+
+        supervisor 每秒轮询命令队列；这里只负责「校验 + 入队 + 返回回执」，
+        真正的终止/拉起由 `cli.supervisor` 执行并写审计。
+        """
+        if action not in ("stop", "start"):
+            raise ProcessControlError(f"unknown action: {action}")
+        if name not in CONTROLABLE_PROCESSES:
+            raise ProcessControlError(
+                f"{name} 不允许在线启停（dashboard 自身停掉后无法恢复）"
+            )
+        if not self._settings.okx.demo and not (
+            self._settings.dashboard.allow_live_process_control
+        ):
+            raise ProcessControlError(
+                "实盘模式默认禁止进程启停；确认风险后在配置里打开 "
+                "dashboard.allow_live_process_control",
+                status_code=403,
+            )
+        try:
+            supervisor_raw = await self._redis.get(SUPERVISOR_KEY)
+        except Exception as e:  # noqa: BLE001
+            raise ProcessControlError(
+                f"读取 supervisor 状态失败：{e}", status_code=503
+            ) from e
+        if supervisor_raw is None:
+            raise ProcessControlError(
+                "supervisor 不在线：命令没有进程消费，请确认 quant supervisor 已启动",
+                status_code=503,
+            )
+        command_id = uuid.uuid4().hex[:12]
+        payload = {
+            "command_id": command_id,
+            "action": action,
+            "name": name,
+            "operator": operator,
+            "issued_at": int(time.time() * 1000),
+        }
+        try:
+            await self._redis.lpush(
+                CONTROL_KEY, json.dumps(payload, ensure_ascii=False)
+            )
+        except Exception as e:  # noqa: BLE001
+            raise ProcessControlError(
+                f"下发命令失败：{e}", status_code=503
+            ) from e
+        return {"ok": True, "command_id": command_id, "status": "queued"}
+
+    async def process_commands(self, limit: int = 50) -> dict[str, object]:
+        """最近的控制命令审计（supervisor 处理结果，倒序）。"""
+        try:
+            raw = await self._redis.lrange(CONTROL_AUDIT_KEY, 0, limit - 1)
+        except Exception as e:  # noqa: BLE001
+            return {"commands": [], "degraded": [f"redis: {e}"]}
+        items: list[dict] = []
+        for item in raw:
+            try:
+                items.append(json.loads(item))
+            except (TypeError, ValueError):
+                continue
+        return {"commands": items, "degraded": []}
+
     async def processes(self) -> dict[str, object]:
         """7 个常驻进程的判活视图。
 
@@ -2004,6 +2086,11 @@ class DashboardService:
                     restarts=_child_int(child, "restarts"),
                     last_exit=_child_int(child, "last_exit"),
                     child_pid=_child_int(child, "pid"),
+                    desired=(
+                        bool(child["desired"])
+                        if isinstance(child.get("desired"), bool)
+                        else None
+                    ),
                 )
             )
 

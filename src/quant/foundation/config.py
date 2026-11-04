@@ -223,6 +223,9 @@ class DashboardSettings(BaseModel):
     port: int = 8080
     web_dir: Path = Path("./web/dist")
     token: str = ""                         # 写操作 token；留空则只允许本机调用
+    # M10-6：进程启停。demo=true 时默认允许；实盘必须显式打开这个开关，
+    # 避免一个误点把实盘 worker 停掉。
+    allow_live_process_control: bool = False
 
 
 class ReportSettings(BaseModel):

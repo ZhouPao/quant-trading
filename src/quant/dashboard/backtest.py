@@ -196,6 +196,12 @@ class PineImportRequest(BaseModel):
     csv: str = Field("", max_length=20_000)
 
 
+class ProcessControlRequest(BaseModel):
+    """进程启停的操作人口径（M10-6）。"""
+
+    operator: str = Field("dashboard", max_length=64)
+
+
 class BatchRequest(BaseModel):
     """批量回测入参（M4-7）：多品种 × 多周期 × 可选参数网格。"""
 

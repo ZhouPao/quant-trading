@@ -2627,6 +2627,37 @@ sha256 + manifest）。
 **下一项**：3-4b——API（写守卫 + demo 限制）+ 前端进程表启停按钮（二次确认）
 + 审计展示；随后回到 2-1 配置视图。
 
+### 8.83 MS5 收尾 3-4b：进程启停 API + 前端（2026-11-04）
+
+**M10-6 完整落地**（接 3-4a 的命令通道）：
+- **共享协议**：新增 `foundation/control.py`（`CONTROL_KEY`/`CONTROL_AUDIT_KEY`/
+  `CONTROLABLE_PROCESSES`），dashboard 与 supervisor 用同一份定义，避免
+  dashboard 反向依赖 CLI。
+- **服务层**：`process_command(name, action, operator)` 做准入 + 入队；
+  `process_commands(limit)` 读审计。
+- **准入规则**（三道）：
+  1. `dashboard` 不在可停集合——停掉后页面打不开，只能回命令行，属自锁；
+  2. `okx.demo=false` 时默认拒绝（403），需配置
+     `dashboard.allow_live_process_control=true` 才放行；
+  3. supervisor 不在线（`quant:supervisor` 键不存在）返回 503——命令没人消费
+     时不能假装成功。
+- **API**：`POST /api/processes/{name}/stop|start`（写守卫）、
+  `GET /api/processes/commands`（审计）；`ProcessControlError.status_code`
+  映射 400/403/503。
+- **进程表**：`desired` 透传，前端可区分「主动停止」与「异常离线」。
+- **前端**：进程卡每行（除 dashboard）加「停止/启动」按钮（busy 防重复），
+  卡片下方展示最近 5 条 supervisor 回执（含 rejected 原因）。
+
+**测试**：后端 `TestProcessControl` 7 条（demo 允许入队、实盘需开关、
+开关打开后放行、dashboard 不可停、未知进程拒绝、supervisor 离线 503、
+审计读取）；前端 `controlProcess` 契约 1 条。
+
+**验证**：`pytest` 全量 **1800 passed**（+7）；`npm test` **38 passed**（+1）；
+`npx tsc --noEmit` / `npm run build` / `ruff` 全过。
+
+**M10-6 至此完成**（3-4a 通道 + 3-4b 入口）。下一项：2-1 配置只读视图 +
+来源标注（M10-1 + M10-9）。
+
 ---
 
 ## 9. 相关文档
