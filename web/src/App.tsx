@@ -49,11 +49,13 @@ import {
   getOptimizeJob,
   submitBacktest,
   submitBatch,
+  submitWalkforward,
   fetchBacktestRuns,
   fetchBacktestRun,
   fetchBacktestEquity,
   fetchBacktestTrades,
   fetchBacktestBatch,
+  fetchBacktestSegments,
   fetchBacktestCompare,
   cancelBacktest,
   rerunBacktest,
@@ -86,6 +88,7 @@ import {
   type KillSwitchState,
   type OptimizeJobResponse,
   type OptimizeResponse,
+  type WalkforwardSegment,
   type OrderRow,
   type Overview,
   type ParamChange,
@@ -3775,7 +3778,9 @@ function BacktestPanel({
   preset?: BacktestPreset | null;
   onPresetConsumed?: () => void;
 }) {
-  const [mode, setMode] = useState<"backtest" | "optimize" | "batch">("backtest");
+  const [mode, setMode] = useState<
+    "backtest" | "optimize" | "batch" | "walkforward"
+  >("backtest");
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [strategy, setStrategy] = useState("sma_cross");
   const [inst, setInst] = useState("BTC-USDT");
@@ -3790,6 +3795,11 @@ function BacktestPanel({
   const [batchBars, setBatchBars] = useState("1H,4H");
   const [batchGrid, setBatchGrid] = useState("");
   const [batchRows, setBatchRows] = useState<BatchCellRow[]>([]);
+  // walk-forward（M4-6）：IS/OOS 根数与逐段明细
+  const [wfIsBars, setWfIsBars] = useState("1500");
+  const [wfOosBars, setWfOosBars] = useState("500");
+  const [wfStepBars, setWfStepBars] = useState("");
+  const [segments, setSegments] = useState<WalkforwardSegment[]>([]);
   const [metric, setMetric] = useState("sharpe");
   const [top, setTop] = useState("10");
   const [jobs, setJobs] = useState("1");
@@ -3906,6 +3916,12 @@ function BacktestPanel({
       setBatchRows(res.rows);
       return;
     }
+    if (detail.kind === "walkforward") {
+      // walk-forward 没有权益曲线/成交，只有逐段 IS/OOS 明细
+      const res = await fetchBacktestSegments(signal, detail.run_id);
+      setSegments(res.segments);
+      return;
+    }
     const [eq, tr] = await Promise.all([
       fetchBacktestEquity(signal, detail.run_id),
       fetchBacktestTrades(signal, detail.run_id),
@@ -3923,6 +3939,7 @@ function BacktestPanel({
     setEquity([]);
     setTrades(null);
     setBatchRows([]);
+    setSegments([]);
     try {
       for (;;) {
         const detail = await fetchBacktestRun(controller.signal, runId);
@@ -3982,6 +3999,7 @@ function BacktestPanel({
     setEquity([]);
     setTrades(null);
     setBatchRows([]);
+    setSegments([]);
     try {
       const detail = await fetchBacktestRun(controller.signal, runId);
       setRun(detail);
@@ -4045,7 +4063,7 @@ function BacktestPanel({
     inst?: string;
     bar?: string;
     params?: string;
-    mode?: "backtest" | "optimize" | "batch";
+    mode?: "backtest" | "optimize" | "batch" | "walkforward";
   }) => {
     const nextMode = override?.mode ?? mode;
     const nextStrategy = override?.strategy ?? strategy;
@@ -4096,6 +4114,20 @@ function BacktestPanel({
         setNotice(
           `批量任务已提交（${run_id}）：${instList.length} 品种 × ${barList.length} 周期`,
         );
+        await followRun(run_id);
+      } else if (nextMode === "walkforward") {
+        setOptimize(null);
+        setRun(null);
+        setSegments([]);
+        const { run_id } = await submitWalkforward(controller.signal, {
+          ...body,
+          grid,
+          metric,
+          is_bars: Math.max(Number(wfIsBars) || 1500, 10),
+          oos_bars: Math.max(Number(wfOosBars) || 500, 10),
+          step_bars: wfStepBars.trim() ? Number(wfStepBars) : null,
+        });
+        setNotice(`Walk-forward 已提交（${run_id}），正在后台逐段计算`);
         await followRun(run_id);
       } else if (nextMode === "backtest") {
         setOptimize(null);
@@ -4191,6 +4223,13 @@ function BacktestPanel({
             >
               批量回测
             </button>
+            <button
+              type="button"
+              className={mode === "walkforward" ? "seg-btn seg-on" : "seg-btn"}
+              onClick={() => setMode("walkforward")}
+            >
+              Walk-forward
+            </button>
           </div>
         </div>
       </div>
@@ -4271,6 +4310,54 @@ function BacktestPanel({
               value={params}
               placeholder={configHint || "fast_len=10;slow_len=50"}
               onChange={(e) => setParams(e.target.value)}
+            />
+          </label>
+        </div>
+      ) : mode === "walkforward" ? (
+        <div className="bt-form">
+          <label className="bt-field bt-span">
+            <span>参数网格（IS 段内选参）</span>
+            <input
+              value={grid}
+              placeholder="fast_len=5,10;slow_len=20,50"
+              onChange={(e) => setGrid(e.target.value)}
+            />
+          </label>
+          <label className="bt-field">
+            <span>排序指标</span>
+            <select value={metric} onChange={(e) => setMetric(e.target.value)}>
+              {METRIC_SELECT.map((key) => (
+                <option key={key} value={key}>
+                  {METRIC_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="bt-field">
+            <span>IS 根数</span>
+            <input
+              type="number"
+              min={10}
+              value={wfIsBars}
+              onChange={(e) => setWfIsBars(e.target.value)}
+            />
+          </label>
+          <label className="bt-field">
+            <span>OOS 根数</span>
+            <input
+              type="number"
+              min={10}
+              value={wfOosBars}
+              onChange={(e) => setWfOosBars(e.target.value)}
+            />
+          </label>
+          <label className="bt-field">
+            <span>步长（留空 = OOS 根数）</span>
+            <input
+              type="number"
+              min={1}
+              value={wfStepBars}
+              onChange={(e) => setWfStepBars(e.target.value)}
             />
           </label>
         </div>
@@ -4360,7 +4447,7 @@ function BacktestPanel({
       {notice && <div className="bt-notice">{notice}</div>}
       {error && <div className="bt-error">{error}</div>}
 
-      {mode === "batch" || mode === "backtest" ? (
+      {mode === "batch" || mode === "backtest" || mode === "walkforward" ? (
         run ? (
           // 按 run.kind 而不是当前 mode 选视图：在批量模式下点开单次回测，
           // 原先会渲染 BatchResultView 并报「所有格子都失败了」（P1）
@@ -4375,12 +4462,17 @@ function BacktestPanel({
               run={run}
               equity={equity}
               trades={trades}
+              segments={segments}
               onCancel={() => void cancelRun(run.run_id)}
             />
           )
         ) : mode === "batch" ? (
           <div className="empty">
             选好品种、周期与网格后点「运行批量回测」，汇总表会显示在这里
+          </div>
+        ) : mode === "walkforward" ? (
+          <div className="empty">
+            填好 IS/OOS 根数与网格后点「运行 Walk-forward」，逐段结果会显示在这里
           </div>
         ) : (
           <div className="empty">
@@ -4395,7 +4487,9 @@ function BacktestPanel({
         <div className="empty">填好网格后点「开始寻优」，参数排名会显示在这里</div>
       )}
 
-      {(mode === "backtest" || mode === "batch") && (
+      {(mode === "backtest" ||
+        mode === "batch" ||
+        mode === "walkforward") && (
         <BacktestHistory
           runs={history}
           total={historyTotal}
@@ -4542,11 +4636,13 @@ function BacktestRunView({
   run,
   equity,
   trades,
+  segments,
   onCancel,
 }: {
   run: BacktestRunDetail;
   equity: BacktestEquityPoint[];
   trades: { total: number; trades: BacktestTrade[] } | null;
+  segments: WalkforwardSegment[];
   onCancel: () => void;
 }) {
   const values = equity
@@ -4605,6 +4701,44 @@ function BacktestRunView({
           {trades && trades.total > trades.trades.length && (
             <div className="bt-note">
               仅显示最近 {trades.trades.length} 笔，区间内共 {trades.total} 笔
+            </div>
+          )}
+          {run.kind === "walkforward" && (
+            <Table
+              empty={segments.length === 0}
+              emptyHint="逐段明细尚未生成"
+              head={[
+                "段",
+                "IS 区间",
+                "OOS 区间",
+                "参数",
+                "IS 收益",
+                "OOS 收益",
+                "OOS 夏普",
+              ]}
+              rows={segments.map((item) => [
+                String(item.index + 1),
+                `${stamp(item.is_start)} ~ ${stamp(item.is_end)}`,
+                `${stamp(item.oos_start)} ~ ${stamp(item.oos_end)}`,
+                formatParams(item.params),
+                metricText("total_return", item.is_metrics.total_return ?? null),
+                metricText("total_return", item.oos_metrics.total_return ?? null),
+                metricText("sharpe", item.oos_metrics.sharpe ?? null),
+              ])}
+            />
+          )}
+          {(run.artifacts ?? []).length > 0 && (
+            <div className="chart-foot">
+              <span>产物下载：</span>
+              {(run.artifacts ?? []).map((item) => (
+                <a
+                  key={item.kind}
+                  href={`/api/backtest/${encodeURIComponent(run.run_id)}/artifacts/${encodeURIComponent(item.kind)}`}
+                  download
+                >
+                  {item.kind}
+                </a>
+              ))}
             </div>
           )}
         </>
@@ -5459,6 +5593,8 @@ const REPORT_METRICS: Record<string, string> = {
   qty: "成交量",
   notional: "名义金额",
   fee: "手续费",
+  pnl: "回合盈亏",
+  avg_price: "平均成交价",
   side_sequence: "方向序列",
 };
 

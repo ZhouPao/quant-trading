@@ -22,6 +22,7 @@ from redis.asyncio import Redis
 from quant.analysis.deviation import (
     DEFAULT_THRESHOLD,
     DeviationReport,
+    avg_price,
     compare_fills,
     format_report,
 )
@@ -195,6 +196,18 @@ def report_csv_rows(
             str(report.paper.fee),
             str(report.backtest.fee),
             f"{report.fee_dev:.6f}",
+        ),
+        (
+            "pnl",
+            str(report.paper.realized_pnl),
+            str(report.backtest.realized_pnl),
+            f"{report.pnl_dev:.6f}",
+        ),
+        (
+            "avg_price",
+            str(avg_price(report.paper)),
+            str(avg_price(report.backtest)),
+            f"{report.avg_price_dev:.6f}",
         ),
         (
             "side_sequence",

@@ -300,6 +300,8 @@ class TestCsv:
             "qty",
             "notional",
             "fee",
+            "pnl",
+            "avg_price",
             "side_sequence",
         ]
         path = tmp_path / "out" / "daily.csv"

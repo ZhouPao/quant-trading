@@ -61,13 +61,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -85,7 +86,7 @@ from quant.dashboard.backtest import (
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService
-from quant.dashboard.tasks import RunNotFound, TaskRunner
+from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
 from quant.foundation.logger import get_logger
 from quant.monitor.alert_service import AlertService
@@ -726,6 +727,33 @@ def create_app(
         except RunNotFound as e:
             raise HTTPException(status_code=404, detail=f"run not found: {e}") from e
         return JSONResponse({"points": tasks.equity(run_id, limit)})
+
+    @app.get("/api/backtest/{run_id}/artifacts/{kind}")
+    async def backtest_artifact(run_id: str, kind: str) -> FileResponse:
+        """下载回测产物（M4-4：CSV/HTML 报告、权益曲线、成交明细等）。
+
+        kind 走白名单，路径只取该 run 已登记的产物——不接受调用方拼路径。
+        """
+        if kind not in ARTIFACT_KINDS:
+            raise HTTPException(
+                status_code=404, detail=f"unknown artifact: {kind}"
+            )
+        try:
+            path = await asyncio.to_thread(
+                tasks.artifact_path, run_id, kind
+            )
+        except RunNotFound as e:
+            raise HTTPException(
+                status_code=404, detail=f"run not found: {e}"
+            ) from e
+        if path is None:
+            raise HTTPException(
+                status_code=404, detail=f"artifact not found: {kind}"
+            )
+        return FileResponse(
+            path,
+            filename=f"{run_id}-{kind}{path.suffix}",
+        )
 
     @app.get("/api/backtest/{run_id}/trades")
     async def backtest_trades(

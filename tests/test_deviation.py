@@ -72,6 +72,34 @@ class TestCompareFills:
         assert report.side_sequence_match
         assert report.max_deviation == 0.0
 
+    def test_same_count_but_different_price_fails(self):
+        """笔数/数量/方向都对、成交价差 10%：必须靠 PnL/均价维度拦住（M4-8）。"""
+        paper = [
+            _fill("buy", price="100", ts=1),
+            _fill("sell", price="110", ts=2),
+        ]
+        backtest = [
+            _fill("buy", price="100", ts=1),
+            _fill("sell", price="99", ts=2),
+        ]
+
+        report = compare_fills(paper, backtest)
+
+        assert report.pnl_dev > 0.05
+        assert report.avg_price_dev > 0.05
+        assert not report.within_threshold
+
+    def test_pnl_and_avg_price_zero_dev_when_identical(self):
+        fills = [
+            _fill("buy", price="100", ts=1),
+            _fill("sell", price="110", ts=2),
+        ]
+
+        report = compare_fills(fills, fills)
+
+        assert report.pnl_dev == 0.0
+        assert report.avg_price_dev == 0.0
+
     def test_trade_count_mismatch_fails(self):
         paper = [_fill("buy", ts=1), _fill("sell", ts=2), _fill("buy", ts=3)]
         backtest = [_fill("buy", ts=1), _fill("sell", ts=2)]

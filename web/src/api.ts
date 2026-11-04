@@ -1768,6 +1768,56 @@ export async function fetchBacktestCompare(
   };
 }
 
+export type WalkforwardBody = {
+  strategy: string;
+  inst?: string;
+  bar: string;
+  start: string;
+  end: string;
+  params?: string;
+  warmup_bars?: number;
+  grid: string;
+  metric?: string;
+  is_bars: number;
+  oos_bars: number;
+  step_bars?: number | null;
+};
+
+/** M4-6：提交 walk-forward 任务，立即返回 run_id。 */
+export async function submitWalkforward(
+  signal: AbortSignal,
+  body: WalkforwardBody,
+) {
+  return postJson<{ run_id: string; status: string }>(
+    "/api/walkforward",
+    body,
+    signal,
+  );
+}
+
+export type WalkforwardSegment = {
+  index: number;
+  is_start: number;
+  is_end: number;
+  oos_start: number;
+  oos_end: number;
+  params: Record<string, unknown>;
+  is_metrics: MetricMap;
+  oos_metrics: MetricMap;
+};
+
+/** M4-6：逐段 IS/OOS 明细（无权益曲线，单独接口）。 */
+export async function fetchBacktestSegments(
+  signal: AbortSignal,
+  runId: string,
+) {
+  const data = await getJson<{ segments: WalkforwardSegment[] }>(
+    `/api/backtest/${encodeURIComponent(runId)}/segments`,
+    signal,
+  );
+  return { segments: data.segments ?? [] };
+}
+
 /** 提交批量回测任务（M4-7），立即返回 run_id。 */
 export async function submitBatch(signal: AbortSignal, body: BatchBody) {
   return postJson<{ run_id: string; status: string }>(

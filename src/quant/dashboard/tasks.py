@@ -55,6 +55,9 @@ TERMINAL_STATUSES = frozenset({DONE, FAILED, CANCELED})
 #: 单次对比最多 run 数：ids 来自查询参数，不设上限会拉爆产物/指标读取（P1）
 COMPARE_MAX_RUNS = 8
 
+#: 允许下载的产物类型（白名单：只认登记过且文件存在，杜绝任意文件读取）
+ARTIFACT_KINDS = frozenset({"equity", "trades", "report", "segments", "batch"})
+
 #: 指标表里以整数存的列，其余数值列统一按文本存（避免浮点误差扩散到审计）。
 _INT_METRIC_COLUMNS = frozenset(
     {
@@ -661,6 +664,15 @@ class TaskRunner:
                 path = Path(item["path"])
                 return path if path.is_file() else None
         return None
+
+    def artifact_path(self, run_id: str, kind: str) -> Path | None:
+        """按 kind 取已登记的产物路径（下载路由用）。
+
+        只返回该 run 在 `backtest_artifacts` 里登记过、且文件仍存在的路径，
+        不接受调用方拼路径——杜绝任意文件读取。
+        """
+        self._require(run_id)
+        return self._artifact_path(run_id, kind)
 
 
 def _now_ms() -> int:

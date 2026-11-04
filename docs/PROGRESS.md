@@ -2446,6 +2446,46 @@ toml，看板改过参数后模拟盘用 DB 参数、日报回测用 toml → �
 3. **M4-8 判定维度**：仍只比笔数/数量/名义/手续费/方向序列，未含 PnL/持仓/成交价；
    扩展需同时改 `FillSummary`/`DeviationReport`/CSV/前端日报表。
 
+### 8.77 M4 三项功能补齐（M4-4 / M4-8 / M4-6）（2026-11-04）
+
+**M4-4 回测报告导出**：后端产物早就有 HTML/CSV（`report`/`equity`/`trades`/
+`segments`/`batch`），但既无下载路由、前端 `artifacts` 也零消费。补齐：
+- `GET /api/backtest/{run_id}/artifacts/{kind}`：kind 走**白名单**
+  （`ARTIFACT_KINDS`），路径只取该 run 在 `backtest_artifacts` 登记过且文件仍
+  存在的记录（`tasks.artifact_path`）——不接受调用方拼路径，杜绝任意文件读取；
+  `FileResponse` 以 `attachment` 下载。
+- 前端详情页底部「产物下载」链接（按 kind 列出）。
+- 测试：下载 HTML 200 + Content-Disposition、未知 kind 404。
+
+**M4-8 日报判定维度**：原先只比笔数/数量/名义/手续费/方向序列——**两侧方向与
+成交量都对、成交价差 10% 依然 PASS**。补齐两个 fills 可算的维度：
+- `FillSummary` 加 `realized_pnl`（复用 `risk.pnl.round_trip_pnls` 的 FIFO 回合
+  盈亏，与风控/监控同口径）；
+- `DeviationReport` 加 `pnl_dev` / `avg_price_dev`，纳入 `max_deviation` 与
+  PASS/FAIL；CLI 文本表、CSV（`pnl`/`avg_price` 两行）、前端日报表标签同步。
+- **持仓维度未加**：日报侧没有 position 快照数据源，硬加只能得到假精度；
+  需要时先让 monitor 落快照再扩展（已在案）。
+- 测试：同笔数同方向但价差 10% → 必须 FAIL；完全一致 → 两个新维度为 0。
+
+**M4-6 Walk-forward 前端入口**：后端接口/任务登记/逐段产物全就绪，前端零请求
+函数、只有历史列表一个 `kind` 标签。补齐：
+- `api.ts`：`submitWalkforward` / `fetchBacktestSegments` + 类型。
+- 回测页加「Walk-forward」模式：网格 + 排序指标 + IS/OOS 根数 + 步长（留空 =
+  OOS 根数）；提交后复用 `followRun` 轮询，`loadArtifacts` 按 kind 取
+  `/segments`；详情页渲染逐段表（段号 / IS 区间 / OOS 区间 / 参数 / IS 收益 /
+  OOS 收益 / OOS 夏普）。
+- 模式切换、空态文案、历史列表均把 `walkforward` 纳入。
+- **测试边界如实说明**：前端无组件 harness，本项靠 `tsc --noEmit` + `build` +
+  代码审查兜底（与既有 UI 交互项同一口径）；后端接口此前已有测试。
+
+**过程如实记录**：下载路由初版漏了 `import asyncio`，全量测试立刻报
+`NameError`，已补。同一次全量里有 4 个 `test_manual_trade` 失败（账户快照过期
+503）——**单独重跑 54 passed**，确认是「全量与前端 build 并行」造成的时序
+flaky，与本批改动无关。
+
+**验证**：`pytest` 全量 **1767 passed**（+4）；`npx tsc --noEmit` 通过；
+`npm test` **37 passed**；`npm run build` 通过；`ruff` 全过。
+
 ---
 
 ## 9. 相关文档

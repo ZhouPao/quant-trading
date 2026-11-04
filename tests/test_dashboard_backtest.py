@@ -1046,6 +1046,59 @@ class TestPineImport:
         assert service.pine_block("sma_cross") is None
 
 
+class TestArtifactDownload:
+    """M4-4：报告/曲线产物下载（白名单 + 登记路径）。"""
+
+    async def test_downloads_report_html(self, app) -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                created = await client.post(
+                    "/api/backtest",
+                    json={
+                        "strategy": "sma_cross",
+                        "start": "2026-09-05",
+                        "end": "2026-09-10",
+                        "warmup_bars": 50,
+                    },
+                )
+                run_id = created.json()["run_id"]
+                await _wait_done(client, run_id)
+
+                response = await client.get(
+                    f"/api/backtest/{run_id}/artifacts/report"
+                )
+
+        assert response.status_code == 200
+        assert "html" in response.headers["content-type"]
+        assert "SMA" in response.text or "回测" in response.text
+        assert "attachment" in response.headers["content-disposition"]
+
+    async def test_rejects_unknown_kind(self, app) -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                created = await client.post(
+                    "/api/backtest",
+                    json={
+                        "strategy": "sma_cross",
+                        "start": "2026-09-05",
+                        "end": "2026-09-10",
+                        "warmup_bars": 50,
+                    },
+                )
+                run_id = created.json()["run_id"]
+                await _wait_done(client, run_id)
+
+                response = await client.get(
+                    f"/api/backtest/{run_id}/artifacts/../../etc/passwd"
+                )
+
+        assert response.status_code == 404
+
+
 class TestPineEndpoint:
     async def test_import_endpoint(self, app) -> None:
         async with app.router.lifespan_context(app):
