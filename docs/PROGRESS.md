@@ -2567,6 +2567,30 @@ sha256 + manifest）。
 **下一项**：3-3 `quant doctor`（端口/Redis/DB/schema/凭证/数据新鲜度/磁盘自检，
 `--json` 输出）。
 
+### 8.81 MS5 收尾 3-3：`quant doctor`（2026-11-04）
+
+**新增 `quant doctor`**（M10-7 第三项），逐项自检并给可读结论：
+- **SQLite**：文件存在、`PRAGMA quick_check`、schema 版本与代码对比
+  （低于 → warn「下次启动自动迁移」；高于 → fail「先升级代码」）。
+- **Redis**：`PING`（2s 超时），URL 里的密码**脱敏**为 `://***@host`。
+- **OKX 凭证**：三个字段是否齐全，只报「缺哪个」不显示值；`demo=false` 标 warn。
+- **SMTP**：`host`/`to_addrs` 缺失 → warn（告警会降级为仅日志）。
+- **数据新鲜度**：读主组合（`engine.inst/bar`）最近 7 天 K 线，最后一根
+  > 48h → warn、> 7d → fail。
+- **磁盘**：可用比例 < 10% → warn、< 5% → fail。
+- **产物目录**：`mkdir` + 写探针文件验证可写。
+- 退出码：有 `fail` 返回 1；`--strict` 时 `warn` 也返回 1；`--json` 输出机器
+  可读结构（不含密钥）；`--skip-redis` 供离线自检。
+- 配置本身加载失败也输出 `[FAIL] config ...` 而不是抛 traceback。
+
+**测试**：`tests/test_doctor.py` 7 条——健康报告、缺库 fail、缺凭证 fail、
+数据 3 天未更新 warn、无本地 K 线 warn、实盘模式 warn、SMTP 未配置 warn。
+
+**验证**：`pytest` 全量 **1787 passed**（+7）；`ruff` 全过。
+
+**下一项**：3-4 `M10-6 进程启停`（Redis 命令通道 + 审计；按拍板默认只允许
+`demo=true` 的进程启停，实盘需额外开关）。
+
 ---
 
 ## 9. 相关文档

@@ -19,6 +19,7 @@ from quant.cli.backup import main as backup_main
 from quant.cli.check_data import main as check_data_main
 from quant.cli.check_live import main as check_live_main
 from quant.cli.dashboard import main as dashboard_main
+from quant.cli.doctor import main as doctor_main
 from quant.cli.fetch_candles import main as fetch_candles_main
 from quant.cli.fetch_funding_rates import main as fetch_funding_rates_main
 from quant.cli.fetch_instruments import main as fetch_instruments_main
@@ -660,6 +661,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # doctor
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="部署自检：SQLite/Redis/凭证/SMTP/数据新鲜度/磁盘（M10-7）",
+    )
+    p_doctor.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON"
+    )
+    p_doctor.add_argument(
+        "--strict", action="store_true", help="存在 warn 也返回非零退出码"
+    )
+    p_doctor.add_argument(
+        "--skip-redis", action="store_true", help="跳过 Redis 连通检查"
+    )
+    p_doctor.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     return parser
 
 
@@ -672,6 +691,8 @@ def main(argv: list[str] | None = None) -> int:
         return backup_main(args)
     elif args.command == "restore":
         return restore_main(args)
+    elif args.command == "doctor":
+        return doctor_main(args)
     elif args.command == "fetch-candles":
         return fetch_candles_main(args)
     elif args.command == "fetch-instruments":
