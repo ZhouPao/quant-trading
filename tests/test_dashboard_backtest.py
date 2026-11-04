@@ -960,6 +960,40 @@ class TestPineImport:
         with pytest.raises(BacktestRequestError, match="只有 done"):
             await service.import_pine("run1", "sharpe,1")
 
+    async def test_import_rejects_request_override_params(
+        self, param_service
+    ) -> None:
+        """请求级覆盖的回测与生效参数不同源，导入后门禁永远匹配不到（P0）。"""
+        service, store = param_service
+        self._done_run(
+            store,
+            params='{"fast_len": 8, "slow_len": 30}',
+            metrics={"sharpe": "-4.8"},
+        )
+
+        with pytest.raises(BacktestRequestError, match="不一致"):
+            await service.import_pine("run1", "sharpe,-4.8")
+
+    async def test_gate_isolated_by_inst_and_bar(self, param_service) -> None:
+        """BTC 1H 的坏导入不该阻止 ETH 4H 启用（P1）。"""
+        service, store = param_service
+        store.create_backtest_run(
+            "eth",
+            strategy_id="sma_cross",
+            inst_id="ETH-USDT",
+            bar="4H",
+            start_ts=START,
+            end_ts=START + HOUR,
+            params=PARAMS_TEXT,
+            kind="backtest",
+            status="done",
+            created_at=START,
+        )
+        store.save_backtest_metrics("eth", {"pine_deviation": "0.2"})
+
+        assert service.pine_block("sma_cross", "ETH-USDT", "4H") is not None
+        assert service.pine_block("sma_cross", INST, "1H") is None
+
     async def test_import_rejects_bad_csv(self, param_service) -> None:
         service, store = param_service
         self._done_run(store, metrics={"sharpe": "-4.8"})

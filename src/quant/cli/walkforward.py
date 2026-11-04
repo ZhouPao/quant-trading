@@ -18,6 +18,7 @@ from quant.backtest.runner import (
     build_matcher,
     format_metric,
     load_bars,
+    load_funding_schedule,
     parse_grid,
     parse_range,
 )
@@ -53,6 +54,15 @@ def main(args) -> int:
         )
         strategy_cls, base_params, _sources = resolve_cli_params(settings, args)
         grid = parse_grid(args.grid)
+        # 看板路径一直传 funding，CLI 此前漏传 → 同一条 walk-forward 在
+        # 「是否计入资金费率」上口径不同（AGENTS #4 四条路径必须透传）。
+        funding = load_funding_schedule(
+            settings,
+            args.inst,
+            enabled=args.funding or None,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
     except BacktestSetupError as e:
         log.error(str(e))
         return 1
@@ -72,6 +82,7 @@ def main(args) -> int:
         warmup_bars=args.warmup_bars,
         base_params=base_params,
         metric=args.metric,
+        funding=funding,
     )
 
     step_bars = args.step_bars or args.oos_bars
@@ -119,8 +130,14 @@ def main(args) -> int:
         )
 
     total = len(result.segments)
+    compounded = result.compounded_return
+    compounded_text = (
+        "—（OOS 段重叠，不可复合）"
+        if compounded is None
+        else f"{compounded:>10.2%}"
+    )
     print("\n汇总")
-    print(f"  OOS 复合收益        {result.compounded_return:>10.2%}")
+    print(f"  OOS 复合收益        {compounded_text}")
     print(f"  盈利段数            {result.profitable_segments}/{total}")
     print(f"  OOS 平均夏普        {result.avg_oos_sharpe:>10.2f}")
     print(f"  OOS 累计交易数      {result.total_oos_trades:>10d}")

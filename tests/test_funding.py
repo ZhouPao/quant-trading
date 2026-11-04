@@ -62,6 +62,48 @@ def _rate(ts: int, rate: str) -> FundingRate:
     )
 
 
+class TestCoverage:
+    """费率数据必须覆盖整个回测区间，否则缺失段成本静默按 0 计（P0）。"""
+
+    @staticmethod
+    def _settings(tmp_path: Path) -> Settings:
+        return Settings(
+            okx=OKXSettings(
+                api_key="k", secret="s", passphrase="p", demo=True
+            ),
+            storage=StorageSettings(data_dir=tmp_path / "data"),
+            backtest=BacktestSettings(funding_rate_enabled=True),
+        )
+
+    def test_partial_coverage_rejected(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "quant.backtest.runner.load_funding_rates",
+            lambda *_a, **_k: [_rate(0, "0.0001"), _rate(8 * H, "0.0001")],
+        )
+
+        with pytest.raises(BacktestSetupError, match="covers"):
+            load_funding_schedule(
+                self._settings(tmp_path),
+                INST,
+                start_ts=0,
+                end_ts=48 * H,
+            )
+
+    def test_full_coverage_accepted(self, tmp_path, monkeypatch) -> None:
+        rates = [_rate(i * 8 * H, "0.0001") for i in range(0, 7)]
+        monkeypatch.setattr(
+            "quant.backtest.runner.load_funding_rates",
+            lambda *_a, **_k: rates,
+        )
+
+        schedule = load_funding_schedule(
+            self._settings(tmp_path), INST, start_ts=0, end_ts=48 * H
+        )
+
+        assert schedule is not None
+        assert len(schedule) == len(rates)
+
+
 class _HoldOnce(Strategy):
     """第一根 bar 发一次信号，之后不再交易。"""
 

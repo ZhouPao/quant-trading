@@ -27,6 +27,28 @@ PYTHON_METRICS = {
 }
 
 
+class TestParsePercentage:
+    """TradingView 默认导出百分数：不能静默当小数收下（P0）。"""
+
+    def test_percentage_with_sign_is_scaled(self) -> None:
+        assert parse_pine_csv("max_drawdown,8.32%")["max_drawdown"] == Decimal(
+            "0.0832"
+        )
+
+    def test_small_decimal_accepted(self) -> None:
+        assert parse_pine_csv("total_return,0.15")["total_return"] == Decimal(
+            "0.15"
+        )
+
+    def test_bare_percentage_rejected_with_hint(self) -> None:
+        with pytest.raises(PineCompareError, match="看起来是百分数"):
+            parse_pine_csv("max_drawdown,8.32")
+
+    def test_non_ratio_metric_not_checked(self) -> None:
+        # sharpe 不是比例，8.32 是合法值
+        assert parse_pine_csv("sharpe,8.32")["sharpe"] == Decimal("8.32")
+
+
 class TestParse:
     def test_with_header(self) -> None:
         pine = parse_pine_csv("metric,value\ntotal_return,-0.0617\nsharpe,-4.8")

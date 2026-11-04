@@ -52,8 +52,24 @@ class WalkForwardResult:
     segments: list[SegmentResult] = field(default_factory=list)
 
     @property
-    def compounded_return(self) -> float:
-        """各段 OOS 收益的复利复合：Π(1+r) - 1。"""
+    def overlapping_oos(self) -> bool:
+        """OOS 段是否重叠（`step_bars < oos_bars` 时同一段行情被多段覆盖）。"""
+        return any(
+            self.segments[i].segment.oos_start
+            < self.segments[i - 1].segment.oos_end
+            for i in range(1, len(self.segments))
+        )
+
+    @property
+    def compounded_return(self) -> float | None:
+        """各段 OOS 收益的复利复合：Π(1+r) - 1。
+
+        OOS 重叠时返回 None：同一段行情出现在多个段的 `total_return` 里，
+        连乘会把收益重复计入（虚高）。这种配置下不产出数字，由调用方显示
+        「—」而不是给一个错数（P1）。
+        """
+        if self.overlapping_oos:
+            return None
         total = 1.0
         for item in self.segments:
             total *= 1 + item.oos_metrics.get("total_return", 0.0)

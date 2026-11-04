@@ -475,6 +475,31 @@ class TestCliOptimize:
         base.update(overrides)
         return SimpleNamespace(**base)
 
+    def test_none_metric_does_not_crash(self, tmp_path, monkeypatch) -> None:
+        """calmar/sortino 可能为 None：CLI 不能按原始值再排一次序（P0）。"""
+        config, cfg_dir = self._env(tmp_path)
+
+        class _FakeOptimizer:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def search(self, *_args, **_kwargs):
+                # search 已按 _rank 排好：合法值在前、None 在末尾
+                return [
+                    ({"fast_len": 10, "slow_len": 20}, {"calmar": 0.5}),
+                    ({"fast_len": 5, "slow_len": 20}, {"calmar": None}),
+                ]
+
+        monkeypatch.setattr(
+            "quant.cli.optimize.GridOptimizer", _FakeOptimizer
+        )
+
+        code = optimize_main(
+            self._args(tmp_path, config, cfg_dir, metric="calmar")
+        )
+
+        assert code == 0
+
     def test_prints_ranking(self, tmp_path, capsys) -> None:
         config, cfg_dir = self._env(tmp_path)
 

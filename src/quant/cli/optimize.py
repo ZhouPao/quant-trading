@@ -27,9 +27,6 @@ from quant.foundation.logger import get_logger, setup_logger
 from quant.strategies.loader import StrategyConfigError
 from quant.strategies.params import ParamError
 
-# 越小越好的指标，需要反向排序
-_ASCENDING = {"max_drawdown", "avg_holding_bars"}
-
 
 def main(args) -> int:
     """执行网格寻优，返回退出码。"""
@@ -50,7 +47,11 @@ def main(args) -> int:
         strategy_cls, base_params, _sources = resolve_cli_params(settings, args)
         grid = parse_grid(args.grid)
         funding = load_funding_schedule(
-            settings, args.inst, enabled=args.funding or None
+            settings,
+            args.inst,
+            enabled=args.funding or None,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
     except BacktestSetupError as e:
         log.error(str(e))
@@ -105,9 +106,9 @@ def main(args) -> int:
         log.error(str(e))
         return 1
 
-    reverse = args.metric not in _ASCENDING
-    results.sort(key=lambda item: item[1][args.metric], reverse=reverse)
-
+    # 排序已由 GridOptimizer.search 完成（内部用 _rank 把「无法计算」的 None
+    # 视为最差）。这里不要再按原始值排一次：calmar/sortino 为 None 时
+    # `None < float` 会直接 TypeError（P0），且重复排序也可能推翻统一口径。
     skipped = combos - len(results)
     note = f"，跳过 {skipped} 组非法参数" if skipped else ""
     print(

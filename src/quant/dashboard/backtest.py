@@ -639,7 +639,7 @@ class BacktestService:
 
         # M4-16：与 Pine 基线偏离度超限的参数集禁止上新（只拦「启用」这个动作）
         if enabled and not was_enabled:
-            block = self.pine_block(strategy_id)
+            block = self.pine_block(strategy_id, inst, bar)
             if block is not None:
                 raise StrategyParamError(
                     f"当前参数集与 Pine 基线偏离度 {float(block['deviation']) * 100:.2f}% "
@@ -692,6 +692,30 @@ class BacktestService:
             )
         metrics = self._store.get_backtest_metrics(run_id) or {}
         metrics.pop("run_id", None)
+
+        # 门禁按「当前生效参数集」的 params 文本精确匹配（worst_pine_deviation）：
+        # 带请求级覆盖的回测与生效参数不同源，导入后门禁永远匹配不到 →
+        # 静默 fail-open（P0）。这里直接拒绝，提示用当前参数重跑。
+        try:
+            current, _sources = resolve_params(
+                row["strategy_id"],
+                self._config_dir,
+                self._store,
+                resolve_from_db=self._settings.params.resolve_from_db,
+            )
+            run_params = json.loads(row["params"] or "{}")
+        except (StrategyConfigError, ParamError) as e:
+            raise BacktestRequestError(str(e)) from e
+        except ValueError as e:
+            raise BacktestRequestError(f"run params 不是合法 JSON：{e}") from e
+        if json.dumps(_jsonable_params(current), sort_keys=True) != json.dumps(
+            run_params, sort_keys=True
+        ):
+            raise BacktestRequestError(
+                "该回测的参数集与当前生效参数不一致（可能用了请求级参数覆盖）："
+                "门禁按生效参数匹配，请先用当前参数重跑，再导入 Pine 结果"
+            )
+
         try:
             pine = parse_pine_csv(csv_text)
             result = compare_pine(pine, metrics)
@@ -701,6 +725,11 @@ class BacktestService:
         columns = to_metric_columns(pine, result)
         if columns:
             self._store.save_backtest_metrics(run_id, columns)
+        notes: list[str] = []
+        if result["max_deviation"] is None and result["over_limit"]:
+            # 分母为 0 时按 100% 处理（安全优先），但必须让用户知道原因，
+            # 否则会误以为「数值算错了」
+            notes.append("存在分母为 0 的指标：无法计算偏离比例，已按 100% 处理")
         return {
             "run_id": run_id,
             "limit": float(DEFAULT_DEVIATION_LIMIT),
@@ -709,6 +738,7 @@ class BacktestService:
             "max_deviation": _optional_float(result["max_deviation"]),
             "over_limit": result["over_limit"],
             "persisted": sorted(columns),
+            "notes": notes,
         }
 
     def pine_gate(self, strategy_id: str) -> str:
@@ -753,12 +783,20 @@ class BacktestService:
             else "passed"
         )
 
-    def pine_block(self, strategy_id: str) -> dict[str, object] | None:
+    def pine_block(
+        self,
+        strategy_id: str,
+        inst_id: str | None = None,
+        bar: str | None = None,
+    ) -> dict[str, object] | None:
         """当前生效参数集是否因偏离度超限被禁止启用（M4-16）。
 
         只认同一策略 + 同一份参数（`backtest_runs.params` 规范化文本）且
         `pine_deviation` 超过阈值的回测。没有导入过 Pine 基线就不拦——
         没做过对比不等于对比不通过。
+
+        `inst_id`/`bar` 传入时按「同品种同周期」匹配：BTC 1H 的偏离不能
+        拿来阻止 ETH 4H 启用（P1）。不传则取该策略最坏记录（展示用）。
         """
         if self._store is None:
             return None
@@ -772,7 +810,9 @@ class BacktestService:
         except (StrategyConfigError, ParamError) as e:
             raise StrategyParamError(str(e)) from e
         params_text = json.dumps(_jsonable_params(params), sort_keys=True)
-        row = self._store.worst_pine_deviation(strategy_id, params_text)
+        row = self._store.worst_pine_deviation(
+            strategy_id, params_text, inst_id=inst_id, bar=bar
+        )
         if row is None:
             return None
         try:
@@ -783,10 +823,17 @@ class BacktestService:
             return None
         return {"run_id": row["run_id"], "deviation": deviation}
 
-    def _funding(self, inst: str) -> FundingSchedule | None:
-        """按配置加载资金费率结算表；启用但缺数据视为请求错误。"""
+    def _funding(
+        self,
+        inst: str,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+    ) -> FundingSchedule | None:
+        """按配置加载资金费率结算表；启用但缺数据/覆盖不足视为请求错误。"""
         try:
-            return load_funding_schedule(self._settings, inst)
+            return load_funding_schedule(
+                self._settings, inst, start_ts=start_ts, end_ts=end_ts
+            )
         except BacktestSetupError as e:
             raise BacktestRequestError(str(e)) from e
 
@@ -807,7 +854,12 @@ class BacktestService:
         """
         inst = req.inst or self._settings.engine.inst
         warmup, bars, strategy_cls, params = self._prepare(req, inst)
-        funding = self._funding(inst)
+        # 按回测段校验费率覆盖：缺数据时段成本会被静默按 0 计（P0）
+        funding = self._funding(
+            inst,
+            bars[0].ts if bars else None,
+            bars[-1].ts if bars else None,
+        )
         try:
             result = Backtest(
                 strategy_cls(),
@@ -883,7 +935,11 @@ class BacktestService:
             warmup_bars=warmup,
             base_params=params,
             strategy_cls=strategy_cls,
-            funding=self._funding(inst),
+            funding=self._funding(
+                inst,
+                bars[0].ts if bars else None,
+                bars[-1].ts if bars else None,
+            ),
         )
         try:
             results = optimizer.search(
@@ -941,7 +997,11 @@ class BacktestService:
             warmup_bars=req.warmup_bars,
             base_params=params,
             metric=req.metric,
-            funding=self._funding(inst),
+            funding=self._funding(
+                inst,
+                bars[0].ts if bars else None,
+                bars[-1].ts if bars else None,
+            ),
         )
         try:
             result = walker.run(
@@ -1056,9 +1116,12 @@ class BacktestService:
         should_stop: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, object], BatchResult]:
         plan = self._batch_inputs(req)
-        # 资金费率按品种预加载：任一品种缺数据都在开跑前失败，
+        # 资金费率按品种预加载：任一品种缺数据/覆盖不足都在开跑前失败，
         # 而不是跑到一半才发现某个品种的成本是 0
-        funding = {inst: self._funding(inst) for inst in plan.insts}
+        funding = {
+            inst: self._funding(inst, plan.start_ts, plan.end_ts)
+            for inst in plan.insts
+        }
         sweep = BatchSweep(
             lambda _params: plan.strategy_cls(),
             initial_cash=self._settings.backtest.initial_cash,

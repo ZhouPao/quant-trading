@@ -27,6 +27,11 @@ DEFAULT_DEVIATION_LIMIT = Decimal("0.05")
 #: `backtest_metrics` 里有对应 `pine_<metric>` 列的指标，导入后可持久化
 PERSISTED_METRICS = ("total_return", "sharpe", "max_drawdown")
 
+#: 比例类指标：TradingView 默认导出百分数（`8.32` 表示 8.32%），而内部口径是
+#: 小数（0.0832）。不带 `%` 且 |值|>1 时几乎必然是百分数，静默接受会让偏离度
+#: 放大 100 倍、门禁永久 blocked（P0）。宁可拒绝也不猜。
+RATIO_METRICS = frozenset({"total_return", "max_drawdown"})
+
 
 class PineCompareError(ValueError):
     """CSV 格式非法或无可比对项，消息可直接展示给页面。"""
@@ -81,6 +86,13 @@ def parse_pine_csv(text: str) -> dict[str, Decimal]:
             raise PineCompareError(
                 f"第 {lineno} 行数值非法：{raw_value!r}"
             ) from e
+        if name in RATIO_METRICS and abs(value) > 1:
+            # TradingView 导出 `Max Drawdown,8.32`（百分数）：既不能静默当小数
+            # 收下（偏离 100 倍），也不能替用户猜是 8.32% 还是 832%。
+            raise PineCompareError(
+                f"第 {lineno} 行 {name}={raw_value} 看起来是百分数："
+                "请写成 `8.32%` 或小数 `0.0832`（内部统一用小数）"
+            )
         first_data_line = False
         values[name] = value
     if not values:

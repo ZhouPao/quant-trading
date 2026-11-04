@@ -216,6 +216,30 @@ class TestAggregates:
             oos_range=(_TS0, _TS0),
         )
 
+    def test_compounded_return_none_when_oos_overlaps(self) -> None:
+        """step < oos 时同一段行情被多段覆盖：不能连乘（虚高，P0/P1）。"""
+        result = WalkForwardResult(
+            [self._item({"qty": "1"}, 0.1), self._item({"qty": "1"}, 0.2)]
+        )
+
+        assert result.overlapping_oos is True
+        assert result.compounded_return is None
+
+    def test_compounded_return_when_not_overlapping(self) -> None:
+        first = self._item({"qty": "1"}, 0.1)
+        second = SegmentResult(
+            segment=Segment(1, 2, 3, 3, 4),
+            params={"qty": "1"},
+            is_metrics={"total_return": 0.0},
+            oos_metrics={"total_return": 0.2, "sharpe": 2.0},
+            is_range=(_TS0, _TS0),
+            oos_range=(_TS0, _TS0),
+        )
+        result = WalkForwardResult([first, second])
+
+        assert result.overlapping_oos is False
+        assert result.compounded_return == pytest.approx(1.1 * 1.2 - 1)
+
     def test_modal_params_takes_majority(self) -> None:
         result = WalkForwardResult(
             [

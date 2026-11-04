@@ -48,7 +48,11 @@ def main(args) -> int:
         )
         strategy_cls, params, _sources = resolve_cli_params(settings, args)
         funding = load_funding_schedule(
-            settings, args.inst, enabled=args.funding or None
+            settings,
+            args.inst,
+            enabled=args.funding or None,
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
     except BacktestSetupError as e:
         log.error(str(e))

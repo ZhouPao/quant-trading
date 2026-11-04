@@ -2079,7 +2079,11 @@ class SQLiteStore:
         return dict(row) if row else None
 
     def worst_pine_deviation(
-        self, strategy_id: str, params_text: str
+        self,
+        strategy_id: str,
+        params_text: str,
+        inst_id: str | None = None,
+        bar: str | None = None,
     ) -> dict | None:
         """同一策略 + 同一参数集已登记的最大 Pine 偏离度（M4-16）。
 
@@ -2087,11 +2091,15 @@ class SQLiteStore:
         只有一种序列化结果（提交时统一 `sort_keys=True`），无需额外哈希列。
         只看 `done` 且已导入过 Pine 基线的回测。
 
+        Args:
+            inst_id / bar: 传入时按「同品种同周期」过滤。不同品种/周期行情
+                不同，偏离度不可比；一次 BTC 1H 的坏导入不应阻止 ETH 4H
+                启用（P1）。不传则取该策略最坏记录（展示用）。
+
         Returns:
             `{run_id, deviation}`；没有导入记录返回 None。
         """
-        row = self._query_one(
-            """
+        sql = """
             SELECT r.run_id AS run_id, m.pine_deviation AS deviation
               FROM backtest_runs r
               JOIN backtest_metrics m ON m.run_id = r.run_id
@@ -2099,11 +2107,16 @@ class SQLiteStore:
                AND r.params = ?
                AND r.status = 'done'
                AND m.pine_deviation IS NOT NULL
-             ORDER BY CAST(m.pine_deviation AS REAL) DESC
-             LIMIT 1
-            """,
-            (strategy_id, params_text),
-        )
+        """
+        params: list[object] = [strategy_id, params_text]
+        if inst_id is not None:
+            sql += " AND r.inst_id = ?"
+            params.append(inst_id)
+        if bar is not None:
+            sql += " AND r.bar = ?"
+            params.append(bar)
+        sql += " ORDER BY CAST(m.pine_deviation AS REAL) DESC LIMIT 1"
+        row = self._query_one(sql, tuple(params))
         return dict(row) if row else None
 
     def add_backtest_artifact(

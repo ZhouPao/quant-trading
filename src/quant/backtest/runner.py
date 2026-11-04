@@ -109,11 +109,17 @@ def build_matcher(settings: Settings) -> Matcher:
     )
 
 
+#: 永续合约资金费率结算周期（OKX 固定 8h）
+FUNDING_INTERVAL_MS = 8 * 3600 * 1000
+
+
 def load_funding_schedule(
     settings: Settings,
     inst: str,
     *,
     enabled: bool | None = None,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
 ) -> FundingSchedule | None:
     """按配置返回资金费率结算表；未启用返回 None。
 
@@ -122,6 +128,9 @@ def load_funding_schedule(
 
     Args:
         enabled: 显式开关（CLI 参数）；None 时取配置项
+        start_ts / end_ts: 回测区间（UTC ms）。传入时校验费率数据是否覆盖
+            整个区间——只覆盖一半时缺失段成本会静默按 0 计、系统性低估
+            收益（P0），必须显式报错让用户回补。
     """
     if enabled is None:
         enabled = settings.backtest.funding_rate_enabled
@@ -133,7 +142,19 @@ def load_funding_schedule(
             f"no funding rate data for {swap_inst_id(inst)}; "
             f"run: quant fetch-funding-rates --inst {swap_inst_id(inst)} --start YYYY-MM-DD"
         )
-    return FundingSchedule.from_rates(rates)
+    schedule = FundingSchedule.from_rates(rates)
+    if start_ts is not None and end_ts is not None and len(schedule) > 0:
+        first = schedule.timestamps[0]
+        last = schedule.timestamps[-1]
+        # 末条只要落在「结束前一个结算周期内」即视为覆盖到结束
+        if first > start_ts or last + FUNDING_INTERVAL_MS < end_ts:
+            raise BacktestSetupError(
+                f"funding rate data for {swap_inst_id(inst)} covers "
+                f"{first}..{last} only, backtest range {start_ts}..{end_ts} "
+                f"exceeds it; 请先回补：quant fetch-funding-rates "
+                f"--inst {swap_inst_id(inst)} --start YYYY-MM-DD --end YYYY-MM-DD"
+            )
+    return schedule
 
 
 def parse_params(text: str | None) -> dict:

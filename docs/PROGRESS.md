@@ -2263,6 +2263,59 @@ NULL——审计链里「这次回滚发生在哪版代码上」不可追溯。�
 8.72 尾巴）全部完成。唯一未决：操作人恒为 `"owner"`（本地无用户体系，属产品
 口径，待拍板）。
 
+### 8.73 M4「回测」审计 + 批次甲：P0 止损（2026-11-04）
+
+**审计范围**：M4 全部 16 项（14 ✅ 含 3 条前端缺口 + M4-8 🟡 + M4-13 🟢）。前端/后端
+两路只读子代理并行深查，结论：后端 **P0×4 / P1×约20**，前端 **2 处契约漂移即白屏 +
+P1×8**。本批先修 4 个「结论不可信」级 P0。
+
+**P0-1 `quant optimize --metric calmar|sortino` 直接 TypeError**：`cli/optimize.py`
+在 `GridOptimizer.search` 已按 `_rank` 排好序之后**又按原始值排一次**；这两个指标
+在「无回撤 / 无负收益日」时为 `None`，`None < float` 直接崩。修复：删除二次排序
+（`_ASCENDING` 一并移除），统一由 `_rank` 处理 None。
+
+**P0-2 walk-forward 重叠时复合收益虚高**：`build_segments` 明确允许
+`step_bars < oos_bars`（OOS 重叠），而 `compounded_return` 直接连乘各段
+`total_return` → 同一段行情被算多次。修复：新增 `overlapping_oos`，重叠时
+`compounded_return` 返回 **None**（调用方显示「—」），不产出错数；CLI 输出同步
+「—（OOS 段重叠，不可复合）」。**没有改成禁止重叠**——重叠滚动是合法用法，
+只是复合收益不适用。
+
+**P0-3 资金费率部分覆盖时静默按 0 计**：原先只校验「文件不存在」，数据只覆盖
+一半时缺失段成本恒 0、系统性低估收益。修复：`load_funding_schedule` 新增
+`start_ts/end_ts`，校验首条 ≤ 起点、末条 + 8h ≥ 终点（缺则报错并给出回补命令）；
+**四条路径全部透传**（CLI 单次/寻优/walk-forward、看板单次/寻优/walk-forward/批量）。
+
+**P0-4 Pine 裸百分数导致门禁永久 blocked**：TradingView 导出的 `max_drawdown,8.32`
+被当小数 `8.32`（内部应为 `0.0832`）→ 偏离 100 倍。修复：比例类指标
+（`total_return`/`max_drawdown`）不带 `%` 且 `|值|>1` 时**拒绝导入并提示两种正确写法**
+（`8.32%` 或 `0.0832`），不静默猜。
+
+**同批修的关联项**：
+- **门禁同源校验**：带请求级参数覆盖的回测与「当前生效参数集」不同源，导入后
+  门禁永远匹配不到（静默 fail-open）→ `import_pine` 现在直接拒绝并提示重跑。
+- **门禁跨品种/周期串味**：`worst_pine_deviation` 增加可选 `inst_id/bar` 过滤，
+  `pine_block` 按当前启用的组合查询——BTC 1H 的坏导入不再阻止 ETH 4H。
+- **分母为 0 的说明**：仍按 100% 处理（安全优先），但导入响应新增 `notes`
+  说明原因，避免用户误以为数值算错。
+- **复核新发现（子代理未报）**：`cli/walkforward.py` **根本没传 `funding`**，
+  与看板路径在「是否计入资金费率」上口径不同（违反 AGENTS #4）→ 已补齐。
+
+**验证**：`pytest` 全量 **1747 passed**（+11：Pine 4、walk-forward 2、费率 2、
+CLI 1、门禁 2）；`ruff` 全过。纯后端，前端无改动。
+
+**过程如实记录**：`overlapping_oos` 初次写成 `item.oos_start`，但区间在
+`SegmentResult.segment` 子对象上——4 个既有测试立刻抓到，已修正为
+`item.segment.oos_start`。另有一处新测试的 fake 数据缺 `slow_len` 导致 KeyError，
+属测试数据问题，已补全。
+
+**M4 遗留**：批次乙（引擎/成交正确性：`fill_at` 区间校验、取消首根 IndexError、
+限价单挂单语义、cash 穿负、金额 Decimal、turnover 落库、`_metrics_payload` inf、
+批量 `should_stop`、compare 校验 kind、rerun 参数、持久化事务）；批次丙（日报
+`resolve_strategy` + funding + 判定维度、前端 kind 分流、`LOWER_IS_BETTER` 补集合、
+寻优高亮、成交方向、筛选契约、两处白屏兜底）；批次丁（P2/P3 + 两条未做功能
+M4-4 导出、M4-6 walk-forward 入口）。
+
 ---
 
 ## 9. 相关文档
