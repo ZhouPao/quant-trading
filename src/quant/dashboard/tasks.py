@@ -300,6 +300,8 @@ class TaskRunner:
 
     def compare(self, run_ids: list[str]) -> dict[str, Any]:
         """多组对比：品种/周期/区间一致且均为已完成 run，避免拿苹果比橘子。"""
+        # 重复 id 会产生重复行、污染最优标注，先去重再校验数量（P2）
+        run_ids = list(dict.fromkeys(run_ids))
         if len(run_ids) < 2:
             raise ValueError("compare needs at least 2 run ids")
         if len(run_ids) > COMPARE_MAX_RUNS:

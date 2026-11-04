@@ -437,6 +437,21 @@ class TestApi:
         assert again.json()["bindings"] == []
         assert store.list_bindings() == []
 
+    async def test_rejects_inst_with_colon(self, api) -> None:
+        """inst 含冒号会破坏缓存 field 解析（`strategy:inst`），必须 400（P2）。"""
+        app, _store, _redis, _settings_ = api
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.put(
+                "/api/strategies/sma_cross/bindings/BTC:USDT",
+                headers=LOCAL_WRITE,
+                json={"bar": "1H"},
+            )
+
+        assert response.status_code == 400
+        assert "格式非法" in response.json()["detail"]
+
     async def test_delete_binding_requires_write_guard(self, api) -> None:
         app, _store, _redis, _settings_ = api
         # 与 PUT 的写守卫测试同口径：本机 Host 但缺 X-Dashboard-Request

@@ -2222,6 +2222,47 @@ Pydantic 数组 detail、嵌套键序）；`npm run build` 通过；`ruff` 全�
 回滚 TOCTOU、bindings 路由参数校验、缓存重建串行化、compare 重复 id 去重；
 以及待拍板的操作人 `"owner"` 口径。
 
+### 8.72 M3 批次丙：P2/P3 尾巴收尾（2026-11-04）
+
+**P2 回滚审计缺代码版本**：`service.rollback_param` 未传 `git_commit`，回滚行恒为
+NULL——审计链里「这次回滚发生在哪版代码上」不可追溯。修复：抽出公共
+`foundation/gitinfo.py::git_commit()`（原先只有 `backtest.py` 的私有 `_git_commit`，
+无法复用），参数变更与回滚共用；补测试（monkeypatch 固定 commit）。
+
+**P2 bindings 参数无格式校验**：`inst_id` 直接拼进缓存 field `{strategy}:{inst}`，
+含冒号会让 `partition(":")` 解析整体错乱。修复：`_validate_inst_id` 白名单
+（`[A-Za-z0-9-]{1,64}`），新增/解绑两条路径前置校验 → 400；补测试。
+
+**P2 绑定缓存重建无串行化**：两个写操作各自「读全量 → delete+hset」会互相覆盖，
+后完成的可能把对方改动回退。修复：`_binding_lock`（独立于回测信号量），
+`set_binding`/`delete_binding` 的「写库+重建」整体串行。
+
+**P2 compare 重复 id**：`ids` 含重复 run_id 不去重，返回重复条目、污染最优标注。
+修复：`dict.fromkeys` 先去重再校验数量；补测试（`["a","a"]` → 400）。
+
+**P2 回测历史 total 误导**：`total ?? 0` 在旧后端显示「共 0 条，显示最近 20 条」。
+修复：回退到本页条数。
+
+**P3 评估降级未展示**：`fetchStrategyEvaluations` 的 `degraded` 被丢弃，读库/Redis
+失败时页面显示「引擎尚未发布评估历史」——把「读不到」说成「没有」。修复：保留
+`degraded` 并在列表上方提示「可能不完整」。
+
+**P3 注释漂移**：两处仍写「notice 变化会触发重新拉取」，实际是 `refreshKey`
+（批次二改的），已同步。
+
+**复核后判定不改（记录理由）**：`store.rollback_param` 的读记录/校验/写入分两把锁
+（TOCTOU）——并发回滚同一 id 时第二次会因「值已相同」返回 False，不会产生坏数据；
+强行把校验回调纳入持锁范围会重蹈 8.66 的死锁风险，且校验依赖策略模块（可能较慢），
+收益与风险不匹配。保留现状并在 docstring 说明。
+
+**验证**：`pytest` 全量 **1736 passed**（+3）；`npx tsc --noEmit` 通过；
+`npm test` **36 passed**；`npm run build` 通过；`ruff` 全过。
+
+**M3「策略研究」至此全部收尾**：审计（P1×5 / P2×7 / P3×9）+ 第一轮三批
+（8.66/8.67/8.68）+ 第二轮复核（8.69 P0 止损、8.70 口径决策、8.71 半成品收口、
+8.72 尾巴）全部完成。唯一未决：操作人恒为 `"owner"`（本地无用户体系，属产品
+口径，待拍板）。
+
 ---
 
 ## 9. 相关文档

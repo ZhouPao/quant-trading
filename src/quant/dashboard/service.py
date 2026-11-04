@@ -23,6 +23,7 @@ from quant.engine.live import EVAL_HISTORY_LIMIT
 from quant.execution.dead_letter import DeadLetterService
 from quant.execution.kill_switch import KillSwitch
 from quant.foundation.config import Settings, SmtpSettings
+from quant.foundation.gitinfo import git_commit
 from quant.foundation.heartbeat import (
     HEARTBEAT_PREFIX,
     PROCESS_SPECS,
@@ -2173,6 +2174,7 @@ class DashboardService:
                 raise ParamError(f"{param} 未在 PARAM_SPEC 声明，无法安全恢复")
             coerce_value(spec, value)
 
+        commit = git_commit()
         try:
             ok, message = await asyncio.to_thread(
                 self._store.rollback_param,
@@ -2181,6 +2183,8 @@ class DashboardService:
                 now_ms,
                 reason=reason,
                 changed_by=changed_by,
+                # 回滚记录也要能追溯代码版本（原先恒为 NULL，P2）
+                git_commit=commit,
                 validate=_validate,
             )
         except Exception as e:  # noqa: BLE001

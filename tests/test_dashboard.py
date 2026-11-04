@@ -1826,6 +1826,23 @@ class TestRollbackParamValidation:
         # 没有写下会被 resolve 静默忽略的脏覆盖
         assert store.get_strategy_params("sma_cross")[0]["value"] == "8"
 
+    async def test_rollback_records_git_commit(self, env, monkeypatch) -> None:
+        """回滚记录也要能追溯代码版本（原先恒为 NULL，P2）。"""
+        service, store, _redis, _settings = env
+        self._use_real_spec(monkeypatch)
+        monkeypatch.setattr(
+            "quant.dashboard.service.git_commit", lambda: "abc1234"
+        )
+        store.set_strategy_param("sma_cross", "fast_len", "8", 1000)
+        store.set_strategy_param("sma_cross", "fast_len", "12", 2000)
+        rows, _ = store.list_param_changes("sma_cross")
+
+        result = await service.rollback_param("sma_cross", rows[0]["id"])
+
+        assert result["ok"] is True
+        after, _ = store.list_param_changes("sma_cross")
+        assert after[0]["git_commit"] == "abc1234"
+
     async def test_valid_value_still_rolls_back(self, env, monkeypatch) -> None:
         service, store, _redis, _settings = env
         self._use_real_spec(monkeypatch)

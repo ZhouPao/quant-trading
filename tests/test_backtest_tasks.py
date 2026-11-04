@@ -446,6 +446,21 @@ class TestCompareValidation:
         with pytest.raises(ValueError, match="已完成的回测"):
             tasks.compare(["a", "b"])
 
+    async def test_compare_dedupes_repeated_ids(self, env) -> None:
+        """重复 id 先去重：同一 run 不能重复出现在对比表里（P2）。"""
+        store, settings, service = env
+        tasks = TaskRunner(store, settings, service)
+        now = 1_700_000_000_000
+        self._run(store, "a", start=now)
+        self._run(store, "b", start=now)
+
+        # 去重后不足 2 个不同 run：与「至少 2 条」同义
+        with pytest.raises(ValueError, match="at least 2"):
+            tasks.compare(["a", "a"])
+
+        result = tasks.compare(["a", "b", "a"])
+        assert [row["run_id"] for row in result["runs"]] == ["a", "b"]
+
     async def test_compare_rejects_too_many(self, env) -> None:
         store, settings, service = env
         tasks = TaskRunner(store, settings, service)

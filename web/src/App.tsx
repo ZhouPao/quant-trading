@@ -2481,6 +2481,8 @@ function EnginePanel({
   const [bindingError, setBindingError] = useState("");
   const [rollbackBusy, setRollbackBusy] = useState<number | null>(null);
   const [evaluations, setEvaluations] = useState<StrategyEvaluation[]>([]);
+  // 后端降级来源：非空时列表可能不完整，必须提示而不是伪装成「没有评估」
+  const [evalDegraded, setEvalDegraded] = useState<string[]>([]);
   const [recentRuns, setRecentRuns] = useState<BacktestRun[]>([]);
   // M3-18 曲线形态：只对展开的那一组懒加载，最多取前 3 个版本
   const [curveGroup, setCurveGroup] = useState<string | null>(null);
@@ -2515,7 +2517,7 @@ function EnginePanel({
     return () => controller.abort();
   }, [loadInfo]);
 
-  // 变更历史常驻展示；保存或回滚后 notice 变化会触发重新拉取
+  // 变更历史常驻展示；保存或回滚成功后 refreshKey 递增触发重新拉取
   useEffect(() => {
     if (!strategyId) return;
     const controller = new AbortController();
@@ -2530,14 +2532,20 @@ function EnginePanel({
     return () => controller.abort();
   }, [strategyId, refreshKey]);
 
-  // M3-15 最近评估：每轮刷新，保存/回滚后 notice 变化也会立即重拉
+  // M3-15 最近评估：每轮刷新，保存/回滚后 refreshKey 递增也会立即重拉
   useEffect(() => {
     if (!strategyId) return;
     const controller = new AbortController();
     const load = () => {
       fetchStrategyEvaluations(controller.signal, strategyId)
-        .then((res) => setEvaluations(res.items))
-        .catch(() => undefined);
+        .then((res) => {
+          setEvaluations(res.items);
+          setEvalDegraded(res.degraded);
+        })
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setEvalDegraded(["evaluations"]);
+        });
     };
     load();
     const timer = window.setInterval(load, POLL_MS);
@@ -3180,6 +3188,11 @@ function EnginePanel({
             用当前参数回测
           </button>
         </div>
+        {evalDegraded.length > 0 && (
+          <div className="kill-msg kill-msg-bad">
+            评估历史读取降级（{evalDegraded.join(" / ")}），下列内容可能不完整
+          </div>
+        )}
         {evaluations.length === 0 ? (
           <p className="kill-note">
             引擎尚未发布评估历史：worker 运行一轮后即出现。

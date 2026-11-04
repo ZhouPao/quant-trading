@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import subprocess
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -57,6 +57,7 @@ from quant.backtest.runner import (
 )
 from quant.backtest.walkforward import SegmentResult, WalkForward, WalkForwardResult
 from quant.foundation.config import Settings
+from quant.foundation.gitinfo import git_commit
 from quant.foundation.logger import get_logger
 from quant.models.bar import Bar
 from quant.state.sqlite_store import SQLiteStore
@@ -73,6 +74,15 @@ from quant.strategies.params import (
 )
 
 log = get_logger("dashboard.backtest")
+
+#: inst_id 会被拼进 Redis 缓存 field（`{strategy}:{inst}`）与文件路径：
+#: 只允许安全字符，含冒号/斜杠会让缓存解析整体失效（P2）
+_INST_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def _validate_inst_id(inst: str) -> None:
+    if not _INST_ID_RE.fullmatch(inst):
+        raise StrategyParamError(f"inst_id 格式非法：{inst!r}")
 
 MAX_EQUITY_POINTS = 2000  # 权益曲线降采样后最多点数
 MAX_TRADES = 300          # 单次回测返回的成交明细上限
@@ -215,6 +225,9 @@ class BacktestService:
         self._redis = redis
         self._config_dir = Path(settings.engine.config_dir)
         self._lock = asyncio.Semaphore(1)
+        # 绑定写 + 缓存重建必须串行：否则两个写操作各自「读全量→重建」
+        # 会互相覆盖，后完成的那次可能把对方的改动回退掉（P2）
+        self._binding_lock = asyncio.Lock()
         # 寻优任务（M4-13 进度上报，A2-P2）：结果/错误暂存内存，进度落 SQLite；
         # 结果持久化与重启恢复留待后续期。
         self._optimize_results: dict[str, dict[str, object]] = {}
@@ -258,10 +271,11 @@ class BacktestService:
         self, strategy_id: str, inst_id: str, req: BindingUpdateRequest
     ) -> dict[str, object]:
         """启用/停用或新增绑定，并重建 Redis 缓存让引擎下一轮生效。"""
-        payload = await asyncio.to_thread(
-            self._set_binding_sync, strategy_id, inst_id, req
-        )
-        await self._rebuild_binding_cache()
+        async with self._binding_lock:
+            payload = await asyncio.to_thread(
+                self._set_binding_sync, strategy_id, inst_id, req
+            )
+            await self._rebuild_binding_cache()
         return payload
 
     async def delete_binding(
@@ -277,10 +291,12 @@ class BacktestService:
         inst = inst_id.strip()
         if not inst:
             raise StrategyParamError("inst_id is empty")
-        deleted = await asyncio.to_thread(
-            self._store.delete_binding, strategy_id, inst
-        )
-        await self._rebuild_binding_cache()
+        _validate_inst_id(inst)
+        async with self._binding_lock:
+            deleted = await asyncio.to_thread(
+                self._store.delete_binding, strategy_id, inst
+            )
+            await self._rebuild_binding_cache()
         return {
             "ok": deleted,
             "strategy_id": strategy_id,
@@ -533,7 +549,7 @@ class BacktestService:
             self._store,
             resolve_from_db=self._settings.params.resolve_from_db,
         )
-        commit = _git_commit()
+        commit = git_commit()
         now = _now_ms()
         changed: list[str] = []
         for name, value in parsed.items():
@@ -598,6 +614,7 @@ class BacktestService:
         inst = inst_id.strip()
         if not inst:
             raise StrategyParamError("inst_id is empty")
+        _validate_inst_id(inst)
         bar = (req.bar or "").strip() or None
         if bar is not None:
             try:
@@ -1164,23 +1181,6 @@ def _sort_rank(value: float | int | None) -> float:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def _git_commit() -> str | None:
-    """当前代码版本，供参数审计追溯（MS4-C §3.3）；取不到就留空。"""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-            cwd=Path(__file__).resolve().parents[3],
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    commit = out.stdout.strip()
-    return commit or None
 
 
 def _clean_metrics(

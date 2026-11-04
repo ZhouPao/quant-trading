@@ -1706,7 +1706,9 @@ export async function fetchBacktestRuns(
     `/api/backtest/runs${qs ? `?${qs}` : ""}`,
     signal,
   );
-  return { ...data, runs: data.runs ?? [], total: data.total ?? 0 };
+  const runs = data.runs ?? [];
+  // total 缺失时回退到本页条数：写死 0 会显示「共 0 条，显示最近 20 条」（P2）
+  return { ...data, runs, total: data.total ?? runs.length };
 }
 
 export async function fetchBacktestRun(signal: AbortSignal, runId: string) {
