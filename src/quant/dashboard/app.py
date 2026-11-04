@@ -85,6 +85,7 @@ from quant.dashboard.backtest import (
     StrategyParamError,
     WalkforwardRequest,
 )
+from quant.dashboard.config_view import config_snapshot
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
@@ -220,6 +221,7 @@ def create_app(
     service: DashboardService,
     web_dir: Path | None = None,
     manual: ManualTrader | None = None,
+    config_path: Path | None = None,
 ) -> FastAPI:
     backtests = BacktestService(service.settings, service.store, service.redis)
     # 回测失败要发邮件（M9-11）：这里用真实 SMTP 配置，而不是 service 里
@@ -498,6 +500,13 @@ def create_app(
     ) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
         return JSONResponse(await service.resolve_reconciliation(rec_id))
+
+    @app.get("/api/config")
+    async def config_view() -> JSONResponse:
+        """脱敏后的生效配置 + 每项来源（M10-1 / M10-9）。"""
+        return JSONResponse(
+            config_snapshot(service.settings, config_path)
+        )
 
     @app.get("/api/processes")
     async def processes() -> JSONResponse:

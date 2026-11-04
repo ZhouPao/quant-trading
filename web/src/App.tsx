@@ -19,6 +19,7 @@ import {
   fetchQuality,
   fetchQualityReport,
   fetchReconciliations,
+  fetchConfig,
   fetchProcesses,
   fetchProcessCommands,
   controlProcess as controlProcessApi,
@@ -107,6 +108,7 @@ import {
   type ReportItem,
   type ReportsResponse,
   type PositionRow,
+  type ConfigResponse,
   type ProcessCommand,
   type ProcessesResponse,
   type RiskLimitRule,
@@ -1449,7 +1451,9 @@ export default function App() {
           </>
         )}
 
-        {(tab === "factors" || tab === "portfolio" || tab === "settings") && (
+        {tab === "settings" && <SettingsPanel />}
+
+        {(tab === "factors" || tab === "portfolio") && (
           <ModulePlaceholder tab={tab} />
         )}
       </main>
@@ -1463,6 +1467,65 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+const CONFIG_SOURCE_TEXT: Record<string, string> = {
+  toml: "config.toml",
+  env: "环境变量",
+  default: "默认值",
+};
+
+/** M10-1 / M10-9：脱敏后的生效配置与来源（只读，不提供在线修改）。 */
+function SettingsPanel() {
+  const [data, setData] = useState<ConfigResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchConfig(controller.signal)
+      .then((res) => {
+        setData(res);
+        setError(null);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      });
+    return () => controller.abort();
+  }, []);
+
+  if (error) return <div className="kill-msg kill-msg-bad">{error}</div>;
+  if (!data) return <div className="empty">读取配置中…</div>;
+  return (
+    <>
+      <div className="bt-sub">
+        <span>生效配置（只读）</span>
+        <span className="mono">{data.config_path}</span>
+      </div>
+      {!data.config_exists && (
+        <div className="kill-msg kill-msg-bad">
+          配置文件不存在：下列值全部来自默认值
+        </div>
+      )}
+      <Table
+        empty={data.items.length === 0}
+        emptyHint="没有可展示的配置项"
+        head={["配置项", "值", "来源"]}
+        rows={data.items.map((item) => [
+          <span className="mono">{item.key}</span>,
+          <span className="mono">{formatConfigValue(item.value)}</span>,
+          CONFIG_SOURCE_TEXT[item.source] ?? item.source,
+        ])}
+      />
+    </>
+  );
+}
+
+function formatConfigValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "—";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
 }
 
 /** 未开始模块的占位卡：只说明范围，不提供任何写操作。 */

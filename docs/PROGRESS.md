@@ -2658,6 +2658,30 @@ sha256 + manifest）。
 **M10-6 至此完成**（3-4a 通道 + 3-4b 入口）。下一项：2-1 配置只读视图 +
 来源标注（M10-1 + M10-9）。
 
+### 8.84 MS5 收尾 2-1：配置只读视图 + 来源标注（2026-11-04）
+
+**M10-1 + M10-9 落地**：
+- 新增 `dashboard/config_view.py::config_snapshot`：展平 `Settings` 为点路径，
+  逐项标注来源——`toml`（config.toml 里声明）/ `env`（`${VAR}` 引用）/
+  `default`（未声明、Pydantic 默认值）。
+- **脱敏**：`okx.api_key/secret/passphrase`、`smtp.password`、`dashboard.token`
+  只显示 `***` 或空串，永不回显；`redis.url` 里的密码替换为 `://***@`。
+- **降级**：配置文件缺失 → 全部标 `default` 并提示；TOML 语法错误 → 值仍来自
+  已加载的 settings（不让整页 500），来源退化为 `default`。
+- `GET /api/config`；`create_app` 新增 `config_path`，`quant dashboard` 传入
+  实际 `--config` 路径（来源判断才准确）。
+- 前端设置页从占位卡改为只读表格：配置项 / 值 / 来源三列，列宽与既有表格一致；
+  仅展示，不提供在线修改入口（写操作留到 2-2 热改白名单）。
+
+**测试**：`tests/test_config_view.py` 6 条——密钥脱敏、Redis 密码脱敏、
+来源三态、缺失文件全 default、值反映生效配置、坏 TOML 降级。
+
+**验证**：`pytest` 全量 **1806 passed**（+6）；`npm test` **38 passed**；
+`npx tsc --noEmit` / `npm run build` / `ruff` 全过。
+
+**下一项**：2-2 热改白名单（M10-10）——列出「哪些能在线改、哪些必须改文件」，
+拒绝时说明原因。
+
 ---
 
 ## 9. 相关文档

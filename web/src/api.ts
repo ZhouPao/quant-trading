@@ -1093,6 +1093,26 @@ export type ProcessesResponse = {
   degraded: string[];
 };
 
+export type ConfigItem = {
+  key: string;
+  /** 密钥类字段只返回 *** 或空串 */
+  value: unknown;
+  /** toml / env / default */
+  source: string;
+};
+
+export type ConfigResponse = {
+  config_path: string;
+  config_exists: boolean;
+  items: ConfigItem[];
+};
+
+/** M10-1 / M10-9：脱敏后的生效配置与每项来源。 */
+export async function fetchConfig(signal: AbortSignal) {
+  const data = await getJson<ConfigResponse>("/api/config", signal);
+  return { ...data, items: data.items ?? [] };
+}
+
 /** M1-5：7 个常驻进程各自心跳，判活逻辑全在后端。 */
 export async function fetchProcesses(signal: AbortSignal) {
   const data = await getJson<ProcessesResponse>("/api/processes", signal);

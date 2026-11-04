@@ -38,7 +38,10 @@ async def _serve(args, settings: Settings, log) -> int:
     # 手动减仓是唯一会写库/下单的入口，与只读的 service 分开构造
     manual = ManualTrader(settings, store, redis)
     app = create_app(
-        DashboardService(store, redis, settings), web_dir, manual=manual
+        DashboardService(store, redis, settings),
+        web_dir,
+        manual=manual,
+        config_path=Path(args.config),
     )
     # 心跳由进程自己写而不是借 supervisor：事件循环卡死时 supervisor
     # 仍会认为子进程活着，只有自写心跳能反映出「进程在但不干活」
