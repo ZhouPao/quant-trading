@@ -90,6 +90,7 @@ from quant.dashboard.config_view import (
     config_snapshot,
     hot_reload_rules,
 )
+from quant.dashboard.credentials import credential_status
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
@@ -510,6 +511,15 @@ def create_app(
         """脱敏后的生效配置 + 每项来源与生效方式（M10-1 / M10-9 / M10-10）。"""
         return JSONResponse(
             config_snapshot(service.settings, config_path)
+        )
+
+    @app.get("/api/credentials")
+    async def credentials(force: bool = Query(False)) -> JSONResponse:
+        """凭证状态（M10-2）：只回显权限/配置状态，永不回显密钥。"""
+        return JSONResponse(
+            await asyncio.to_thread(
+                credential_status, service.settings, force=force
+            )
         )
 
     @app.get("/api/config/hot-reload")

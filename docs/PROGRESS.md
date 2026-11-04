@@ -2709,6 +2709,29 @@ sha256 + manifest）。
 **下一项**：2-3 凭证状态（M10-2）——OKX 权限/子账户/IP + SMTP 是否配置，
 只读探测、不回显密钥。
 
+### 8.86 MS5 收尾 2-3：凭证状态（M10-2）（2026-11-04）
+
+**只读探测，永不回显密钥**：
+- **OKX**：复用 `okx.live_check.run_checks`（交易/提币权限、子账户、IP 绑定），
+  只返回 `name/status/detail`；`GET /api/credentials` 的响应结构里**没有**
+  key/secret/passphrase 字段（有测试锁死结构，防「顺手加个回显」）。
+- **SMTP**：只判断 `host`/`username`/`to_addrs` 是否齐全，**不真连**——每次刷新
+  打一次 SMTP 既慢又可能触发风控。
+- **60s 缓存**：看板 15s 轮询，不缓存会把 OKX 限频吃满；`?force=1` 手动重探。
+- **失败降级**：缺凭证 → `configured=false` + 缺哪个；有凭证但探测失败（如 50101
+  环境不匹配）→ `configured=true` + `error`，**不误报成「未配置」**。
+- 前端设置页顶部「凭证状态」卡：OKX 模式（模拟/实盘）+ 权限项（pass 绿、
+  warn 黄、fail 红）+ SMTP 配置情况，带「重新探测」按钮。
+
+**测试**：`tests/test_credentials.py` 7 条——缺凭证、探测成功、探测失败降级、
+缓存不重复探测 / force 绕过、SMTP 未配置/已配置、响应结构不含密钥字段。
+
+**验证**：`pytest` 全量 **1815 passed**（+7）；`npm test` **38 passed**；
+`npx tsc --noEmit` / `npm run build` / `ruff` 全过。
+
+**下一项**：2-4 通知设置（M10-4）——SMTP 热改 + 测试发送（复用 `quant test-email`），
+写入前做连通性校验。
+
 ---
 
 ## 9. 相关文档

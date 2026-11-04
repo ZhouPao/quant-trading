@@ -1093,6 +1093,49 @@ export type ProcessesResponse = {
   degraded: string[];
 };
 
+export type CredentialCheck = {
+  name: string;
+  status: string;
+  detail: string;
+};
+
+export type OkxCredentialStatus = {
+  configured: boolean;
+  demo: boolean;
+  error: string | null;
+  items: CredentialCheck[];
+  checked_at: number;
+};
+
+export type SmtpCredentialStatus = {
+  configured: boolean;
+  host: string;
+  port: number;
+  recipients: number;
+  missing: string[];
+};
+
+export type CredentialsResponse = {
+  okx: OkxCredentialStatus;
+  smtp: SmtpCredentialStatus;
+};
+
+/** M10-2：凭证状态（只回显权限/配置状态，永不回显密钥）。 */
+export async function fetchCredentials(
+  signal: AbortSignal,
+  force = false,
+) {
+  const data = await getJson<CredentialsResponse>(
+    `/api/credentials${force ? "?force=1" : ""}`,
+    signal,
+  );
+  return {
+    ...data,
+    okx: { ...data.okx, items: data.okx.items ?? [] },
+    smtp: { ...data.smtp, missing: data.smtp.missing ?? [] },
+  };
+}
+
 export type ConfigItem = {
   key: string;
   /** 密钥类字段只返回 *** 或空串 */

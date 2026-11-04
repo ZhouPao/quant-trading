@@ -20,6 +20,7 @@ import {
   fetchQualityReport,
   fetchReconciliations,
   fetchConfig,
+  fetchCredentials,
   fetchProcesses,
   fetchProcessCommands,
   controlProcess as controlProcessApi,
@@ -109,6 +110,7 @@ import {
   type ReportsResponse,
   type PositionRow,
   type ConfigResponse,
+  type CredentialsResponse,
   type ProcessCommand,
   type ProcessesResponse,
   type RiskLimitRule,
@@ -1469,6 +1471,80 @@ export default function App() {
   );
 }
 
+/** M10-2：凭证状态（只读；密钥永不下发）。 */
+function CredentialPanel() {
+  const [data, setData] = useState<CredentialsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchCredentials(controller.signal, version > 0)
+      .then((res) => {
+        setData(res);
+        setError(null);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setError((err as Error).message);
+      })
+      .finally(() => setBusy(false));
+    return () => controller.abort();
+  }, [version]);
+
+  return (
+    <>
+      <div className="bt-sub">
+        <span>凭证状态</span>
+        <button
+          type="button"
+          className="pos-chip"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setVersion((value) => value + 1);
+          }}
+        >
+          {busy ? "探测中…" : "重新探测"}
+        </button>
+      </div>
+      {error && <div className="kill-msg kill-msg-bad">{error}</div>}
+      {data && (
+        <div className="proc-audit">
+          <span className="proc-meta mono">
+            OKX（{data.okx.demo ? "模拟盘" : "实盘"}）
+            {data.okx.configured ? " · 已配置" : " · 未配置"}
+          </span>
+          {data.okx.error && (
+            <span className="proc-meta mono negative">{data.okx.error}</span>
+          )}
+          {data.okx.items.map((item) => (
+            <span
+              key={item.name}
+              className={`proc-meta mono ${
+                item.status === "fail"
+                  ? "negative"
+                  : item.status === "warn"
+                    ? "tone-warn"
+                    : "positive"
+              }`}
+            >
+              {item.name}：{item.detail}
+            </span>
+          ))}
+          <span className="proc-meta mono">
+            SMTP：
+            {data.smtp.configured
+              ? `${data.smtp.host}:${data.smtp.port} · ${data.smtp.recipients} 收件人`
+              : `未配置（缺 ${data.smtp.missing.join(" / ")}）`}
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
+
 const CONFIG_SOURCE_TEXT: Record<string, string> = {
   toml: "config.toml",
   env: "环境变量",
@@ -1504,6 +1580,7 @@ function SettingsPanel() {
   if (!data) return <div className="empty">读取配置中…</div>;
   return (
     <>
+      <CredentialPanel />
       <div className="bt-sub">
         <span>生效配置（只读）</span>
         <span className="mono">{data.config_path}</span>
