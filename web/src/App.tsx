@@ -60,6 +60,7 @@ import {
   importPine,
   setKillSwitch,
   stamp,
+  deleteBinding,
   updateBinding,
   updateStrategyParams,
   type AlertRow,
@@ -2470,7 +2471,13 @@ function EnginePanel({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // 保存失败要显示在参数表单旁（原先只在变更历史面板，离输入框两个 section）
+  const [saveError, setSaveError] = useState("");
+  // 加载失败 ≠ 未声明 PARAM_SPEC，文案必须区分
+  const [infoError, setInfoError] = useState(false);
   const [notice, setNotice] = useState("");
+  // 只有真正写入成功才递增：notice 是展示文案，不该触发 4 个接口重拉
+  const [refreshKey, setRefreshKey] = useState(0);
   const [changes, setChanges] = useState<ParamChange[]>([]);
   const [bindings, setBindings] = useState<StrategyBinding[]>([]);
   const [defaultBar, setDefaultBar] = useState("1H");
@@ -2496,16 +2503,22 @@ function EnginePanel({
   const loadInfo = useCallback(
     async (signal?: AbortSignal) => {
       if (!strategyId) return;
-      const res = await fetchStrategies(signal ?? new AbortController().signal);
-      const hit = res.strategies.find((item) => item.id === strategyId);
-      setInfo(hit ?? null);
+      try {
+        const res = await fetchStrategies(signal ?? new AbortController().signal);
+        setInfo(res.strategies.find((item) => item.id === strategyId) ?? null);
+        setInfoError(false);
+      } catch {
+        // 网络故障/接口异常必须单独标注，不能表述成策略属性（P1）
+        setInfo(null);
+        setInfoError(true);
+      }
     },
     [strategyId]
   );
 
   useEffect(() => {
     const controller = new AbortController();
-    loadInfo(controller.signal).catch(() => setInfo(null));
+    void loadInfo(controller.signal);
     return () => controller.abort();
   }, [loadInfo]);
 
@@ -2517,7 +2530,7 @@ function EnginePanel({
       .then((res) => setChanges(res.changes))
       .catch(() => setChanges([]));
     return () => controller.abort();
-  }, [strategyId, notice]);
+  }, [strategyId, refreshKey]);
 
   // M3-15 最近评估：每轮刷新，保存/回滚后 notice 变化也会立即重拉
   useEffect(() => {
@@ -2534,7 +2547,7 @@ function EnginePanel({
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [strategyId, notice]);
+  }, [strategyId, refreshKey]);
 
   // M3-17 最近回测 / M3-18 参数版本对比共用一份数据：
   // 多取一些，才能在同一区间下凑齐多个参数版本。
@@ -2555,7 +2568,7 @@ function EnginePanel({
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [strategyId, notice]);
+  }, [strategyId, refreshKey]);
 
   /**
    * M3-18 参数版本对比：只有「同品种 + 同周期 + 同区间」的回测才可比，
@@ -2682,7 +2695,7 @@ function EnginePanel({
     const controller = new AbortController();
     loadBindings(controller.signal).catch(() => setBindings([]));
     return () => controller.abort();
-  }, [loadBindings, notice]);
+  }, [loadBindings, refreshKey]);
 
   const toggleBinding = async (row: StrategyBinding) => {
     if (!strategyId) return;
@@ -2725,6 +2738,24 @@ function EnginePanel({
     }
   };
 
+  const removeBinding = async (row: StrategyBinding) => {
+    if (!strategyId) return;
+    if (!window.confirm(`确定解绑 ${row.inst_id}？解绑后可重新用其他周期绑定。`)) {
+      return;
+    }
+    setBindingBusy(row.inst_id);
+    setBindingError("");
+    try {
+      await deleteBinding(strategyId, row.inst_id, token);
+      if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
+      await loadBindings();
+    } catch (e) {
+      setBindingError((e as Error).message);
+    } finally {
+      setBindingBusy("");
+    }
+  };
+
   const specs: ParamSpec[] = info?.param_spec ?? [];
   const sources = info?.sources ?? {};
 
@@ -2736,6 +2767,7 @@ function EnginePanel({
     setDraft(next);
     setReason("");
     setError("");
+    setSaveError("");
     setNotice("");
     setEditing(true);
   };
@@ -2743,7 +2775,7 @@ function EnginePanel({
   const save = async () => {
     if (!strategyId) return;
     setBusy(true);
-    setError("");
+    setSaveError("");
     try {
       const values: Record<string, unknown> = {};
       for (const spec of specs) {
@@ -2753,15 +2785,25 @@ function EnginePanel({
       }
       const res = await updateStrategyParams(strategyId, values, reason.trim(), token);
       if (token) window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
-      setInfo(res);
+      // 合并而非整体覆盖：PUT 响应里 param_spec/sources 是可选字段，
+      // 缺失时保留旧值，否则保存后编辑面板会被打回「参数只读」（P1）
+      setInfo((prev) => ({
+        ...(prev ?? { id: strategyId, params: {} }),
+        ...res,
+        param_spec: res.param_spec ?? prev?.param_spec ?? [],
+        sources: res.sources ?? prev?.sources ?? {},
+        editable: res.editable ?? prev?.editable ?? [],
+      }));
       setNotice(
         res.changed.length > 0
           ? `已更新：${res.changed.join(", ")}（下一轮 tick 生效）`
           : "没有变化，未写入"
       );
+      setRefreshKey((n) => n + 1);
       setReason("");
     } catch (e) {
-      setError((e as Error).message);
+      // 失败反馈放在表单旁，而不是两个 section 外的变更历史里（P1）
+      setSaveError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -2851,9 +2893,11 @@ function EnginePanel({
       <div className="param-panel">
         <div className="param-head">
           <span className="card-note">
-            {specs.length > 0
-              ? `${specs.length} 个可在线调整的参数，其余只读`
-              : "该策略未声明 PARAM_SPEC，参数只读"}
+            {infoError
+              ? "策略参数加载失败，请稍后重试"
+              : specs.length > 0
+                ? `${specs.length} 个可在线调整的参数，其余只读`
+                : "该策略未声明 PARAM_SPEC，参数只读"}
           </span>
           <button
             type="button"
@@ -2939,6 +2983,9 @@ function EnginePanel({
             >
               {busy ? "保存中…" : "保存覆盖"}
             </button>
+            {saveError && (
+              <div className="kill-msg kill-msg-bad">保存失败：{saveError}</div>
+            )}
             <p className="kill-note">
               保存后写入 strategy_params 并记变更历史，下一轮引擎 tick 生效，
               无需重启。
@@ -2994,12 +3041,9 @@ function EnginePanel({
                       if (token)
                         window.sessionStorage.setItem(KILL_TOKEN_KEY, token);
                       setNotice(`已回滚 ${row.param} → ${row.old_value}`);
+                      // refreshKey 统一触发四个接口重拉；原手动再拉一遍会造成双重请求
+                      setRefreshKey((n) => n + 1);
                       await loadInfo();
-                      const res = await fetchParamChanges(
-                        new AbortController().signal,
-                        strategyId
-                      );
-                      setChanges(res.changes);
                     } catch (e) {
                       setError((e as Error).message);
                     } finally {
@@ -3047,6 +3091,15 @@ function EnginePanel({
                 >
                   {row.enabled ? "停用" : "启用"}
                 </button>
+                <button
+                  type="button"
+                  className="kill-btn kill-btn-sm"
+                  disabled={bindingBusy === row.inst_id}
+                  title="删除绑定（改周期前需先解绑）"
+                  onClick={() => void removeBinding(row)}
+                >
+                  解绑
+                </button>
               </li>
             ))}
           </ul>
@@ -3085,7 +3138,7 @@ function EnginePanel({
         )}
         <p className="kill-note">
           写入后同步 SQLite 与 Redis 缓存，引擎下一轮（≤ 轮询周期）生效，
-          无需重启；同一组合改周期须先解绑。
+          无需重启；同一组合改周期请先点「解绑」再重新绑定。
         </p>
       </div>
       <div className="param-panel">
@@ -4818,6 +4871,7 @@ function BacktestHistory({
 
 /** 多条回测横向对比：每个指标高亮最优值（回撤取最小，其余取最大）。 */
 function CompareTable({ runs }: { runs: BacktestRun[] }) {
+  const ranges = new Set(runs.map((run) => `${run.start} ~ ${run.end}`));
   const head = [
     "指标",
     ...runs.map(
@@ -4859,8 +4913,13 @@ function CompareTable({ runs }: { runs: BacktestRun[] }) {
     <>
       <div className="bt-sub">
         <span>横向对比（{runs.length} 条）</span>
-        <span>高亮为该指标最优值；品种与周期由后端校验一致</span>
+        <span>高亮为该指标最优值；品种 / 周期 / 区间由后端校验一致</span>
       </div>
+      {ranges.size > 1 && (
+        <div className="kill-msg kill-msg-bad">
+          所选回测区间不一致，后端会拒绝对比；请改选同一品种、周期与区间的记录
+        </div>
+      )}
       <Table head={head} rows={rows} empty={false} emptyHint="" />
     </>
   );

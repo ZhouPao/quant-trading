@@ -2021,6 +2021,39 @@ Decimal 硬规则合规、一键回测后端确用当前 DB 参数。前端 M3 �
 reason 上限、前端纯函数测试。**待用户拍板**：操作人恒为 `"owner"`（本地无用户体系，
 建议保持现状并在界面注明「本地单用户」）。
 
+### 8.67 M3 批次二：前端口径族 + 解绑功能缺口（2026-11-04）
+
+**M3-4 解绑入口（功能缺口，本次补齐）**：后端提示「同一组合改周期请先解绑」，
+`delete_binding()` 也有实现，但**没有 DELETE 路由也没有任何调用方**——绑定一旦
+建立 bar 永远改不了（只能停用）。补齐：
+- `DELETE /api/strategies/{strategy}/bindings/{inst}`（带写守卫）→
+  `BacktestService.delete_binding` 删库 + 重建 Redis 缓存；
+- 前端 `deleteBinding()`（`postWrite` 方法联合类型加 `DELETE`），启停矩阵每行
+  加「解绑」按钮（二次确认），页脚文案改为指向该按钮；
+- 测试：解绑→缓存清除→可用新周期重新绑定、写守卫、前端 DELETE 契约。
+
+**P1 前端口径三件**（`EnginePanel`）：
+- 加载失败不再被误报成「该策略未声明 PARAM_SPEC，参数只读」：新增 `infoError`
+  状态，失败文案改为「策略参数加载失败」。
+- PUT 失败反馈从「变更历史」面板（离表单两个 section）挪到**参数表单旁**：
+  新增独立 `saveError`，回滚错误仍用原 `error`，互不串扰。
+- 保存成功后 `setInfo` 从整体覆盖改为**合并**（`param_spec`/`sources`/`editable`
+  是可选字段，缺失时保留旧值），不再把编辑面板打回只读。
+
+**P2 重复请求**：四个轮询 effect 原先依赖 `notice`（展示文案），「没有变化，未写入」
+也会触发重拉，回滚成功还手动再拉一遍 → 改为独立 `refreshKey`，只有真正写入成功
+（保存 / 回滚）才递增一次，去掉手动 `fetchParamChanges` 双请求。
+
+**P1 对比提示**：`CompareTable` 计算所选 run 的区间集合，混合区间时显示
+「后端会拒绝对比」提示；说明文案补上「区间」（与 8.66 的后端校验呼应）。
+
+**验证**：`pytest` 全量 **1707 passed**（+2）；`tsc --noEmit` 通过；`npm test`
+**29 passed**（+1）；`npm run build` 通过；`ruff` / IDE 诊断全过。
+
+**遗留（批次三）**：`_set_params` 跨类型相等判断、评估历史被 `waiting_data` 刷屏、
+`_scan_strategies` glob 收窄、reason 长度上限、前端 M3 纯函数测试
+（`sortCompareVersions`/`bestValue`/`formatParams`）、操作人 `"owner"` 口径待拍板。
+
 ---
 
 ## 9. 相关文档

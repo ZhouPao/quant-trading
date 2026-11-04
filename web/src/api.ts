@@ -144,7 +144,7 @@ async function postWrite<T>(
   path: string,
   body: unknown,
   token = "",
-  method: "POST" | "PUT" = "POST"
+  method: "POST" | "PUT" | "DELETE" = "POST"
 ): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -1639,6 +1639,20 @@ export async function updateBinding(
     body,
     token,
     "PUT"
+  );
+}
+
+/** M3-4 解绑：删除 (strategy, inst) 绑定，改周期前必须先走这里。 */
+export async function deleteBinding(
+  strategyId: string,
+  instId: string,
+  token = ""
+) {
+  return postWrite<{ ok: boolean; strategy_id: string; inst_id: string }>(
+    `/api/strategies/${encodeURIComponent(strategyId)}/bindings/${encodeURIComponent(instId)}`,
+    {},
+    token,
+    "DELETE"
   );
 }
 

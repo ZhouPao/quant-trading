@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deleteBinding,
   fetchBacktestRuns,
   fetchBindings,
   fetchParamChanges,
@@ -41,5 +42,22 @@ describe("策略页接口空值兜底", () => {
 
     const data = await fetchStrategies(signal);
     expect(data.strategies[0].id).toBe("sma_cross");
+  });
+
+  it("deleteBinding 以 DELETE 打到解绑端点并带 token", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.mocked(fetch).mockImplementation(
+      (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return okResponse({ ok: true, strategy_id: "sma_cross", inst_id: "BTC-USDT" });
+      }) as never,
+    );
+
+    const result = await deleteBinding("sma_cross", "BTC-USDT", "tk");
+
+    expect(result.ok).toBe(true);
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(calls[0].url).toContain("/bindings/BTC-USDT");
+    expect((calls[0].init.headers as Record<string, string>)["X-Dashboard-Token"]).toBe("tk");
   });
 });

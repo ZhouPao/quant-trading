@@ -610,6 +610,19 @@ def create_app(
         except StrategyParamError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    @app.delete("/api/strategies/{strategy_id}/bindings/{inst_id}")
+    async def delete_strategy_binding(
+        request: Request, strategy_id: str, inst_id: str
+    ) -> JSONResponse:
+        """解绑：改周期前必须走这里（此前只提示「请先解绑」却没有入口）。"""
+        _guard_write(request, service.settings.dashboard.token)
+        try:
+            return JSONResponse(
+                await backtests.delete_binding(strategy_id, inst_id)
+            )
+        except StrategyParamError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
     @app.post("/api/backtest")
     async def backtest(
         req: BacktestRequest, sync: bool = Query(False)

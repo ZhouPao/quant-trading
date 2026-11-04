@@ -342,6 +342,48 @@ class TestApi:
         cached = await redis.hgetall(settings.engine.bindings_key)
         assert "sma_cross:BTC-USDT" in cached
 
+    async def test_delete_binding_then_rebind_with_new_bar(self, api) -> None:
+        """解绑入口：原先只提示「请先解绑」却无 DELETE 路由，bar 永远改不了。"""
+        app, store, redis, settings = api
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.get("/api/strategies/sma_cross/bindings")  # 触发 seed
+            deleted = await client.request(
+                "DELETE",
+                f"/api/strategies/sma_cross/bindings/{INST}",
+                headers=LOCAL_WRITE,
+            )
+            assert deleted.status_code == 200
+            assert deleted.json()["ok"] is True
+            assert store.get_binding("sma_cross", INST) is None
+            # 缓存也同步清掉，引擎下一轮不再评估该组合
+            cached = await redis.hgetall(settings.engine.bindings_key)
+            assert "sma_cross:BTC-USDT" not in cached
+
+            # 解绑后可用新周期重新绑定
+            rebound = await client.put(
+                f"/api/strategies/sma_cross/bindings/{INST}",
+                headers=LOCAL_WRITE,
+                json={"bar": "4H", "enabled": True},
+            )
+            assert rebound.status_code == 200
+            assert rebound.json()["binding"]["bar"] == "4H"
+
+    async def test_delete_binding_requires_write_guard(self, api) -> None:
+        app, _store, _redis, _settings_ = api
+        # 与 PUT 的写守卫测试同口径：本机 Host 但缺 X-Dashboard-Request
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:8080",
+        ) as client:
+            response = await client.request(
+                "DELETE", f"/api/strategies/sma_cross/bindings/{INST}"
+            )
+
+        assert response.status_code == 400
+        assert "X-Dashboard-Request" in response.json()["detail"]
+
     async def test_put_rejects_bar_change(self, api) -> None:
         app, _store, _redis, _settings_ = api
         async with httpx.AsyncClient(

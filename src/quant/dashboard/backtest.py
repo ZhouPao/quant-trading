@@ -263,6 +263,29 @@ class BacktestService:
         await self._rebuild_binding_cache()
         return payload
 
+    async def delete_binding(
+        self, strategy_id: str, inst_id: str
+    ) -> dict[str, object]:
+        """解绑（M3-4）：后端提示「改周期须先解绑」，此前却没有解绑入口。
+
+        删除后重建 Redis 缓存，引擎下一轮不再评估该组合。
+        """
+        if self._store is None:
+            raise StrategyParamError("store not configured")
+        self._strategy_detail(strategy_id)
+        inst = inst_id.strip()
+        if not inst:
+            raise StrategyParamError("inst_id is empty")
+        deleted = await asyncio.to_thread(
+            self._store.delete_binding, strategy_id, inst
+        )
+        await self._rebuild_binding_cache()
+        return {
+            "ok": deleted,
+            "strategy_id": strategy_id,
+            "inst_id": inst,
+        }
+
     async def run(self, req: BacktestRequest) -> dict[str, object]:
         async with self._lock:
             started = time.monotonic()
