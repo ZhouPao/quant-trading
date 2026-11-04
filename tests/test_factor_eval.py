@@ -139,6 +139,32 @@ class TestEvaluate:
             evaluate({}, {}, horizon=0)
 
 
+class TestCorrelationSymmetric:
+    """热力图需要完整 n×n 矩阵，且冗余对只能记一次。"""
+
+    def test_matrix_contains_all_four_cells(self) -> None:
+        left = [Decimal(i) for i in range(20)]
+        right = [Decimal(i * 2) + 1 for i in range(20)]
+
+        result = correlation_matrix({"a": left, "b": right})
+
+        assert set(result.matrix) == {
+            ("a", "a"),
+            ("a", "b"),
+            ("b", "a"),
+            ("b", "b"),
+        }
+        assert result.matrix[("a", "b")] == result.matrix[("b", "a")]
+
+    def test_redundant_pair_reported_once(self) -> None:
+        left = [Decimal(i) for i in range(20)]
+        right = [Decimal(i * 2) for i in range(20)]
+
+        result = correlation_matrix({"a": left, "b": right})
+
+        assert result.redundant == [("a", "b")]
+
+
 class TestCorrelation:
     def test_duplicate_factors_are_redundant(self) -> None:
         left = [Decimal(i) for i in range(20)]

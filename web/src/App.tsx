@@ -22,6 +22,7 @@ import {
   fetchConfig,
   fetchCredentials,
   fetchFactors,
+  fetchFactorMeta,
   fetchFactorValues,
   fetchFactorEvaluation,
   fetchFactorCorrelations,
@@ -117,6 +118,7 @@ import {
   type CredentialsResponse,
   type FactorCorrelationsResponse,
   type FactorEvaluationResponse,
+  type FactorMeta,
   type FactorSummary,
   type FactorValuesResponse,
   type ProcessCommand,
@@ -140,6 +142,15 @@ import { CandleChart } from "./chart/CandleChart";
 import { EChart } from "./chart/EChart";
 import { IndicatorBar } from "./chart/IndicatorBar";
 import type { EChartsOption } from "echarts";
+import {
+  axisTime,
+  defaultRange,
+  hasFactorValues,
+  hasIcPoints,
+  heatPoints,
+  meanQuantileReturns,
+  validateRange,
+} from "./factors";
 import { loadSettings, saveSettings } from "./chart/settings";
 import type { ChartSettings } from "./chart/types";
 import "./styles.css";
@@ -226,12 +237,12 @@ const TABS = [
   { key: "market", label: "市场监控", status: "live" },
   { key: "strategy", label: "策略研究", status: "live" },
   { key: "backtest", label: "回测分析", status: "live" },
-  { key: "factors", label: "因子库", status: "todo" },
+  { key: "factors", label: "因子库", status: "live" },
   { key: "portfolio", label: "组合管理", status: "todo" },
   { key: "risk", label: "风险控制", status: "live" },
   { key: "execution", label: "交易执行", status: "live" },
   { key: "logs", label: "日志告警", status: "live" },
-  { key: "settings", label: "系统设置", status: "todo" },
+  { key: "settings", label: "系统设置", status: "live" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -1555,11 +1566,6 @@ function CredentialPanel() {
   );
 }
 
-/** 日期输入 → YYYY-MM-DD（UTC，offset 以天为单位）。 */
-function isoDay(offset: number): string {
-  return new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
-}
-
 function fmtSigned(value: number | null | undefined, digits = 3): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "—";
@@ -1577,142 +1583,186 @@ function fmtPct(value: number | null | undefined): string {
 /** M5-15：因子页（列表 / 值曲线 / IC / 分层 / 相关性）。 */
 function FactorPanel() {
   const [factors, setFactors] = useState<FactorSummary[]>([]);
+  const [meta, setMeta] = useState<FactorMeta | null>(null);
   const [selected, setSelected] = useState("");
   const [inst, setInst] = useState("BTC-USDT");
   const [bar, setBar] = useState("1H");
-  const [start, setStart] = useState(() => isoDay(-30));
-  const [end, setEnd] = useState(() => isoDay(0));
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  /** IC 是横截面指标：参与品种由 meta 推导，用户可改 */
+  const [evalInsts, setEvalInsts] = useState("");
   const [values, setValues] = useState<FactorValuesResponse | null>(null);
   const [evaluation, setEvaluation] =
     useState<FactorEvaluationResponse | null>(null);
   const [correlations, setCorrelations] =
     useState<FactorCorrelationsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
 
+  // 首屏：注册表 + 数据覆盖范围一起拉，默认区间落在本地真实数据上
   useEffect(() => {
     const controller = new AbortController();
-    fetchFactors(controller.signal)
-      .then((rows) => {
+    Promise.all([
+      fetchFactors(controller.signal),
+      fetchFactorMeta(controller.signal),
+    ])
+      .then(([rows, info]) => {
         setFactors(rows);
+        setMeta(info);
         setSelected((current) => current || rows[0]?.factor_id || "");
+        setInst(info.inst || "BTC-USDT");
+        setBar(info.bar || "1H");
+        const range = defaultRange(info, Date.now());
+        setStart(range.start);
+        setEnd(range.end);
+        setEvalInsts(info.insts.slice(0, 3).join(","));
+        setNotice(info.reason ?? null);
+        setReady(true);
       })
       .catch((err) => {
         if ((err as Error).name === "AbortError") return;
         setError((err as Error).message);
+        setReady(true);
       });
     return () => controller.abort();
   }, []);
 
+  // 条件变化：300ms 防抖；请求前与失败后都清空旧数据，杜绝数据串味
   useEffect(() => {
-    if (!selected) return;
+    if (!ready || !selected) return;
+    const invalid = validateRange(start, end);
+    if (invalid) {
+      setValues(null);
+      setEvaluation(null);
+      setCorrelations(null);
+      setError(invalid);
+      return;
+    }
     const controller = new AbortController();
-    setBusy(true);
-    setError(null);
-    const insts = [inst, "BTC-USDT", "ETH-USDT", "SOL-USDT"]
-      .filter((value, index, array) => array.indexOf(value) === index)
-      .join(",");
-    Promise.all([
-      fetchFactorValues(controller.signal, selected, {
-        inst,
-        bar,
-        start,
-        end,
-      }),
-      fetchFactorEvaluation(controller.signal, selected, {
-        insts,
-        bar,
-        start,
-        end,
-      }),
-    ])
-      .then(([valueData, evalData]) => {
-        setValues(valueData);
-        setEvaluation(evalData);
-      })
-      .catch((err) => {
-        if ((err as Error).name === "AbortError") return;
-        setError((err as Error).message);
-      })
-      .finally(() => setBusy(false));
-    return () => controller.abort();
-  }, [selected, inst, bar, start, end]);
-
-  useEffect(() => {
-    if (!selected || factors.length === 0) return;
-    const ids = [
-      selected,
-      ...factors
-        .filter((item) => item.factor_id !== selected)
-        .slice(0, 3)
-        .map((item) => item.factor_id),
-    ].join(",");
-    const controller = new AbortController();
-    fetchFactorCorrelations(controller.signal, {
-      ids,
-      inst,
-      bar,
-      start,
-      end,
-    })
-      .then(setCorrelations)
-      .catch((err) => {
-        if ((err as Error).name === "AbortError") return;
-        setCorrelations(null);
-      });
-    return () => controller.abort();
-  }, [selected, factors, inst, bar, start, end]);
+    const handle = window.setTimeout(() => {
+      setBusy(true);
+      setError(null);
+      setValues(null);
+      setEvaluation(null);
+      setCorrelations(null);
+      const ids = [
+        selected,
+        ...factors
+          .filter((item) => item.factor_id !== selected)
+          .slice(0, 3)
+          .map((item) => item.factor_id),
+      ].join(",");
+      Promise.all([
+        fetchFactorValues(controller.signal, selected, {
+          inst,
+          bar,
+          start,
+          end,
+        }),
+        fetchFactorEvaluation(controller.signal, selected, {
+          insts: evalInsts || inst,
+          bar,
+          start,
+          end,
+        }),
+        fetchFactorCorrelations(controller.signal, {
+          ids,
+          inst,
+          bar,
+          start,
+          end,
+        }),
+      ])
+        .then(([valueData, evalData, corrData]) => {
+          setValues(valueData);
+          setEvaluation(evalData);
+          setCorrelations(corrData);
+        })
+        .catch((err) => {
+          if ((err as Error).name === "AbortError") return;
+          setError((err as Error).message);
+          setValues(null);
+          setEvaluation(null);
+          setCorrelations(null);
+        })
+        .finally(() => setBusy(false));
+    }, 300);
+    return () => {
+      window.clearTimeout(handle);
+      controller.abort();
+    };
+  }, [ready, selected, inst, bar, start, end, evalInsts, factors]);
 
   const spec = factors.find((item) => item.factor_id === selected);
 
-  const valueOption = useMemo<EChartsOption>(() => {
-    const rows = values?.values ?? [];
-    return {
-      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+  const factorRows = values?.values ?? [];
+  const hasValues = hasFactorValues(factorRows);
+  const hasIc = hasIcPoints(evaluation?.ic ?? []);
+  const quantileMeans = useMemo(
+    () => meanQuantileReturns(evaluation?.quantile_returns ?? []),
+    [evaluation],
+  );
+  const hasQuantiles = quantileMeans.some((item) => item !== null);
+  const hasCorr = useMemo(
+    () =>
+      heatPoints(
+        correlations?.matrix ?? [],
+        correlations?.factor_ids ?? [],
+      ).length > 0,
+    [correlations],
+  );
+  const chartClass = busy ? "factor-chart factor-loading" : "factor-chart";
+
+  const valueOption = useMemo<EChartsOption>(
+    () => ({
+      grid: { left: 56, right: 16, top: 16, bottom: 42 },
       tooltip: { trigger: "axis" },
       xAxis: {
         type: "category",
-        data: rows.map((row) => new Date(row.ts).toLocaleDateString()),
+        data: (values?.values ?? []).map((row) => axisTime(row.ts)),
+        axisLabel: { rotate: 30, interval: "auto", hideOverlap: true },
       },
       yAxis: { type: "value", scale: true },
       series: [
         {
           type: "line" as const,
           showSymbol: false,
-          data: rows.map((row) =>
+          connectNulls: false,
+          data: (values?.values ?? []).map((row) =>
             row.value === null ? null : Number(row.value),
           ),
         },
       ],
-    };
-  }, [values]);
+    }),
+    [values],
+  );
 
-  const icOption = useMemo<EChartsOption>(() => {
-    const rows = evaluation?.ic ?? [];
-    return {
-      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+  const icOption = useMemo<EChartsOption>(
+    () => ({
+      grid: { left: 56, right: 16, top: 16, bottom: 42 },
       tooltip: { trigger: "axis" },
       xAxis: {
         type: "category",
-        data: rows.map((row) => new Date(row.ts).toLocaleDateString()),
+        data: (evaluation?.ic ?? []).map((row) => axisTime(row.ts)),
+        axisLabel: { rotate: 30, interval: "auto", hideOverlap: true },
       },
       yAxis: { type: "value", scale: true },
       series: [
         {
           type: "line" as const,
           showSymbol: false,
-          data: rows.map((row) => row.value),
+          data: (evaluation?.ic ?? []).map((row) => row.value),
         },
       ],
-    };
-  }, [evaluation]);
+    }),
+    [evaluation],
+  );
 
-  const quantileOption = useMemo<EChartsOption>(() => {
-    // tsconfig 的 lib 不含 ES2022，不能用 Array.prototype.at
-    const rows = evaluation?.quantile_returns ?? [];
-    const latest = rows.length > 0 ? rows[rows.length - 1].values : [];
-    return {
-      grid: { left: 48, right: 16, top: 16, bottom: 28 },
+  const quantileOption = useMemo<EChartsOption>(
+    () => ({
+      grid: { left: 56, right: 16, top: 16, bottom: 28 },
       tooltip: {},
       xAxis: {
         type: "category",
@@ -1722,29 +1772,24 @@ function FactorPanel() {
       series: [
         {
           type: "bar" as const,
-          data: latest,
+          data: meanQuantileReturns(evaluation?.quantile_returns ?? []),
           itemStyle: { color: "#38bdf8" },
         },
       ],
-    };
-  }, [evaluation]);
+    }),
+    [evaluation],
+  );
 
-  const heatOption = useMemo<EChartsOption>(() => {
-    const ids = correlations?.factor_ids ?? [];
-    const points = (correlations?.matrix ?? []).map((cell) => [
-      ids.indexOf(cell.a),
-      ids.indexOf(cell.b),
-      cell.corr,
-    ]);
-    return {
+  const heatOption = useMemo<EChartsOption>(
+    () => ({
       grid: { left: 96, right: 24, top: 20, bottom: 64 },
       tooltip: {},
       xAxis: {
         type: "category",
-        data: ids,
+        data: correlations?.factor_ids ?? [],
         axisLabel: { rotate: 30 },
       },
-      yAxis: { type: "category", data: ids },
+      yAxis: { type: "category", data: correlations?.factor_ids ?? [] },
       visualMap: {
         min: -1,
         max: 1,
@@ -1757,15 +1802,38 @@ function FactorPanel() {
       series: [
         {
           type: "heatmap" as const,
-          data: points,
+          data: heatPoints(
+            correlations?.matrix ?? [],
+            correlations?.factor_ids ?? [],
+          ),
           label: { show: true, fontSize: 10 },
         },
       ],
-    };
-  }, [correlations]);
+    }),
+    [correlations],
+  );
+
+  const chartBlock = (
+    title: string,
+    hasData: boolean,
+    hint: string,
+    option: EChartsOption,
+    height: number,
+  ) => (
+    <>
+      <div className="bt-sub">
+        <span>{title}</span>
+      </div>
+      {hasData ? (
+        <EChart option={option} height={height} className={chartClass} />
+      ) : (
+        <div className="factor-empty">{busy ? "计算中…" : hint}</div>
+      )}
+    </>
+  );
 
   return (
-    <section className="card reveal">
+    <section className="card reveal factor-panel">
       <div className="card-head">
         <h2>因子库</h2>
         <span className="card-note">
@@ -1779,6 +1847,7 @@ function FactorPanel() {
             value={selected}
             onChange={(event) => setSelected(event.target.value)}
           >
+            {factors.length === 0 && <option value="">无已注册因子</option>}
             {factors.map((item) => (
               <option key={item.factor_id} value={item.factor_id}>
                 {item.name}（{item.factor_id}）
@@ -1788,14 +1857,25 @@ function FactorPanel() {
         </label>
         <label className="bt-field">
           <span>品种</span>
-          <input
-            value={inst}
-            onChange={(event) => setInst(event.target.value)}
-          />
+          <select value={inst} onChange={(event) => setInst(event.target.value)}>
+            {(meta && meta.insts.length > 0 ? meta.insts : [inst]).map(
+              (item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ),
+            )}
+          </select>
         </label>
         <label className="bt-field">
           <span>周期</span>
-          <input value={bar} onChange={(event) => setBar(event.target.value)} />
+          <select value={bar} onChange={(event) => setBar(event.target.value)}>
+            {(meta && meta.bars.length > 0 ? meta.bars : [bar]).map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="bt-field">
           <span>起始</span>
@@ -1813,7 +1893,21 @@ function FactorPanel() {
             onChange={(event) => setEnd(event.target.value)}
           />
         </label>
+        <label className="bt-field bt-span">
+          <span>IC 品种（逗号分隔，至少 3 个有数据的品种）</span>
+          <input
+            value={evalInsts}
+            onChange={(event) => setEvalInsts(event.target.value)}
+          />
+        </label>
       </div>
+      <div className="bt-note">
+        值曲线 = 当前品种；IC / 分层收益 = 横截面（{evalInsts || "未选择"}）。
+        {meta && meta.last_ts
+          ? `本地最新 K 线 ${axisTime(meta.last_ts)} UTC。`
+          : " 本地暂无 K 线数据，请先运行 quant fetch-candles。"}
+      </div>
+      {notice && <div className="kill-msg kill-msg-bad">{notice}</div>}
       {error && <div className="kill-msg kill-msg-bad">{error}</div>}
       {spec && (
         <div className="chart-foot">
@@ -1826,22 +1920,36 @@ function FactorPanel() {
           <span className="mono">换手 {fmtPct(evaluation?.turnover)}</span>
         </div>
       )}
-      <div className="bt-sub">
-        <span>因子值</span>
-      </div>
-      <EChart option={valueOption} height={200} />
-      <div className="bt-sub">
-        <span>IC 时序（horizon=1）</span>
-      </div>
-      <EChart option={icOption} height={180} />
-      <div className="bt-sub">
-        <span>五档分层收益（最近一期）</span>
-      </div>
-      <EChart option={quantileOption} height={180} />
-      <div className="bt-sub">
-        <span>相关性（|corr| &gt; 0.8 标冗余）</span>
-      </div>
-      <EChart option={heatOption} height={240} />
+      {chartBlock(
+        "因子值",
+        hasValues,
+        factorRows.length === 0
+          ? "该区间没有 K 线数据，请调整日期、品种或周期"
+          : `预热不足（lookback=${spec?.lookback ?? 0}），请把起始日期往前调`,
+        valueOption,
+        200,
+      )}
+      {chartBlock(
+        "IC 时序（horizon=1）",
+        hasIc,
+        "横截面样本不足：IC 至少需要 3 个有数据的品种",
+        icOption,
+        180,
+      )}
+      {chartBlock(
+        "五档分层收益（各期均值）",
+        hasQuantiles,
+        "暂无分层收益：需要多个品种同时有因子值与未来收益",
+        quantileOption,
+        180,
+      )}
+      {chartBlock(
+        "相关性（|corr| > 0.8 标冗余）",
+        hasCorr,
+        "暂无相关性数据",
+        heatOption,
+        240,
+      )}
       {(correlations?.redundant ?? []).length > 0 && (
         <div className="bt-note">
           冗余对：
@@ -1850,6 +1958,36 @@ function FactorPanel() {
             .join("；")}
         </div>
       )}
+      <div className="bt-sub">
+        <span>已注册因子</span>
+      </div>
+      <div className="factor-list">
+        <Table
+          empty={factors.length === 0}
+          emptyHint="因子注册表为空（检查 quant.factors.builtin 是否导入）"
+          head={["ID", "名称", "类别", "范围", "预热", "默认参数", "说明", "别名"]}
+          rows={factors.map((item) => [
+            <button
+              type="button"
+              className="pos-chip"
+              onClick={() => setSelected(item.factor_id)}
+            >
+              {item.factor_id}
+            </button>,
+            item.name,
+            item.category,
+            item.scope,
+            String(item.lookback),
+            <span className="mono">
+              {Object.keys(item.default_params).length
+                ? JSON.stringify(item.default_params)
+                : "—"}
+            </span>,
+            item.description || "—",
+            item.aliases.length ? item.aliases.join(", ") : "—",
+          ])}
+        />
+      </div>
     </section>
   );
 }
@@ -1885,10 +2023,22 @@ function SettingsPanel() {
     return () => controller.abort();
   }, []);
 
-  if (error) return <div className="kill-msg kill-msg-bad">{error}</div>;
-  if (!data) return <div className="empty">读取配置中…</div>;
+  if (error) {
+    return (
+      <section className="card settings-panel">
+        <div className="kill-msg kill-msg-bad">{error}</div>
+      </section>
+    );
+  }
+  if (!data) {
+    return (
+      <section className="card settings-panel">
+        <div className="empty">读取配置中…</div>
+      </section>
+    );
+  }
   return (
-    <>
+    <section className="card settings-panel">
       <CredentialPanel />
       <div className="bt-sub">
         <span>生效配置（只读）</span>
@@ -1903,25 +2053,27 @@ function SettingsPanel() {
         在线生效 = 用现有看板入口修改，无需重启；需重启 = 改 config.toml 后重启
         对应进程；仅环境变量 = 凭证类，永不回显
       </div>
-      <Table
-        empty={data.items.length === 0}
-        emptyHint="没有可展示的配置项"
-        head={["配置项", "值", "来源", "生效方式"]}
-        rows={data.items.map((item) => [
-          <span className="mono">{item.key}</span>,
-          <span className="mono" title={item.reload_hint}>
-            {formatConfigValue(item.value)}
-          </span>,
-          CONFIG_SOURCE_TEXT[item.source] ?? item.source,
-          <span
-            className={item.reload === "hot" ? "positive" : "mono"}
-            title={item.reload_hint}
-          >
-            {CONFIG_RELOAD_TEXT[item.reload] ?? item.reload}
-          </span>,
-        ])}
-      />
-    </>
+      <div className="config-table">
+        <Table
+          empty={data.items.length === 0}
+          emptyHint="没有可展示的配置项"
+          head={["配置项", "值", "来源", "生效方式"]}
+          rows={data.items.map((item) => [
+            <span className="mono">{item.key}</span>,
+            <span className="mono" title={item.reload_hint}>
+              {formatConfigValue(item.value)}
+            </span>,
+            CONFIG_SOURCE_TEXT[item.source] ?? item.source,
+            <span
+              className={item.reload === "hot" ? "positive" : "mono"}
+              title={item.reload_hint}
+            >
+              {CONFIG_RELOAD_TEXT[item.reload] ?? item.reload}
+            </span>,
+          ])}
+        />
+      </div>
+    </section>
   );
 }
 

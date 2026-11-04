@@ -3021,6 +3021,61 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 **下一项**：M6 组合管理第一批（8-1 组合模型与约束）。开工前先读 PRD 4.6 的
 M6-1~14，对齐「四种分配方式 / 再平衡 / 冷却期 / 失败回滚」的契约再动手。
 
+### 8.98 M5 因子页 / 设置页排版与首屏可用性修复（2026-11-04）
+
+**起因**：用户打开看板发现因子页「一长条的长方形，文字内容都溢出来了」。
+复核确认 `tsc` / `vitest` / `build` 全过但页面不可用——这类验收检测不到
+CSS 类名缺失与网格跨度漏写，是上一批（8.96）的验收失职。
+
+**根因**
+1. `<main className="grid">` 是 12 列，`.card` 没有默认 `grid-column`；
+   `FactorPanel` 只有 `card reveal`、`SettingsPanel` 返回裸 fragment，
+   两者都只占 1/12 宽（约 100px），内容被压成窄长条并溢出。
+2. `.proc-audit`（凭证状态卡 / 进程命令回执使用）在 `styles.css` **完全没有
+   定义**；`.tone-warn` 只在 `.kv dd` 下生效；`tbody td { white-space:nowrap }`
+   让配置表 4 列被长键名撑爆；`EChart` 是裸 div，空数据时是空白长方形。
+3. 默认区间 `isoDay(-30)~今天` 与本地真实数据无关；四张图无空态；请求失败
+   不清旧数据（数据串味）；IC 硬编码 BTC/ETH/SOL；相关性矩阵只有上三角；
+   x 轴用日期导致 1H 数据 24 个重复刻度；分层收益取最近一期；
+   PRD 要求的「因子列表」实际只有一个 select。
+
+**修复（前端）**
+- 新增 `.factor-panel` / `.settings-panel` 整行跨度；设置页统一包卡片，配置表
+  加 `.config-table`（允许换行 + fixed 列宽）；补齐 `.proc-audit`、通用
+  `.tone-warn`、`.factor-chart` / `.factor-empty` / `.factor-loading` /
+  `.factor-list`；`EChart` 支持 className 透传；`.card-note` 允许换行。
+- `FactorPanel` 重构：首屏并行拉 `fetchFactors` + 新增 `fetchFactorMeta`，默认
+  区间落在本地最新 K 线；300ms 防抖 + 日期校验（366 天上限）；请求前与失败后
+  清空三个数据 state；四张图各有空态/加载态；品种与周期改下拉；IC 品种可编辑
+  且由 meta 推导；补真正的因子列表（8 列）；图表口径修正（时间轴带小时、
+  分层收益取各期均值、热力图过滤 null）。
+- 纯函数抽到 `web/src/factors.ts`，vitest 覆盖；侧栏「因子库」「系统设置」
+  不再标「未开始」。
+
+**修复（后端）**
+- `GET /api/factors/meta`：只读 parquet 的 `ts` 列返回可用品种/周期与首尾时间，
+  失败降级为空 + `reason`，不 500。
+- `evaluate.correlation_matrix` 补成对称 n×n 全矩阵，`redundant` 仅在 i<j 记一次。
+- **额外修一个真实 500**：`FactorStore.save` 的 tmp 文件名固定，`values` 与
+  `correlations` 并发首次计算同一因子时互相覆盖 → 接口 500。改为 uuid 唯一
+  临时文件 + `finally` 清理，`replace` 仍原子。
+
+**浏览器实机验收**（playwright-cli，独立 8081 临时实例，不打断用户 8080）
+- 因子页：卡片 1136px 满宽、`cardScroll == cardWidth`、页面无横向滚动；
+  3 张图有数据 + 1 个明确空态（IC 单品种样本不足，文案说明原因）；因子列表 2 行。
+- 设置页：卡片与配置表均无溢出，138 行配置、凭证状态 7 项换行正常。
+- 控制台 **0 error**；截图 `/tmp/factor_page.png`、`/tmp/settings_page.png`。
+- 备份计算缓存后重放「首次并发计算」，确认不再 500。
+
+**测试**：`pytest` 全量 **1914 passed**（新增 meta 3 条、对称矩阵 2 条、看板
+全矩阵 1 条、CSS 类契约 15 条）；`vitest` **47 passed**（新增纯函数 9 条）；
+`tsc` / `build` / `ruff` 全过（另顺手清掉 `test_open_interest_fetcher.py`
+6 处既有空行空格，使 `ruff check src/quant tests` 全量干净）。顺带修复
+`tests/test_factors.py` 清空注册表后未恢复其它模块自定义因子的隔离缺陷
+（按任意顺序跑不再 KeyError）。
+
+**账本**：M5-15 保持 ✅（因子列表与首屏可用性已补齐），说明栏记录本次修复。
+
 ---
 
 ## 9. 相关文档

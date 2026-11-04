@@ -60,6 +60,46 @@ def _service(tmp_path: Path) -> FactorService:
     return FactorService(settings)
 
 
+class TestFactorMeta:
+    """M5-15 首屏：默认区间必须来自真实数据覆盖范围。"""
+
+    def _seed(self, tmp_path, insts=INSTS) -> FactorService:
+        settings = _settings(tmp_path)
+        storage = BarStorage(settings.storage.data_dir)
+        for inst in insts:
+            storage.save_bars(_bars(inst, 40))
+        return FactorService(settings)
+
+    def test_reports_insts_bars_and_range(self, tmp_path) -> None:
+        data = self._seed(tmp_path).meta()
+
+        assert data["insts"] == sorted(INSTS)
+        assert data["bars"] == ["1H"]
+        assert data["count"] == 40
+        assert data["first_ts"] == START
+        assert data["last_ts"] == START + 39 * HOUR
+        assert data["reason"] is None
+
+    def test_empty_dir_degrades(self, tmp_path) -> None:
+        data = FactorService(_settings(tmp_path)).meta()
+
+        assert data["insts"] == []
+        assert data["count"] == 0
+        assert data["last_ts"] is None
+        assert data["reason"]
+
+    def test_selected_inst_and_bar(self, tmp_path) -> None:
+        service = self._seed(tmp_path)
+
+        data = service.meta(inst="ETH-USDT", bar="1H")
+        assert data["inst"] == "ETH-USDT"
+        assert data["count"] == 40
+
+        missing = service.meta(inst="ETH-USDT", bar="4H")
+        assert missing["count"] == 0
+        assert missing["reason"]
+
+
 class TestList:
     def test_lists_builtin_factors(self, tmp_path) -> None:
         rows = _service(tmp_path).list()
@@ -133,6 +173,33 @@ class TestCorrelations:
             _service(tmp_path).correlations(
                 "nope", "BTC-USDT", "1H", "2026-09-01", "2026-09-02"
             )
+
+
+class TestCorrelationResponse:
+    """看板响应必须是完整对称矩阵，热力图不能只画半张。"""
+
+    def test_full_symmetric_matrix(self, tmp_path) -> None:
+        data = _service(tmp_path).correlations(
+            "momentum_20,volatility_20",
+            "BTC-USDT",
+            "1H",
+            "2026-09-01",
+            "2026-09-02",
+        )
+
+        by_pair = {
+            (item["a"], item["b"]): item["corr"] for item in data["matrix"]
+        }
+        assert set(by_pair) == {
+            ("momentum_20", "momentum_20"),
+            ("momentum_20", "volatility_20"),
+            ("volatility_20", "momentum_20"),
+            ("volatility_20", "volatility_20"),
+        }
+        assert (
+            by_pair[("momentum_20", "volatility_20")]
+            == by_pair[("volatility_20", "momentum_20")]
+        )
 
 
 class TestParseParams:

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -89,9 +90,14 @@ class FactorStore:
             ].reset_index(drop=True)
             path = self.path(factor_id, params, inst_id, bar, year)
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            subset.to_parquet(tmp, **_PARQUET_WRITE)
-            tmp.replace(path)
+            # tmp 必须每次唯一：values 与 correlations 可能并发计算同一个因子，
+            # 固定 tmp 名会互相覆盖导致写失败/接口 500。
+            tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                subset.to_parquet(tmp, **_PARQUET_WRITE)
+                tmp.replace(path)
+            finally:
+                tmp.unlink(missing_ok=True)
             written += len(subset)
         return written
 

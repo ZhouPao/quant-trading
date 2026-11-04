@@ -341,6 +341,15 @@ code {
   grid-column: 1 / -1;
 }
 
+/* 因子库 / 系统设置：整行卡片。
+   main.grid 是 12 列，.card 本身没有默认跨度；不声明就只占 1 列，
+   内容被压成一条窄长条并溢出。 */
+.factor-panel,
+.settings-panel {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
 .placeholder-text {
   margin: 0 0 12px;
   color: var(--dim);
@@ -3753,6 +3762,96 @@ tbody tr:hover {
 
 .kv dd.tone-bad {
   color: var(--bad);
+}
+
+/* ---------------- M5 / M10 页面缺陷修复（2026-11-04） ---------------- */
+
+/* 凭证状态卡 / 进程命令回执：此前 .proc-audit 完全未定义，
+   一堆 inline span 连成一条长串、长文本溢出卡片。 */
+.proc-audit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.proc-audit > span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* warn 色原先只在 .kv dd.tone-warn 下生效，span 上没有颜色 */
+.tone-warn {
+  color: var(--warn);
+}
+
+/* 设置页配置表：键名与值都是长字符串，不能 nowrap。
+   Table 组件不支持传 className，用外层容器后代选择器。 */
+.config-table .table-wrap {
+  max-height: 420px;
+}
+
+.config-table table {
+  table-layout: fixed;
+}
+
+.config-table th,
+.config-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
+.config-table th:nth-child(1),
+.config-table td:nth-child(1) {
+  width: 32%;
+}
+
+.config-table th:nth-child(2),
+.config-table td:nth-child(2) {
+  width: 38%;
+}
+
+/* 因子图表容器：空数据时也有边界，不再是一片空白长方形 */
+.factor-chart {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.012);
+  margin-top: 6px;
+}
+
+.factor-empty {
+  padding: 18px 12px;
+  border: 1px dashed var(--line);
+  text-align: center;
+  font-size: 11px;
+  color: var(--dimmer);
+  line-height: 1.7;
+}
+
+.factor-loading {
+  opacity: 0.55;
+}
+
+.factor-list {
+  margin-top: 10px;
+}
+
+/* 因子列表列多且有说明文字，允许换行而不是把整行撑宽 */
+.factor-list th,
+.factor-list td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
+/* 卡片标题右侧注记允许换行，避免长文案挤压标题 */
+.card-note {
+  white-space: normal;
+  text-align: right;
 }
 
 /* ---------------- empty & footer ---------------- */

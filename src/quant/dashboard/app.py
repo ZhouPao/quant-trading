@@ -520,6 +520,16 @@ def create_app(
             {"factors": await asyncio.to_thread(factor_service.list)}
         )
 
+    @app.get("/api/factors/meta")
+    async def factor_meta(
+        inst: str | None = Query(None),
+        bar: str | None = Query(None),
+    ) -> JSONResponse:
+        """可用品种/周期与数据覆盖范围（M5-15 首屏默认区间用）。"""
+        return JSONResponse(
+            await asyncio.to_thread(factor_service.meta, inst, bar)
+        )
+
     @app.get("/api/factors/correlations")
     async def factor_correlations(
         inst: str = Query(...),

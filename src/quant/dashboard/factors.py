@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+import pandas as pd
 
 from quant.backtest.runner import BacktestSetupError, parse_range
 from quant.factors import (
@@ -184,6 +187,68 @@ class FactorService:
                 {"lag": lag, "ic": value} for lag, value in result.decay
             ],
             "turnover": result.turnover,
+        }
+
+    def meta(
+        self, inst: str | None = None, bar: str | None = None
+    ) -> dict[str, object]:
+        """因子页元信息：可用品种/周期与指定组合的数据覆盖范围。
+
+        只读 parquet 的 `ts` 列统计首尾与条数，不载入整表；失败按「无数据」
+        降级并返回原因，不让页面 500。前端据此把默认区间落到真实数据上，
+        并替换掉硬编码的多品种列表。
+        """
+        root = Path(self._settings.storage.data_dir) / "candles"
+        insts: set[str] = set()
+        if root.is_dir():
+            for type_dir in root.iterdir():
+                if not type_dir.is_dir():
+                    continue
+                for inst_dir in type_dir.iterdir():
+                    if inst_dir.is_dir() and any(inst_dir.rglob("*.parquet")):
+                        insts.add(inst_dir.name)
+        inst_list = sorted(insts)
+
+        target_inst = inst or (
+            inst_list[0] if inst_list else self._settings.engine.inst
+        )
+        try:
+            bars = self._bars.list_bar_sizes(target_inst)
+        except Exception:  # noqa: BLE001  非法品种/目录异常一律降级为空
+            bars = []
+        target_bar = bar or (bars[0] if bars else self._settings.engine.bar)
+
+        first_ts: int | None = None
+        last_ts: int | None = None
+        count = 0
+        reason: str | None = None
+        try:
+            years = self._bars.list_years(target_inst, target_bar)
+            if not years:
+                reason = f"本地没有 {target_inst} {target_bar} 的 K 线"
+            for year in years:
+                # 复用 BarStorage 的路径推断，避免在这里重写 inst_type 规则
+                path = self._bars._path_for(target_inst, target_bar, year)
+                frame = pd.read_parquet(path, columns=["ts"])
+                if frame.empty:
+                    continue
+                count += len(frame)
+                low = int(frame["ts"].min())
+                high = int(frame["ts"].max())
+                first_ts = low if first_ts is None else min(first_ts, low)
+                last_ts = high if last_ts is None else max(last_ts, high)
+        except Exception as e:  # noqa: BLE001
+            reason = f"读取 K 线范围失败：{e}"
+
+        return {
+            "insts": inst_list,
+            "bars": bars,
+            "inst": target_inst,
+            "bar": target_bar,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "count": count,
+            "reason": reason,
         }
 
     def correlations(

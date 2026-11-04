@@ -320,18 +320,31 @@ def correlation_matrix(
     names = sorted(factor_series)
     matrix: dict[tuple[str, str], float | None] = {}
     redundant: list[tuple[str, str]] = []
+    # 对称矩阵：热力图需要全部 n×n 个格子，只算上三角会让左下半张空白。
+    # 相关性本身对称，按 (min(i,j), max(i,j)) 缓存，避免重复计算。
+    computed: dict[tuple[int, int], float | None] = {}
     for i, left in enumerate(names):
-        for right in names[i:]:
-            pairs = [
-                (float(a), float(b))
-                for a, b in zip(
-                    factor_series[left], factor_series[right], strict=False
+        for j, right in enumerate(names):
+            key = (min(i, j), max(i, j))
+            if key not in computed:
+                a, b = names[key[0]], names[key[1]]
+                pairs = [
+                    (float(x), float(y))
+                    for x, y in zip(
+                        factor_series[a], factor_series[b], strict=False
+                    )
+                    if x is not None and y is not None
+                ]
+                computed[key] = _pearson(
+                    [p[0] for p in pairs], [p[1] for p in pairs]
                 )
-                if a is not None and b is not None
-            ]
-            corr = _pearson([p[0] for p in pairs], [p[1] for p in pairs])
-            matrix[(left, right)] = corr
-            if left != right and corr is not None and abs(corr) > threshold:
+            matrix[(left, right)] = computed[key]
+
+    # 冗余对只在 i<j 记一次，对称矩阵下不重复
+    for i, left in enumerate(names):
+        for right in names[i + 1 :]:
+            corr = matrix[(left, right)]
+            if corr is not None and abs(corr) > threshold:
                 redundant.append((left, right))
     return CorrelationResult(matrix=matrix, redundant=redundant)
 

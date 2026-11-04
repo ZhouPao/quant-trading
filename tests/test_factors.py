@@ -91,17 +91,21 @@ class TestRegistry:
 
     def test_clear_registry_removes_factors(self) -> None:
         """注册表可清空（测试用）；清空后取内置因子应失败。"""
+        from quant.factors import registry
+
+        # 其它测试模块在导入时也会注册自己的因子；只 reload builtin 会把
+        # 它们丢掉，导致后续测试按任意顺序运行时 KeyError。保存完整快照。
+        saved = dict(registry._REGISTRY)
+        aliases = dict(registry._ALIASES)
         try:
             clear_registry()
             with pytest.raises(KeyError):
                 get_factor("momentum_20")
         finally:
-            # 重新导入 builtin 恢复注册（避免污染后续测试）
-            import importlib
-
-            import quant.factors.builtin as builtin
-
-            importlib.reload(builtin)
+            registry._REGISTRY.clear()
+            registry._REGISTRY.update(saved)
+            registry._ALIASES.clear()
+            registry._ALIASES.update(aliases)
 
 
 class TestParamHash:

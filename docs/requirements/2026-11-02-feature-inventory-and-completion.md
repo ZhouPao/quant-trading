@@ -207,7 +207,7 @@
 | M5-12 | 缺失与极值处理 | `fill=nan/prev/skip` 三选一 + `clip_quantile` 分位裁剪；缓存只存原始值 | ✅ |
 | M5-13 | `FactorProvider` | Provider 统一；回测/worker 均经 `factor_series_for` 填 `Context.factors`；`[factors] enabled=false` 时不接入 | ✅ |
 | M5-14 | 全量 vs 增量一致性 | 单测逐点相等（先算一半再增量 vs 一次全量） | ✅ |
-| M5-15 | 因子页 | 后端 `GET /api/factors`（列表/值/评价/相关性） | `FactorPanel`：列表/值曲线/IC 时序/分层柱状/相关性热力图 | ✅ |
+| M5-15 | 因子页 | 后端 `GET /api/factors`（列表/值/评价/相关性/meta） | `FactorPanel`：整行卡片、因子列表、值曲线/IC 时序/分层/热力图、空态与口径说明；2026-11-04 修复排版与首屏可用性（PROGRESS 8.98） | ✅ |
 
 ### 3.6 组合管理（M6）—— 0/14 ⬜
 

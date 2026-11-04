@@ -114,7 +114,7 @@ class TestOpenInterestFetcherFetch:
         # 用同一 client 模拟两次拉不同记录
         record1 = _make_record(ts=1_700_000_000_000, oi="10000")
         record2 = _make_record(ts=1_700_028_800_000, oi="11000")
-        
+
         client1 = _make_client({
             "instId": record1.inst_id,
             "ts": str(record1.ts),
@@ -123,7 +123,7 @@ class TestOpenInterestFetcherFetch:
         })
         fetcher = OpenInterestFetcher(client1, tmp_path)
         assert fetcher.fetch("BTC-USDT-SWAP") == 1
-        
+
         # 换 client 返回新的 record
         client2 = _make_client({
             "instId": record2.inst_id,
@@ -133,7 +133,7 @@ class TestOpenInterestFetcherFetch:
         })
         fetcher._client = client2
         assert fetcher.fetch("BTC-USDT-SWAP") == 1
-        
+
         loaded = fetcher.load("BTC-USDT-SWAP")
         assert len(loaded) == 2
         # 按 ts 升序
@@ -166,7 +166,7 @@ class TestOpenInterestFetcherEdgeCases:
     def test_different_inst_separate_files(self, tmp_path: Path) -> None:
         """不同 inst_id 应落到不同文件。"""
         fetcher = OpenInterestFetcher(_make_client(None), tmp_path)
-        
+
         record1 = _make_record("ETH-USDT-SWAP", ts=1_700_000_000_000)
         client1 = _make_client({
             "instId": record1.inst_id,
@@ -176,7 +176,7 @@ class TestOpenInterestFetcherEdgeCases:
         })
         fetcher._client = client1
         fetcher.fetch("ETH-USDT-SWAP")
-        
+
         record2 = _make_record("BTC-USDT-SWAP", ts=1_700_000_000_000)
         client2 = _make_client({
             "instId": record2.inst_id,
@@ -186,7 +186,7 @@ class TestOpenInterestFetcherEdgeCases:
         })
         fetcher._client = client2
         fetcher.fetch("BTC-USDT-SWAP")
-        
+
         # 两个文件都存在
         assert (tmp_path / "open_interest" / "ETH-USDT-SWAP.json").exists()
         assert (tmp_path / "open_interest" / "BTC-USDT-SWAP.json").exists()

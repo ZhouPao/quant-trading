@@ -1113,6 +1113,33 @@ export async function fetchFactors(signal: AbortSignal) {
   return data.factors ?? [];
 }
 
+export type FactorMeta = {
+  /** 本地已有 K 线的品种 */
+  insts: string[];
+  /** 当前品种下已有 K 线的周期 */
+  bars: string[];
+  inst: string;
+  bar: string;
+  first_ts: number | null;
+  last_ts: number | null;
+  count: number;
+  /** 无数据或读取失败时给页面的说明 */
+  reason: string | null;
+};
+
+/** M5-15：可用品种/周期与数据覆盖范围（首屏默认区间用）。 */
+export async function fetchFactorMeta(
+  signal: AbortSignal,
+  inst?: string,
+  bar?: string,
+) {
+  const qs = factorQuery({ inst, bar });
+  return getJson<FactorMeta>(
+    `/api/factors/meta${qs ? `?${qs}` : ""}`,
+    signal,
+  );
+}
+
 export type FactorValue = { ts: number; value: string | null };
 
 export type FactorValuesResponse = {
