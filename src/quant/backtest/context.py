@@ -39,6 +39,10 @@ class Context:
     #: 无信号时透出到 EngineTick.reason，便于回答「为什么没开仓」。
     #: 选字段而不是改 on_bar 返回类型：现有一百多处策略实现无需改动。
     last_block_reason: str = ""
+    #: 外部因子序列（M5-13）：key=因子 ID，value 与 bars_window 等长；
+    #: None 表示该 bar 无因子值。回测与实盘共用同一份 `FactorProvider`，
+    #: 窗口裁剪规则一致，策略据此在「用因子/不用因子」间切换。
+    factors: dict[str, list[Decimal | None]] = field(default_factory=dict)
 
     @property
     def equity_at_price(self) -> Decimal:

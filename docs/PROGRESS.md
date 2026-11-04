@@ -2854,6 +2854,35 @@ MS5 剩余 🟡 仅 M4-8、M8-7、M8-8。
 
 **下一项**：M5 因子库第一批（7-1 因子框架）。
 
+### 8.92 M5 第一批 7-1：因子框架（2026-11-04）
+
+**新增 `src/quant/factors/` 包**（PRD 4.5 的 M5-1~4 + M5-13 前置）：
+- `protocol.py`：`Factor`（factor_id/name/category/scope/lookback/compute/
+  default_params/aliases），构造时校验类别与 scope、`lookback >= 0`。
+- `registry.py`：`@factor(...)` 装饰器 + 注册表；**同 ID/别名重复注册直接报错**
+  （静默覆盖会让「跑的是哪个实现」变成谜）；`get_factor` 支持别名。
+- `params.py`：`param_hash` = 规范化 JSON（`sort_keys` + 紧凑分隔符）的 sha256
+  前 12 位；Decimal 转文本，避免 float 精度影响缓存键。
+- `storage.py`：`FactorStore` 按
+  `data/factors/{factor_id}/{param_hash}/{inst}/{bar}/{year}.parquet` 分片，
+  **原子写**（tmp + replace），同 ts 以新值覆盖、历史保留。
+- `builtin.py`：两个无参数示例因子 `momentum_20`、`volatility_20`，严格
+  `(bars, params)` 契约、前 20 根为 `None`。
+- **`Context.factors`**（M5-13 前置）：`dict[str, list[Decimal | None]]`，
+  默认空、向后兼容；两处引擎构造无需改动（关键字参数 + 默认值）。
+
+**测试**：`tests/test_factors.py` 16 条——内置注册/重复 ID/别名/未知 ID/非法类别/
+清空注册表、`param_hash` 顺序无关/不同参/Decimal 文本、两个示例因子的数值、
+缓存往返（含 None）/参数隔离/合并保留历史、`Context.factors` 默认与赋值。
+
+**验证**：`pytest` 全量 **1853 passed**（+16）；`ruff` 全过。
+
+**账本**：M5 达 **3 ✅ / 2 🟡 / 10 ⬜**（M5-1/2/3 ✅，M5-4/13 🟡）；
+合计 **119/150（79.3%）**。
+
+**下一项**：7-2 批量计算与增量更新（M5-5/12/13/14）——批量入口、回退
+`lookback` 重叠计算、缺失/极值三选一、`FactorProvider`，以及全量=增量一致性测试。
+
 ---
 
 ## 9. 相关文档
