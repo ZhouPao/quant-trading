@@ -1857,6 +1857,20 @@ tbody tr.row-active td:first-child {
   color: var(--ink);
 }
 
+/* 本地暂无该周期 parquet：按钮不隐藏，用暗色 + 圆点标记 */
+.seg-missing {
+  color: var(--dimmer);
+}
+
+.seg-missing::after {
+  content: " ·";
+  color: var(--warn);
+}
+
+.seg-missing.seg-on {
+  color: var(--accent);
+}
+
 /* ---------------- 指标栏 ---------------- */
 
 .ind-bar {
@@ -1960,7 +1974,9 @@ tbody tr.row-active td:first-child {
   color: var(--dim);
   font-size: 13px;
   text-align: center;
-  padding: 0 24px;
+  /* 空态可能包含完整的同步命令，允许换行而不是挤出图表区 */
+  padding: 12px 24px;
+  line-height: 1.7;
   background: rgba(8, 10, 9, 0.6);
 }
 

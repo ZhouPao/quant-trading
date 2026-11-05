@@ -140,7 +140,7 @@
 | M2-9 | K 线图表页 | `GET /api/candles` | ECharts 蜡烛图 + 成交量、缩放、十字光标、成交/持仓标注 | ✅ |
 | M2-10 | 技术指标叠加 | — | `IndicatorBar`：MA/BOLL/SuperTrend/撑压/VOL/MACD/KDJ，参数可改并本地保存 | ✅ |
 | M2-11 | 支撑压力位 | `indicators/support_resistance.py` 同口径参数 | 图上档位线 + 参数配置 | ✅ |
-| M2-12 | 周期切换 | `available_bars` 按本地已下载周期返回 | 周期按钮组（含 1m，动态取后端） | ✅ |
+| M2-12 | 周期切换 | `available_bars` 按本地已下载周期返回（仅用于标记缺数据） | `bars.ts`：9 档（1m/5m/15m/30m/1H/4H/6H/12H/1D）常驻；无数据周期标 · 并给同步命令；`[candles] bars` 多周期同步（PROGRESS 8.99） | ✅ |
 | M2-13 | 自选与对比 | `DataAligner` 具备能力 | 明确不做 | 🚫 |
 | M2-14 | 持仓量 | `OpenInterestFetcher` + `fetch-open-interest` | —（供后续因子使用） | ✅ |
 | M2-15 | 数据质量报告 | `storage/quality.py` + `GET /api/quality` | 「数据质量」卡 + 明细（缺失段/已修复/未修复） | ✅ |

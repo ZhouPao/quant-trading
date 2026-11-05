@@ -3076,6 +3076,44 @@ CSS 类名缺失与网格跨度漏写，是上一批（8.96）的验收失职。
 
 **账本**：M5-15 保持 ✅（因子列表与首屏可用性已补齐），说明栏记录本次修复。
 
+### 8.99 M2 周期按钮恢复 9 档（2026-11-05）
+
+**问题**：市场监控 K 线页只剩「1H」一个周期按钮，PRD M2-12 要求 9 档
+（1m/5m/15m/30m/1H/4H/6H/12H/1D）。
+
+**排查结论（不是代码回退，是数据 + 展示口径共同造成）**：
+1. 前端 `ChartPanel` 的 `options` 在 `available_bars` 非空时**完全采用后端列表**，
+   常量全集 `BAR_OPTIONS` 只在后端返回空数组时兜底；
+2. 后端 `service.candles()` 的 `available_bars` 直接来自
+   `BarStorage.list_bar_sizes(inst)`，只列本地真实存在 parquet 的周期目录；
+3. 本地 `data/candles/spot/BTC-USDT/` 当时只有 `1H/`：`[candles] bar = "1H"`
+   且未配 `bars`，`resolved_bars` 回落 `[bar]`，常驻 `sync-candles` 从未生成
+   其它周期数据；`quant prune` 只删 parquet 文件不删目录，故不是清理导致；
+4. 附带发现前端 `BAR_OPTIONS` 只有 8 档（缺 1m），1m 原本只能靠后端动态补充。
+
+**修复（A 数据 + B 展示）**
+- **A**：`config/config.toml` 与 `config.toml.example` 的 `[candles]` 增加
+  `bars = [9 档]`；执行一次
+  `quant sync-candles --inst BTC-USDT --bar 1m,...,1D`（`new=29`），
+  9 个周期目录齐备；重启常驻 candles 进程使配置长期生效。
+- **B**：新增 `web/src/bars.ts`——`BAR_OPTIONS` 统一为 9 档（含 1m），
+  `barDataState()` 返回 `ready/missing/unknown` 三态；`ChartPanel` **9 档常驻**，
+  `available_bars` 只用于给缺数据按钮加 `.seg-missing` 圆点标记与 title；
+  切到无数据周期时给出可直接复制的同步命令；接口降级（unknown）不误标全周期。
+  `.chart-empty` 允许长文案换行。
+
+**浏览器实机验收**（playwright-cli，8080）
+- 真实数据下：9 个按钮 `1m...1D` 全在、`missing=[]`、当前 1H、73 根 K 线；
+- mock `available_bars=["1H"]`：`total=9`、`missing` 恰好 8 个、图例出现；
+  点 5m 后空态显示 `quant sync-candles --inst BTC-USDT --bar 5m ...`；
+- 控制台 0 error（仅页面首次加载的既有 favicon 404）。
+
+**测试**：`pytest` 全量 **1918 passed**（+4：`TestCandles` 多周期 `available_bars`
+1 条、样式/周期文本契约 3 条）；`vitest` **51 passed**（+4：`bars.test.ts`）；
+`tsc` / `build` / `ruff` 全过。
+
+**账本**：M2-12 说明更新为「9 档常驻 + 缺失标记」，完成度不变（仍 ✅）。
+
 ---
 
 ## 9. 相关文档

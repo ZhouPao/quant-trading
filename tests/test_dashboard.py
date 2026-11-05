@@ -1737,6 +1737,37 @@ class TestCandles:
         assert result["available_bars"] == ["1H"]
         assert result["degraded"] == []
 
+    async def test_available_bars_lists_every_period_with_parquet(
+        self, candle_env
+    ) -> None:
+        """M2-12：后端只列本地有 parquet 的周期。
+
+        看板 9 档按钮常驻，该字段只用于标记「本地暂无数据」。
+        """
+        service, _store, settings = candle_env
+        storage = BarStorage(settings.storage.data_dir)
+        for bar_size in ("1m", "5m", "1H", "1D"):
+            storage.save_bars(
+                [
+                    Bar(
+                        ts=NOW - self.HOUR,
+                        open=Decimal("100"),
+                        high=Decimal("101"),
+                        low=Decimal("99"),
+                        close=Decimal("100"),
+                        vol=Decimal("1"),
+                        vol_quote=Decimal("100"),
+                        confirm=1,
+                        inst_id="BTC-USDT",
+                        bar_size=bar_size,
+                    )
+                ]
+            )
+
+        result = await service.candles(limit=50)
+
+        assert set(result["available_bars"]) == {"1m", "5m", "1H", "1D"}
+
     async def test_no_data_marks_degraded(self, candle_env) -> None:
         service, _store, _settings = candle_env
 

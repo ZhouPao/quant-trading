@@ -75,5 +75,34 @@ def test_implemented_tabs_are_not_marked_todo() -> None:
     """已交付的因子库/系统设置不能再挂着「未开始」标签。"""
     assert '{ key: "factors", label: "因子库", status: "live" }' in APP
     assert '{ key: "settings", label: "系统设置", status: "live" }' in APP
+
+
+NINE_BARS = ("1m", "5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D")
+
+
+def test_kline_period_buttons_are_all_nine_and_always_visible() -> None:
+    """M2-12：9 档常驻，不能再因 available_bars 只有一个周期而隐藏按钮。"""
+    bars_ts = (SRC / "bars.ts").read_text(encoding="utf-8")
+    for bar in NINE_BARS:
+        assert f'"{bar}"' in bars_ts, f"缺少周期 {bar}"
+    assert "if (available.length === 0) return BAR_OPTIONS;" not in APP
+    assert "barStates.map" in APP
+    assert 'state === "missing"' in APP
+
+
+def test_missing_period_has_css_marker() -> None:
+    assert ".seg-missing" in CSS
+    assert "seg-missing" in APP
+
+
+def test_candle_sync_config_covers_all_periods() -> None:
+    """A：定时增量同步默认覆盖 9 档，否则新周期永远不会补数据。"""
+    example = (
+        Path(__file__).resolve().parents[1] / "config" / "config.toml.example"
+    )
+    text = example.read_text(encoding="utf-8")
+    assert "bars = [" in text
+    for bar in NINE_BARS:
+        assert f'"{bar}"' in text, f"示例配置缺少周期 {bar}"
     # 组合管理确实还没做，保留 todo
     assert '{ key: "portfolio", label: "组合管理", status: "todo" }' in APP

@@ -151,12 +151,12 @@ import {
   meanQuantileReturns,
   validateRange,
 } from "./factors";
+import { BAR_OPTIONS, barDataState } from "./bars";
 import { loadSettings, saveSettings } from "./chart/settings";
 import type { ChartSettings } from "./chart/types";
 import "./styles.css";
 
 const POLL_MS = 5000;
-const BAR_OPTIONS = ["5m", "15m", "30m", "1H", "4H", "6H", "12H", "1D"];
 // 与后端 /api/equity 的 hours 上限（720）保持一致
 const EQUITY_RANGES = [
   { hours: 24, label: "24h" },
@@ -4493,11 +4493,17 @@ function ChartPanel() {
 
   const empty = data !== null && data.bars.length === 0;
   const staleBars = data?.degraded.includes("candles") ?? false;
-  const options = useMemo(() => {
-    const available = data?.available_bars ?? [];
-    if (available.length === 0) return BAR_OPTIONS;
-    return available.includes(bar) ? available : [...available, bar];
-  }, [data, bar]);
+  // 9 档常驻：available_bars 只用来标记「本地暂无数据」，不再决定按钮数量
+  const barStates = useMemo(
+    () =>
+      BAR_OPTIONS.map((option) => ({
+        option,
+        state: barDataState(data?.available_bars, option, data?.degraded),
+      })),
+    [data],
+  );
+  const currentMissing =
+    barDataState(data?.available_bars, bar, data?.degraded) === "missing";
 
   return (
     <section className="card chart reveal" style={{ animationDelay: "115ms" }}>
@@ -4515,11 +4521,23 @@ function ChartPanel() {
             </span>
           )}
           <div className="seg" role="group" aria-label="K 线周期">
-            {options.map((option) => (
+            {barStates.map(({ option, state }) => (
               <button
                 key={option}
                 type="button"
-                className={option === bar ? "seg-btn seg-on" : "seg-btn"}
+                className={[
+                  "seg-btn",
+                  option === bar ? "seg-on" : "",
+                  state === "missing" ? "seg-missing" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                title={
+                  state === "missing"
+                    ? `本地暂无 ${option} K 线数据，点击可查看同步提示`
+                    : undefined
+                }
+                aria-pressed={option === bar}
                 onClick={() => setBar(option)}
               >
                 {option}
@@ -4533,9 +4551,11 @@ function ChartPanel() {
         <CandleChart data={data} settings={settings} />
         {empty && (
           <div className="chart-empty">
-            {staleBars
-              ? "本地无该周期 K 线：先运行 quant sync-candles 同步行情"
-              : "暂无 K 线数据"}
+            {currentMissing
+              ? `本地暂无 ${bar} 周期的 K 线。运行 quant sync-candles --inst ${data?.inst ?? "BTC-USDT"} --bar ${bar} 同步最近数据，或用 quant fetch-candles --bar ${bar} --start ... --end ... 拉历史区间。`
+              : staleBars
+                ? "本地无该周期 K 线：先运行 quant sync-candles 同步行情"
+                : "暂无 K 线数据"}
           </div>
         )}
         {error && <div className="chart-empty">接口异常：{error}</div>}
@@ -4543,6 +4563,9 @@ function ChartPanel() {
       <div className="chart-foot">
         <span>数据来源：本地 parquet（{data?.bars.length ?? 0} 根）</span>
         <span>成交点来自 SQLite fills</span>
+        {barStates.some((item) => item.state === "missing") && (
+          <span>带 · 的周期本地暂无数据（仍可切换查看提示）</span>
+        )}
         {data &&
           data.bars.length > 0 &&
           data.bars[data.bars.length - 1].confirm === 0 && (
