@@ -2246,6 +2246,50 @@ tbody tr.row-active td:first-child {
   min-width: 110px;
 }
 
+/* ---- M3 策略清单：一屏内既是选择器也是概览 ---- */
+.engine-strategy-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.engine-strategy-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  background: none;
+  color: var(--dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.engine-strategy-chip:hover {
+  color: var(--ink);
+}
+
+.engine-strategy-chip.engine-strategy-on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(200, 242, 79, 0.06);
+}
+
+.engine-strategy-count,
+.engine-strategy-meta {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dimmer);
+}
+
+.engine-strategy-running {
+  padding: 1px 5px;
+  border: 1px solid rgba(79, 227, 161, 0.35);
+  color: var(--ok);
+  font-size: 9px;
+}
+
 @media (max-width: 760px) {
   .param-head.binding-form {
     grid-template-columns: minmax(0, 1fr);

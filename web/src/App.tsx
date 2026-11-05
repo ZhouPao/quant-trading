@@ -3332,7 +3332,12 @@ function EnginePanel({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
     () => new Set()
   );
-  const strategyId = engine?.strategy;
+  // 策略清单：默认看引擎当前策略，可切换查看其它已登记策略。
+  // 所有按 strategyId 的请求都会跟随选择，engine 状态卡仍描述引擎当前策略。
+  const [strategyList, setStrategyList] = useState<StrategyInfo[]>([]);
+  const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null);
+  const runningStrategy = engine?.strategy;
+  const strategyId = selectedStrategy ?? runningStrategy;
   // M3 归位：6 个区块改分节折叠，默认只开参数与启停，偏好按节持久化
   const { open: sectionOpen, toggle: toggleSection } = useEngineSections();
 
@@ -3341,6 +3346,7 @@ function EnginePanel({
       if (!strategyId) return;
       try {
         const res = await fetchStrategies(signal ?? new AbortController().signal);
+        setStrategyList(res.strategies);
         setInfo(res.strategies.find((item) => item.id === strategyId) ?? null);
         setInfoError(false);
       } catch {
@@ -3708,6 +3714,41 @@ function EnginePanel({
             : "等待数据"}
         </span>
       </div>
+      <div className="engine-strategy-bar" role="group" aria-label="策略清单">
+        {strategyList.length === 0 ? (
+          <span className="engine-strategy-meta">策略清单加载中…</span>
+        ) : (
+          strategyList.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={[
+                "engine-strategy-chip",
+                item.id === strategyId ? "engine-strategy-on" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              aria-pressed={item.id === strategyId}
+              title={`${item.id} · ${Object.keys(item.params).length} 个参数 · ${item.editable?.length ?? 0} 个可在线调整`}
+              onClick={() => setSelectedStrategy(item.id)}
+            >
+              <span className="mono">{item.id}</span>
+              <span className="engine-strategy-count">
+                {Object.keys(item.params).length} 参数
+              </span>
+              {item.id === runningStrategy && (
+                <span className="engine-strategy-running">运行中</span>
+              )}
+            </button>
+          ))
+        )}
+      </div>
+      {selectedStrategy && selectedStrategy !== runningStrategy && (
+        <p className="kill-note">
+          正在查看 {selectedStrategy} 的参数与回测；上方运行状态仍属于引擎当前策略{" "}
+          {runningStrategy ?? "—"}，切换查看不影响引擎。
+        </p>
+      )}
       <dl className="kv">
         <div>
           <dt>状态</dt>

@@ -143,6 +143,15 @@ def test_m3_section_detail_cleanup() -> None:
     assert ".param-history li" in CSS
 
 
+def test_m3_strategy_switcher() -> None:
+    """阶段3：策略清单可切换查看，且不改引擎运行策略。"""
+    assert "engine-strategy-bar" in APP
+    assert "setStrategyList(res.strategies)" in APP
+    assert "selectedStrategy ?? runningStrategy" in APP
+    assert "engine-strategy-running" in APP
+    assert ".engine-strategy-chip" in CSS
+
+
 def test_sidebar_collapse_control() -> None:
     """左侧模块导航可收缩：DOM 状态、持久化与 CSS 都齐备。"""
     assert "NAV_COLLAPSED_KEY" in APP

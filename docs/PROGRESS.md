@@ -3359,6 +3359,26 @@ C 保持搁置，本轮只做导航收缩，未触及 K 线同步逻辑。
 **验证**：`pytest` 全量 **1929 passed**、`vitest` **56 passed**、
 `tsc` / `build` / `ruff` 全过。
 
+### 8.106 M3「策略研究」归位（三）：策略清单与切换查看（2026-11-05）
+
+- 复用 `loadInfo` 已在拉的 `fetchStrategies`，把全量策略存入 `strategyList`；
+  `strategyId = selectedStrategy ?? engine.strategy`，参数 / 变更历史 /
+  评估 / 回测 / 绑定 / 版本对比**所有请求随选择切换**。
+- 页顶新增 `.engine-strategy-bar`：每个策略一个 chip（ID / 参数数 /
+  「运行中」标记），当前查看高亮，title 给出可在线调整的参数数。
+- 查看非运行策略时显式提示「运行状态仍属于引擎当前策略 X，切换查看
+  不影响引擎」，避免把引擎状态误读成所选策略的状态。
+- **不新增接口、不改后端**。范围说明：未做「每策略最近回测收益 / Pine 偏离」
+  概览——需按策略逐个请求，成本与视觉噪音不划算。
+
+**实机验收**：2 个 chips（`rsi` 4 参数 / `sma_cross` 7 参数·运行中）；
+切到 `rsi` 后参数摘要 **6→3 个可调**、绑定 **0**、提示出现；
+切回 `sma_cross` 恢复；控制台 0 error。
+
+**测试**：`test_frontend_styles.py` +1。
+**验证**：`pytest` 全量 **1930 passed**、`vitest` **56 passed**、
+`tsc` / `build` / `ruff` 全过。
+
 ---
 
 ## 9. 相关文档
