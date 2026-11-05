@@ -93,9 +93,10 @@ export function CandleChart({ data, settings }: Props) {
     );
   }, [data, settings]);
 
-  // 副图越多主图越容易被压扁，按启用数量撑高画布
+  // 副图越多主图越容易被压扁，按启用数量撑高画布。
+  // 每副图 160px：启用 VOL+MACD 时小成交量柱子才不会被压到看不见。
   const subCount =
     Number(settings.vol.enabled) + Number(settings.macd.enabled) + Number(settings.kdj.enabled);
 
-  return <div className="chart-canvas" ref={boxRef} style={{ height: 340 + subCount * 120 }} />;
+  return <div className="chart-canvas" ref={boxRef} style={{ height: 340 + subCount * 160 }} />;
 }

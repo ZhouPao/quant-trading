@@ -42,6 +42,9 @@ export const VISIBLE_BARS = 120;
 /** 蜡烛/柱状最大像素宽度：本地只有几根数据时 ECharts 自适应会把它们撑满整屏。 */
 export const MAX_BAR_WIDTH = 12;
 
+/** 柱最小高度：小成交量被极端峰值压成 1px 时仍可见（不等同于改数据）。 */
+export const MIN_BAR_HEIGHT = 2;
+
 export function defaultZoom(length: number): ZoomRange {
   if (length <= VISIBLE_BARS) return { start: 0, end: 100 };
   return { start: ((length - VISIBLE_BARS) / length) * 100, end: 100 };
@@ -75,7 +78,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
     settings.kdj.enabled ? "kdj" : null,
   ].filter((item): item is "vol" | "macd" | "kdj" => item !== null);
 
-  const grids = layoutGrids(subKinds.length);
+  const grids = layoutGrids(subKinds);
   const xAxes = grids.map((_, index) => ({
     type: "category" as const,
     gridIndex: index,
@@ -197,6 +200,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
         yAxisIndex: gridIndex,
         barWidth: "60%",
         barMaxWidth: MAX_BAR_WIDTH,
+        barMinHeight: MIN_BAR_HEIGHT,
         data: bars.map((item) => ({
           value: item.vol,
           itemStyle: {
@@ -226,6 +230,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
         yAxisIndex: gridIndex,
         barWidth: "55%",
         barMaxWidth: MAX_BAR_WIDTH,
+        barMinHeight: MIN_BAR_HEIGHT,
         data: macdValues.hist.map((value) => ({
           value,
           itemStyle: {
@@ -320,24 +325,32 @@ export function buildChartOption(input: BuildInput): EChartsOption {
   } as EChartsOption;
 }
 
-function layoutGrids(subCount: number) {
+type SubKind = "vol" | "macd" | "kdj";
+
+function layoutGrids(subKinds: SubKind[]) {
+  const subCount = subKinds.length;
   const top = 4;
   const bottom = 13;
   const gap = 5;
   const usable = 100 - top - bottom - subCount * gap;
   const mainHeight = subCount > 0 ? usable * 0.54 : usable;
-  const subHeight = subCount > 0 ? (usable - mainHeight) / subCount : 0;
+  const subTotal = usable - mainHeight;
+  // 成交量柱会被少数极端峰值压矮，VOL 给 1.5 倍权重；其余副图等分。
+  // 只改垂直高度，left/right 全部保持一致，主副图水平严格对齐。
+  const weights = subKinds.map((kind) => (kind === "vol" ? 1.5 : 1));
+  const weightSum = weights.reduce((sum, value) => sum + value, 0);
 
   const grids: { left: string; right: string; top: string; height: string }[] = [];
   let cursor = top;
   // left/right 用百分比：数字会被 ECharts 当作像素，价格轴标签会被裁掉
   grids.push({ left: "8%", right: "7%", top: `${cursor}%`, height: `${mainHeight}%` });
   cursor += mainHeight;
-  for (let i = 0; i < subCount; i += 1) {
+  weights.forEach((weight) => {
     cursor += gap;
-    grids.push({ left: "8%", right: "7%", top: `${cursor}%`, height: `${subHeight}%` });
-    cursor += subHeight;
-  }
+    const height = (subTotal * weight) / weightSum;
+    grids.push({ left: "8%", right: "7%", top: `${cursor}%`, height: `${height}%` });
+    cursor += height;
+  });
   return grids;
 }
 

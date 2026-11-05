@@ -138,7 +138,7 @@
 | M2-7 | 完整性校验 | `DataValidator`：缺口补拉 ≤3 次、去重、OHLC 合法性 | 数据质量卡展示结果 | ✅ |
 | M2-8 | 多品种对齐 | `DataAligner` + `align-data` | — | ✅ |
 | M2-9 | K 线图表页 | `GET /api/candles` | ECharts 蜡烛图 + 成交量、缩放、十字光标、成交/持仓标注 | ✅ |
-| M2-10 | 技术指标叠加 | — | `IndicatorBar`：MA/BOLL/SuperTrend/撑压/VOL/MACD/KDJ，参数可改并本地保存 | ✅ |
+| M2-10 | 技术指标叠加 | — | `IndicatorBar`：MA/BOLL/SuperTrend/撑压/VOL/MACD/KDJ，参数可改并本地保存；副图柱高保底与 VOL 加权布局（PROGRESS 8.102） | ✅ |
 | M2-11 | 支撑压力位 | `indicators/support_resistance.py` 同口径参数 | 图上档位线 + 参数配置 | ✅ |
 | M2-12 | 周期切换 | `available_bars` 按本地已下载周期返回（仅用于标记缺数据） | `bars.ts`：9 档（1m/5m/15m/30m/1H/4H/6H/12H/1D）常驻；无数据周期标 · 并给同步命令；`[candles] bars` 多周期同步 + `first_sync_bars` 首次补历史；图表柱宽上限与少数据提示（PROGRESS 8.99 / 8.100） | ✅ |
 | M2-13 | 自选与对比 | `DataAligner` 具备能力 | 明确不做 | 🚫 |

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { atr, boll, ema, kdj, macd, pivotLevels, rma, sma, supertrend } from "./indicators";
-import { MAX_BAR_WIDTH, buildChartOption, defaultZoom, formatTime, toBars } from "./options";
+import {
+  MAX_BAR_WIDTH,
+  MIN_BAR_HEIGHT,
+  buildChartOption,
+  defaultZoom,
+  formatTime,
+  toBars,
+} from "./options";
 import { mergeSettings, parsePeriods, type Bar } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -139,6 +146,58 @@ describe("设置解析", () => {
       ma: { periods: [5, "x", 20, 0, -1] },
     });
     expect(partial.ma.periods).toEqual([5, 20]);
+  });
+});
+
+describe("副图柱高与网格布局", () => {
+  const bars: Bar[] = Array.from({ length: 40 }, (_, i) => ({
+    ts: 1_700_000_000_000 + i * 3_600_000,
+    open: 100 + i,
+    high: 102 + i,
+    low: 99 + i,
+    close: 101 + i,
+    vol: 100 + i * 10,
+  }));
+
+  it("VOL/MACD 柱都有最小高度，小成交量不会被压成 0", () => {
+    const option = buildChartOption({
+      bars,
+      settings: DEFAULT_SETTINGS,
+      fills: [],
+      position: null,
+      bar: "1H",
+      zoom: null,
+    }) as unknown as {
+      series: { name: string; type?: string; barMinHeight?: number }[];
+    };
+
+    const columnSeries = option.series.filter((item) => item.type === "bar");
+    expect(columnSeries).toHaveLength(2);
+    for (const item of columnSeries) {
+      expect(item.barMinHeight).toBe(MIN_BAR_HEIGHT);
+    }
+  });
+
+  it("VOL 副图比 MACD 高，且所有 grid 水平边界一致", () => {
+    const option = buildChartOption({
+      bars,
+      settings: DEFAULT_SETTINGS,
+      fills: [],
+      position: null,
+      bar: "1H",
+      zoom: null,
+    }) as unknown as {
+      grid: { left: string; right: string; height: string }[];
+    };
+
+    expect(option.grid).toHaveLength(3);
+    expect(parseFloat(option.grid[1].height)).toBeGreaterThan(
+      parseFloat(option.grid[2].height),
+    );
+    // 水平边界必须完全一致，否则主副图看起来不像对齐
+    expect(
+      new Set(option.grid.map((g) => `${g.left}|${g.right}`)).size,
+    ).toBe(1);
   });
 });
 

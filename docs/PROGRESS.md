@@ -3207,6 +3207,55 @@ WS 优先 → 同一 worker 两套行情：拿实盘价算 qty/名义/风控，�
 脚注显示模拟盘口径、控制台 0 error（仅既有 favicon 404）。
 常驻 dashboard/worker 已由 supervisor 重启并加载新代码。
 
+### 8.102 K 线副图成交量可见性修复（2026-11-05）
+
+**问题**：启用 MACD 后，下方 VOL 副图左侧小成交量柱几乎看不见，用户反馈
+「交易量展示不全、理论上要与 K 线对齐」。
+
+**实测定位**（浏览器 + React Fiber 取 ECharts 运行时实例，读 `getOption()` /
+`grid.coordinateSystem.getRect()` / zrender 显示列表 / 局部放大截图）：
+- 三个 grid 像素矩形完全一致（`x=88, w=935, containLabel:false`），三 xAxis
+  同为 300 类目，`dataZoom` 绑定 `[0,1,2]` 且 `start=60/end=100`
+  → **水平严格对齐**；
+- y 轴标签 `gx=80` 右对齐、最左边缘 `44 > 0`、`clipped: []` → **没有裁切**；
+- VOL 121 根柱从 `x=90` 起（grid 左边界 88）→ **没有缺柱**。
+- 由此排除上一轮猜测的「标签裁切 / MACD 预热空值 / lazyUpdate 错位」。
+- **真正原因**：`subCount` 1→2 时 `layoutGrids` 把每个副图从 `35.88%` 压到
+  `16.79%`（canvas 580 → VOL grid 97px）；VOL y 轴又按全量最大 `9130`
+  线性缩放到 `10.00K`，可见区间左侧成交量只有 `126~619` → 柱子仅 1~6px。
+  量化：MACD 开时 VOL 柱平均 **15.9px**（关时 27px，最高 150.7px）。
+
+**修复（用户确认只做 1+2）**
+- `MIN_BAR_HEIGHT=2`：VOL/MACD 柱加 `barMinHeight`，小值保底可见；
+  **不改数据、不改 y 轴读数口径**。
+- 画布高度 `340 + subCount*120` → `*160`（2 副图 580→660）；
+  `layoutGrids` 改按 `subKinds` 加权，VOL 权重 `1.5`、其余 `1`；
+  `left/right` 仍全部 `8%/7%`，水平对齐不退化。
+
+**实机验收（改前 → 改后）**
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| canvas 高 | 580 | 660 |
+| VOL grid 高 | 97px | 133px |
+| VOL 柱 最小/平均/最高 | ~1 / 15.9 / 88.9 | **2 / 21.8 / 121.4** |
+| MACD 柱最小 | ~1 | 2 |
+| 三 grid `x/w` | 88/935 | 88/935 |
+| `barMinHeight` | 无 | `[2, 2]` |
+
+控制台 0 error（仅既有 favicon 404）；局部放大图 `/tmp/vol_left_after.png`
+显示左侧每根柱均可见。
+
+**边界如实说明**：y 轴仍按全量最大值线性缩放，左侧柱子只是「可见」而非
+「高大」。若要进一步改善需改量程（可见窗口 P95 截断或对数轴），会改变读数
+口径，本轮按用户决定不做。
+
+**测试**：`indicators.test.ts` +2（柱最小高度、VOL 加权且水平边界一致）、
+`test_frontend_styles.py` +1（文本契约）。
+
+**验证**：`pytest` 全量 **1926 passed**、`vitest` **54 passed**、
+`tsc` / `build` / `ruff` 全过。
+
 ---
 
 ## 9. 相关文档

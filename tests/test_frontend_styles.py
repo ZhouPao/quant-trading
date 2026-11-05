@@ -115,6 +115,16 @@ def test_candles_page_labels_market_regime() -> None:
     assert 'data?.demo === false' in APP
 
 
+def test_subplot_height_and_min_bar_height() -> None:
+    """小成交量柱不能被极端峰值压成不可见：柱高保底 + VOL 副图加权。"""
+    options_ts = (SRC / "chart" / "options.ts").read_text(encoding="utf-8")
+    chart_ts = (SRC / "chart" / "CandleChart.tsx").read_text(encoding="utf-8")
+    assert "barMinHeight: MIN_BAR_HEIGHT" in options_ts
+    assert "layoutGrids(subKinds)" in options_ts
+    assert 'kind === "vol" ? 1.5 : 1' in options_ts
+    assert "340 + subCount * 160" in chart_ts
+
+
 def test_chart_bar_width_cap_and_sparse_hint() -> None:
     """本地数据少时柱宽有上限，并显式提示补历史（M2-12）。"""
     options_ts = (SRC / "chart" / "options.ts").read_text(encoding="utf-8")
