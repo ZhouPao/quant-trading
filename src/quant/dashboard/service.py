@@ -2231,6 +2231,8 @@ class DashboardService:
             "ts": now,
             "inst": inst,
             "bar": bar,
+            # 供 K 线页标注行情口径：模拟盘是独立虚拟市场，与实盘不可互作参考
+            "demo": self._settings.okx.demo,
             "available_bars": available,
             "bars": [
                 {

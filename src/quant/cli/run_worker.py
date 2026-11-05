@@ -298,7 +298,8 @@ async def _run(args, settings: Settings) -> int:
 
         if args.ws:
             price_book = LivePriceBook()
-            ws = WSClient()
+            # 与 REST/K线/下单保持同一口径：demo=true 连模拟盘 WS 频道
+            ws = WSClient(demo=settings.okx.demo, proxy=settings.okx.ws_proxy)
             await ws.subscribe("tickers", args.inst, price_book.update_from_payload)
             ws_task = asyncio.create_task(ws.run())
 

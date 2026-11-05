@@ -128,6 +128,28 @@ class _HangingWS(FakeWS):
         yield  # pragma: no cover
 
 
+class TestWsChannel:
+    """模拟盘/实盘是两套独立行情，WS 频道必须跟随 demo 口径。"""
+
+    def test_default_uses_live_channel_on_443(self) -> None:
+        ws = WSClient()
+        # 8443 已被 OKX 通知弃用，不能再退回带端口的旧地址
+        assert ws._url == "wss://ws.okx.com/ws/v5/public"
+        assert "8443" not in ws._url
+
+    def test_demo_uses_simulated_channel(self) -> None:
+        ws = WSClient(demo=True)
+        assert ws._url == "wss://wspap.okx.com/ws/v5/public"
+
+    def test_explicit_url_overrides_demo(self) -> None:
+        ws = WSClient(url="wss://custom/ws", demo=True)
+        assert ws._url == "wss://custom/ws"
+
+    def test_ws_proxy_is_forwarded(self) -> None:
+        ws = WSClient(demo=True, proxy="http://127.0.0.1:7897")
+        assert ws._proxy == "http://127.0.0.1:7897"
+
+
 class TestWSClient:
     @pytest.mark.asyncio
     async def test_subscribe_sends_when_connected(self):

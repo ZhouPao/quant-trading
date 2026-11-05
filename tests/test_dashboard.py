@@ -1735,6 +1735,8 @@ class TestCandles:
         assert result["bars"][0]["open"] == "100"
         assert result["bars"][-1]["close"] == "149"
         assert result["available_bars"] == ["1H"]
+        # 前端据此标注行情口径；必须与 [okx] demo 一致
+        assert result["demo"] == settings.okx.demo
         assert result["degraded"] == []
 
     async def test_available_bars_lists_every_period_with_parquet(

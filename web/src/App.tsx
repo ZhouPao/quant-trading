@@ -4562,6 +4562,12 @@ function ChartPanel() {
       </div>
       <div className="chart-foot">
         <span>数据来源：本地 parquet（{data?.bars.length ?? 0} 根）</span>
+        <span>
+          行情口径：
+          {data?.demo === false
+            ? "OKX 实盘"
+            : "OKX 模拟盘（Demo 虚拟市场，与实盘不可互作参考）"}
+        </span>
         <span>成交点来自 SQLite fills</span>
         {barStates.some((item) => item.state === "missing") && (
           <span>带 · 的周期本地暂无数据（仍可切换查看提示）</span>

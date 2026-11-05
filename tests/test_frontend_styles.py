@@ -107,6 +107,14 @@ def test_candle_sync_config_covers_all_periods() -> None:
     assert "first_sync_bars = 300" in text
 
 
+def test_candles_page_labels_market_regime() -> None:
+    """K 线页必须标注行情口径，避免把模拟盘行情误判成数据错误。"""
+    api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
+    assert "demo: boolean" in api_ts
+    assert "行情口径" in APP
+    assert 'data?.demo === false' in APP
+
+
 def test_chart_bar_width_cap_and_sparse_hint() -> None:
     """本地数据少时柱宽有上限，并显式提示补历史（M2-12）。"""
     options_ts = (SRC / "chart" / "options.ts").read_text(encoding="utf-8")

@@ -3151,6 +3151,62 @@ CSS 类名缺失与网格跨度漏写，是上一批（8.96）的验收失职。
 
 **账本**：M2-12 说明补注本次联动修复，完成度不变（仍 ✅）。
 
+### 8.101 模拟盘口径统一：WS 频道分流 + 口径标注（2026-11-05）
+
+**决策**：用户明确「当前只在模拟盘做量化，策略稳定后再上实盘」。因此 8.100
+排查出的「本地 K 线与 OKX 实盘不同」**不是缺陷**——模拟盘行情、回测（读同一份
+parquet）、模拟盘撮合、日报偏离度本就该同源。**8.100 末尾建议的「把公开行情
+解耦成实盘」撤销**：不清数据、不动 `_headers`、不加行情源开关。改成实盘 K 线
+出信号、模拟盘撮合成交，反而会人为注入滑点、把策略参数调歪。
+
+**A/B 封口（决定性）**：同一 URL `/api/v5/market/history-candles`、同一根已收盘
+1H（ts=1793876400000），带/不带 `x-simulated-trading: 1` 分别请求：
+
+| 字段 | 不带（实盘） | 带（模拟盘） | 本地 parquet |
+|---|---|---|---|
+| open | 80289.1 | 80289.1 | 80289.1 |
+| high | 80419.3 | 80432.4 | 80432.4 |
+| close | 80396.1 | 80404.2 | 80404.2 |
+| vol | 82.728643 | 2650.23313478 | 2650.23313478 |
+| vol_quote | 6646466.022363205 | 212938511.786955204 | 212938511.786955204 |
+
+本地与模拟盘响应**逐字段一致（含小数尾数）**，数据源 100% 确认。另实测公开
+端点：`/market/ticker`、`/public/open-interest` 受该头影响，
+`/public/funding-rate` 两边相同——修正了「所有公开数据都是模拟盘口径」的
+过度表述。
+
+**真正的问题**：`WSClient` 默认连实盘 `wss://ws.okx.com:8443`，而
+`RestPriceProvider` 走带 demo 头的 `OKXClient`（模拟盘）；`price_provider` 是
+WS 优先 → 同一 worker 两套行情：拿实盘价算 qty/名义/风控，成交却在模拟盘，
+回退 REST 时又切成模拟盘价。
+
+**修复**
+- `WSClient` 新增 `demo`：`true` → `wss://wspap.okx.com/ws/v5/public`，
+  `false` → `wss://ws.okx.com/ws/v5/public`（按 OKX 通知把 8443 迁到 443）；
+  显式 `url` 仍优先。`run_worker.py` 传 `demo=settings.okx.demo`。
+- `OKXSettings.ws_proxy`（默认 None，行为不变）：本机有 HTTP 代理
+  `127.0.0.1:7897`，`websockets` 需显式传 HTTP 代理——`proxy=None` 直连被
+  reset，默认 `proxy=True` 又因系统 SOCKS 缺 python-socks 报错。经代理实测
+  两个频道均连通、`parse_ticker` 可解析，价格不同（模拟盘 79676.1 /
+  实盘 79686.7）。本地 `config.toml` 已填，example 给注释示例。
+- `GET /api/candles` 响应新增 `demo`（与 `[okx] demo` 一致），`api.ts` 同步
+  类型，K 线页脚注标注「OKX 模拟盘（Demo 虚拟市场，与实盘不可互作参考）」。
+- 重启 dashboard/worker 后日志确认 `ws connected url=wss://wspap...`。
+
+**文档**：`AGENTS.md` 硬规则 #15（demo 是全局口径、模拟盘阶段勿改实盘）；
+`RUNBOOK` 1.1 切实盘清单补「清 `.checkpoints` + 重建 9 档历史」，否则切换后
+新旧行情会沿断点接在同一条序列上；`OKX_API_REFERENCE` 补 A/B 实测结论、
+模拟盘 WS 频道、443 迁移与端点差异对照。
+
+**测试**：`test_ws_client.py` +4（默认 443 / demo 用 wspap / 显式 url 优先 /
+代理透传）、`test_dashboard.py` +1（响应 demo 与配置一致）、
+`test_frontend_styles.py` +1（K 线页口径标注契约）。
+
+**验证**：`pytest` 全量 **1925 passed**；`vitest` **52 passed**；
+`tsc` / `build` / `ruff` 全过；浏览器实机（8080）：9 档周期、300 根 K 线、
+脚注显示模拟盘口径、控制台 0 error（仅既有 favicon 404）。
+常驻 dashboard/worker 已由 supervisor 重启并加载新代码。
+
 ---
 
 ## 9. 相关文档

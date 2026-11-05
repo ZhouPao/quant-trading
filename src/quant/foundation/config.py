@@ -44,6 +44,9 @@ class OKXSettings(BaseModel):
     secret: str
     passphrase: str
     demo: bool = True
+    #: 本机需代理才能连 OKX WS 时填 "http://host:port"；None=直连。
+    #: 只影响 --ws 行情频道，不影响 REST（REST 由 httpx 自动读系统代理）。
+    ws_proxy: str | None = None
 
 
 class StorageSettings(BaseModel):

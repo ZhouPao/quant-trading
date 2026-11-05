@@ -75,19 +75,26 @@ def parse_ticker(item: dict[str, Any]) -> Tick | None:
 class WSClient:
     """OKX WebSocket 客户端（带自动重连）。"""
 
-    PUBLIC_URL = "wss://ws.okx.com:8443/ws/v5/public"
-    PRIVATE_URL = "wss://ws.okx.com:8443/ws/v5/private"
+    # OKX 已通知 8443 端口即将弃用，统一走 443（不带端口）
+    PUBLIC_URL = "wss://ws.okx.com/ws/v5/public"
+    PRIVATE_URL = "wss://ws.okx.com/ws/v5/private"
+    # 模拟盘是独立虚拟市场，公共频道用 wspap；行情与实盘不可互作参考
+    DEMO_PUBLIC_URL = "wss://wspap.okx.com/ws/v5/public"
+    DEMO_PRIVATE_URL = "wss://wspap.okx.com/ws/v5/private"
 
     def __init__(
         self,
-        url: str = PUBLIC_URL,
+        url: str | None = None,
         reconnect_delay: float = 5.0,
         max_reconnect_delay: float = 60.0,
         connect_fn: ConnectFn | None = None,
         proxy: str | None = None,
         keepalive_interval: float = 25.0,
+        demo: bool = False,
     ) -> None:
-        self._url = url
+        # demo 必须与交易/行情口径一致：模拟盘用独立 WS 频道，避免 worker
+        # 拿实盘 ticker 去算模拟盘下单数量。显式 url 优先（测试/特殊部署）。
+        self._url = url or (self.DEMO_PUBLIC_URL if demo else self.PUBLIC_URL)
         self._reconnect_delay = reconnect_delay
         self._max_reconnect_delay = max_reconnect_delay
         self._connect_fn = connect_fn or _default_connect

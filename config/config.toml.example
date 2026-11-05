@@ -6,6 +6,9 @@ api_key = "${OKX_API_KEY}"
 secret = "${OKX_SECRET}"
 passphrase = "${OKX_PASSPHRASE}"
 demo = true                         # true=模拟盘，false=实盘；M1 可保持 true
+# 全局口径：行情/K线/ticker/OI 也会跟随 demo（模拟盘是独立虚拟市场）。
+# 本机需代理才能连 OKX WS 时填 http://host:port；不填=直连。
+# ws_proxy = "http://127.0.0.1:7897"
 
 [storage]
 data_dir = "./data"

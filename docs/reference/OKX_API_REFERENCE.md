@@ -23,6 +23,11 @@
 - 同域名，请求头加 `x-simulated-trading: 1`
 - 模拟盘与实盘的 `instIdCode` 不同，必须独立拉取 instrument 配置
 - 模拟盘Key与实盘Key**严禁复用**
+- **公开行情端点也受该头影响**（2026-11-05 A/B 实测）：带/不带头请求
+  `/api/v5/market/history-candles`，同一根已收盘 1H 的 `open` 一致，但
+  `high/low/close/vol` 不同，成交量可差 4~32 倍；`/market/ticker`、
+  `/public/open-interest` 同样不同，`/public/funding-rate` 两边相同。
+  模拟盘是独立虚拟市场，**行情不可与实盘互作参考**。
 
 ---
 
@@ -30,8 +35,10 @@
 
 | 频道类型 | 地址 |
 |---|---|
-| 公开频道 | `wss://ws.okx.com:8443/ws/v5/public` |
-| 私有频道 | `wss://ws.okx.com:8443/ws/v5/private` |
+| 公开频道（实盘） | `wss://ws.okx.com/ws/v5/public`（443；OKX 已通知 8443 即将弃用） |
+| 私有频道（实盘） | `wss://ws.okx.com/ws/v5/private` |
+| 公开频道（模拟盘） | `wss://wspap.okx.com/ws/v5/public` |
+| 私有频道（模拟盘） | `wss://wspap.okx.com/ws/v5/private` |
 
 ### 订单簿频道粒度
 
@@ -318,6 +325,8 @@ def build_headers(method: str, path: str, body: str = '',
 |---|---|---|
 | 域名 | `https://www.okx.com` | `https://www.okx.com` |
 | 鉴权Header | 加 `x-simulated-trading: 1` | 不加 |
+| 公共 WS 频道 | `wss://wspap.okx.com/ws/v5/public` | `wss://ws.okx.com/ws/v5/public`（443） |
+| 公开行情端点 | 返回模拟盘虚拟市场数据（K线/ticker/OI） | 返回实盘数据 |
 | API Key 创建位置 | 模拟盘 → API | 主账户 → API |
 | `instIdCode` | 与实盘**不同**，需独立拉 | 标准值 |
 | 资金 | 虚拟资金 | 真实资金 |

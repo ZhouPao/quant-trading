@@ -100,6 +100,7 @@ cd web && npm run typecheck && npm run build        # 或 npx tsc --noEmit
 12. **金额类指标前端要 4 位小数**（`AMOUNT_METRICS`），否则几分钱会被 `toFixed(2)` 抹成 0.00。
 13. **下单幂等**：`clOrdId` 由 `signal_id` 派生；超时先按 `clOrdId` 查，查到就复用，禁止直接重发。
 14. **不要新增第二条下单路径**：手工单也必须走 `ManualTrader` → 同一套风控/审计/状态机。
+15. **`[okx] demo` 是全局口径，不只是交易开关**：`x-simulated-trading: 1` 会加到所有 REST 请求（含 `/market/`、`/public/` 公开行情）。OKX 模拟盘是**独立虚拟市场**，K 线 / ticker / 持仓量与实盘不可互作参考（实测同一根 1H：开收盘接近，成交量差 4~32 倍）；`funding-rate` 则两边相同。模拟盘阶段整套保持同源（行情/回测/撮合/偏离度自洽），**不要把行情改成实盘**；WS 也必须按 demo 选 `wspap` 频道。切实盘前必须清 `.checkpoints` 重建历史数据，见 [RUNBOOK 1.1](docs/reference/RUNBOOK_PAPER_TRADING.md)。
 
 ## 7. 改动完成的标准
 

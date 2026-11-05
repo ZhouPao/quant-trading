@@ -29,6 +29,19 @@ API 凭证来自环境变量：`OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSPHRASE`�
 1. OKX 后台建**子账户** API Key：只勾「读取 + 交易」，**不要勾提币**，并绑定服务器公网 IP。
 2. 把新 Key 写入 `.env` 的 `OKX_API_KEY` / `OKX_SECRET` / `OKX_PASSPHRASE`。
 3. `config/config.toml` 把 `[okx] demo` 改为 `false`。
+
+   > **必须同时重建行情数据**：`demo` 是全局口径，`x-simulated-trading: 1`
+   > 会加到所有 REST 请求（含 `/market/`、`/public/` 公开行情），K 线 / ticker /
+   > 持仓量都跟着切。本地 parquet 与 `.checkpoints` 仍是模拟盘数据，断点会让
+   > 新旧行情接在同一条序列上。切换前先备份并清理断点，再重建 9 档历史：
+   >
+   > ```bash
+   > mv data/.checkpoints /tmp/candles-ckpt-demo-backup
+   > quant sync-candles --bar 1m,5m,15m,30m,1H,4H,6H,12H,1D --lookback-bars 320
+   > ```
+   >
+   > 随后刷新 `data/quality`、funding/OI 等派生数据，并重建日报偏离基线。
+
 4. 跑自检，必须没有 `[FAIL]`（主账户、未绑 IP 只给 `[WARN]`）：
 
    ```bash

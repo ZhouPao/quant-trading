@@ -588,6 +588,8 @@ export type CandlesResponse = {
   ts: number;
   inst: string;
   bar: string;
+  /** true=OKX 模拟盘虚拟市场行情（与实盘不可互作参考） */
+  demo: boolean;
   available_bars: string[];
   bars: CandleRow[];
   fills: CandleFill[];
