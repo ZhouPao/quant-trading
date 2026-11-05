@@ -3256,6 +3256,41 @@ WS 优先 → 同一 worker 两套行情：拿实盘价算 qty/名义/风控，�
 **验证**：`pytest` 全量 **1926 passed**、`vitest` **54 passed**、
 `tsc` / `build` / `ruff` 全过。
 
+### 8.103 左侧模块导航收缩展示（2026-11-05）
+
+用户要求「**先不做第三项**（C：首次同步自动补历史），在左侧模块一览加一个收缩展示」。
+C 保持搁置，本轮只做导航收缩，未触及 K 线同步逻辑。
+
+**实现**
+- `NAV_COLLAPSED_KEY` + `loadNavCollapsed()`：localStorage 持久化收起偏好；
+  隐私模式读/写失败按展开处理，不影响本次切换（与 `loadTab` 同口径）。
+- `navCollapsed` state + `toggleNav`（useCallback）；`.layout` 在收起时由
+  `204px` 改 `52px`（类 `layout-nav-collapsed`），`.sidebar` 加 `sidebar-collapsed`。
+- `nav-head` 内新增 `.nav-toggle` 切换按钮（`«` / `»`，带 `aria-expanded`、
+  `aria-controls`、`aria-label`、`title`）；收起时隐藏 `nav-title` / `nav-label` /
+  `nav-tag`，只留序号，并给每个导航按钮补 `aria-label` / `title`，
+  保证收起后 hover 与读屏仍能识别模块名。
+- CSS 窄屏（≤1080px）降级：该断点下导航本来就是横向滚动条，收缩没有意义 →
+  隐藏切换按钮、恢复标签显示与单列布局，避免把导航压没。
+
+**浏览器实机验收**（playwright，8080，1440×1000）
+
+| 场景 | 结果 |
+|---|---|
+| 默认展开 | `204px 1138px`、10 个标签可见、按钮 `«`、`aria-expanded=true` |
+| 点击收缩 | `52px 1290px`（主区 +152px）、0 标签、按钮 `»`、`stored=1`、序号 title 正确 |
+| 刷新 | 保持 `52px 1290px`、`aria-expanded=false` —— 持久化生效 |
+| 再点展开 | 恢复 `204px 1138px`、`stored=0`、10 标签 |
+| 市场监控页 | 收缩后图表 canvas 随主区变宽（ResizeObserver 生效）、9 档周期按钮在、无横向溢出 |
+| 窄屏 900px | 切换按钮 `display:none`、标签 `display:block`、layout 单列 846px |
+| 控制台 | 0 message / 0 error |
+
+截图 `/tmp/nav_expanded.png`、`/tmp/nav_collapsed.png`。
+
+**测试**：`test_frontend_styles.py` +1（DOM / 持久化 / CSS 文本契约）。
+**验证**：`pytest` 全量 **1927 passed**；`vitest` **54 passed**；
+`tsc` / `build` / `ruff` 全过。
+
 ---
 
 ## 9. 相关文档

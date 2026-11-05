@@ -337,6 +337,62 @@ code {
   color: var(--dimmer);
 }
 
+/* 左侧模块导航收缩：只留序号，主内容区自动占宽 */
+.nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.nav-head .nav-title {
+  margin-bottom: 0;
+}
+
+.nav-toggle {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: none;
+  color: var(--dimmer);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.nav-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.layout-nav-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
+.sidebar-collapsed .nav-title,
+.sidebar-collapsed .nav-label,
+.sidebar-collapsed .nav-tag {
+  display: none;
+}
+
+.sidebar-collapsed .nav-head {
+  justify-content: center;
+}
+
+.sidebar-collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 9px 4px;
+}
+
+.sidebar-collapsed .nav-idx {
+  font-size: 11px;
+}
+
 .placeholder {
   grid-column: 1 / -1;
 }
@@ -395,6 +451,30 @@ code {
 
   .nav-tag {
     display: none;
+  }
+
+  /* 窄屏导航已变横向滚动条，收缩没有意义：隐藏切换按钮并还原布局 */
+  .nav-toggle {
+    display: none;
+  }
+
+  .layout-nav-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar-collapsed .nav-title,
+  .sidebar-collapsed .nav-label {
+    display: block;
+  }
+
+  .sidebar-collapsed .nav-head {
+    justify-content: space-between;
+  }
+
+  .sidebar-collapsed .nav-item {
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 9px 10px;
   }
 }
 

@@ -115,6 +115,21 @@ def test_candles_page_labels_market_regime() -> None:
     assert 'data?.demo === false' in APP
 
 
+def test_sidebar_collapse_control() -> None:
+    """左侧模块导航可收缩：DOM 状态、持久化与 CSS 都齐备。"""
+    assert "NAV_COLLAPSED_KEY" in APP
+    assert "loadNavCollapsed" in APP
+    assert "nav-toggle" in APP
+    assert "layout-nav-collapsed" in APP
+    assert "sidebar-collapsed" in APP
+    assert "aria-expanded={!navCollapsed}" in APP
+    assert "aria-controls=\"module-nav-list\"" in APP
+    assert ".nav-toggle" in CSS
+    assert ".layout-nav-collapsed" in CSS
+    assert ".sidebar-collapsed .nav-label" in CSS
+    assert ".sidebar-collapsed .nav-item" in CSS
+
+
 def test_subplot_height_and_min_bar_height() -> None:
     """小成交量柱不能被极端峰值压成不可见：柱高保底 + VOL 副图加权。"""
     options_ts = (SRC / "chart" / "options.ts").read_text(encoding="utf-8")

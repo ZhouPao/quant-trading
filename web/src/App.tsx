@@ -288,10 +288,20 @@ function timelineTone(item: TimelineItem): string {
 }
 
 const TAB_KEY = "quant.dashboard.tab";
+const NAV_COLLAPSED_KEY = "quant.dashboard.navCollapsed";
 
 function loadTab(): TabKey {
   const raw = window.localStorage.getItem(TAB_KEY);
   return TABS.some((item) => item.key === raw) ? (raw as TabKey) : "overview";
+}
+
+/** 侧栏收缩偏好：隐私模式下 localStorage 不可读时按展开处理。 */
+function loadNavCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 // 尚未实现的模块只展示范围说明，避免空白页让人误以为功能已就绪
@@ -376,6 +386,8 @@ export default function App() {
   // 人工恢复熔断后立即重取，不必等下一次轮询
   const [riskRefresh, setRiskRefresh] = useState(0);
   const [tab, setTab] = useState<TabKey>(loadTab);
+  // 左侧模块导航收缩：只留序号，主内容区自动占宽
+  const [navCollapsed, setNavCollapsed] = useState(loadNavCollapsed);
   // M3-16：策略详情页跳回测时带过去的目标策略与组合
   const [backtestPreset, setBacktestPreset] = useState<BacktestPreset | null>(
     null
@@ -421,6 +433,18 @@ export default function App() {
     } catch {
       // 隐私模式下不持久化，切换仍然生效
     }
+  }, []);
+
+  const toggleNav = useCallback(() => {
+    setNavCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(NAV_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        // 隐私模式下不持久化，本次收缩仍然生效
+      }
+      return next;
+    });
   }, []);
 
   // M8-12：订单筛选（300ms 防抖；空筛选不请求，直接复用 overview 的 30 条）
@@ -860,17 +884,32 @@ export default function App() {
         </div>
       )}
 
-      <div className="layout">
-        <aside className="sidebar">
+      <div className={`layout ${navCollapsed ? "layout-nav-collapsed" : ""}`}>
+        <aside className={`sidebar ${navCollapsed ? "sidebar-collapsed" : ""}`}>
           <nav aria-label="模块导航">
-            <span className="nav-title">模块</span>
-            <ul className="nav-list">
+            <div className="nav-head">
+              <span className="nav-title">模块</span>
+              <button
+                type="button"
+                className="nav-toggle"
+                onClick={toggleNav}
+                aria-expanded={!navCollapsed}
+                aria-controls="module-nav-list"
+                aria-label={navCollapsed ? "展开模块导航" : "收起模块导航"}
+                title={navCollapsed ? "展开模块导航" : "收起模块导航"}
+              >
+                {navCollapsed ? "»" : "«"}
+              </button>
+            </div>
+            <ul className="nav-list" id="module-nav-list">
               {TABS.map((item, index) => (
                 <li key={item.key}>
                   <button
                     type="button"
                     className={`nav-item ${tab === item.key ? "nav-on" : ""}`}
                     aria-current={tab === item.key ? "page" : undefined}
+                    aria-label={navCollapsed ? item.label : undefined}
+                    title={navCollapsed ? item.label : undefined}
                     onClick={() => selectTab(item.key)}
                   >
                     <span className="nav-idx">{String(index + 1).padStart(2, "0")}</span>
