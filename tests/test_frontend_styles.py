@@ -132,6 +132,17 @@ def test_m3_engine_sections_have_real_headings_and_collapse() -> None:
     assert ".param-head .card-note" in CSS
 
 
+def test_m3_section_detail_cleanup() -> None:
+    """阶段2：告警合并、说明收敛、绑定表单网格化、列表行对齐。"""
+    assert "bindingAlerts" in APP
+    assert "engine-status-bar" in APP
+    assert "param-head binding-form" in APP
+    assert ".engine-status-bar" in CSS
+    assert "-webkit-line-clamp: 2" in CSS
+    assert ".param-head.binding-form" in CSS
+    assert ".param-history li" in CSS
+
+
 def test_sidebar_collapse_control() -> None:
     """左侧模块导航可收缩：DOM 状态、持久化与 CSS 都齐备。"""
     assert "NAV_COLLAPSED_KEY" in APP

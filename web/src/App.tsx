@@ -3689,6 +3689,15 @@ function EnginePanel({
         : lag > (engine?.max_catchup_bars ?? 24)
           ? "tag-bad"
           : "tag-warn";
+  // 三条常驻红字合并成一条状态条，避免同一区块里堆多块告警
+  const bindingAlerts = [
+    !multiBinding &&
+      "已开启单组合回滚（multi_binding=false）：启停矩阵不生效",
+    pineGate === "not_covered" &&
+      "当前参数集未做 Pine 交叉验证，偏离门禁未覆盖；启用绑定不会被 5% 偏离度检查拦截",
+    pineGate === "blocked" &&
+      "当前参数集与 Pine 基线偏离度超过 5%，启用新绑定会被后端拒绝",
+  ].filter((item): item is string => Boolean(item));
   return (
     <section className="card engine reveal" style={{ animationDelay: "120ms" }}>
       <div className="card-head">
@@ -3940,21 +3949,16 @@ function EnginePanel({
             停用只停止新开仓，已有持仓保留
           </span>
         </div>
-        {!multiBinding && (
-          <div className="kill-msg kill-msg-bad">
-            已开启单组合回滚（multi_binding=false），引擎只跑配置里的主组合，
-            此矩阵不生效
-          </div>
-        )}
-        {pineGate === "not_covered" && (
-          <div className="kill-msg kill-msg-bad">
-            当前参数集未做 Pine 交叉验证，偏离门禁未覆盖：启用绑定不会被
-            5% 偏离度检查拦截。切实盘前请先补一次基线对比。
-          </div>
-        )}
-        {pineGate === "blocked" && (
-          <div className="kill-msg kill-msg-bad">
-            当前参数集与 Pine 基线偏离度超过 5%，启用新绑定会被后端拒绝。
+        {bindingAlerts.length > 0 && (
+          <div className="engine-status-bar">
+            <span className="engine-status-count">
+              {bindingAlerts.length} 项待处理
+            </span>
+            <ul>
+              {bindingAlerts.map((text) => (
+                <li key={text}>{text}</li>
+              ))}
+            </ul>
           </div>
         )}
         {bindings.length === 0 ? (
@@ -3989,7 +3993,7 @@ function EnginePanel({
             ))}
           </ul>
         )}
-        <div className="param-head">
+        <div className="param-head binding-form">
           <input
             className="kill-input"
             placeholder="品种，如 ETH-USDT"

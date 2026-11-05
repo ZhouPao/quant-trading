@@ -3339,6 +3339,26 @@ C 保持搁置，本轮只做导航收缩，未触及 K 线同步逻辑。
 **验证**：`pytest` 全量 **1928 passed**、`vitest` **56 passed**、
 `tsc` / `build` / `ruff` 全过。
 
+### 8.105 M3「策略研究」归位（二）：节内精修（2026-11-05）
+
+- 三条常驻红字（`multi_binding=false` / `pineGate=not_covered` /
+  `blocked`）合并为一条 `.engine-status-bar`（计数 + 明细列表），
+  不再在同一区块堆多块告警。
+- 7 条 `.kill-note` 长说明默认只显示 2 行（`-webkit-line-clamp`），
+  hover 展开全文，减少每节底部的灰字墙。
+- 「新增绑定」表单从 `.param-head`（标题栏语义）拆出 `.binding-form`
+  网格（2 input + 按钮），窄屏 ≤760px 自动单列。
+- `.param-history li` 加行分隔与首列最小宽度，四类列表换行后仍可扫读。
+  **范围说明**：未做完整表格化——4 类列表字段数不同，改 DOM 结构
+  风险高于收益；先用低风险 CSS 收敛。
+
+**实机验收**：状态条 1 个 / 旧红块 0、`lineClamp=2`、
+表单 `grid` 3 列 → 720px 窄屏 1 列、无横向溢出、控制台 0 error。
+
+**测试**：`test_frontend_styles.py` +1（告警合并/说明收敛/表单网格/列表行）。
+**验证**：`pytest` 全量 **1929 passed**、`vitest` **56 passed**、
+`tsc` / `build` / `ruff` 全过。
+
 ---
 
 ## 9. 相关文档

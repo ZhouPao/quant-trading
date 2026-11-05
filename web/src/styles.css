@@ -2183,6 +2183,75 @@ tbody tr.row-active td:first-child {
   display: none;
 }
 
+/* ---- M3 节内精修：告警合并 / 说明收敛 / 表单网格 / 列表行对齐 ---- */
+.engine-status-bar {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 95, 95, 0.28);
+  border-left: 2px solid var(--bad);
+  background: rgba(255, 95, 95, 0.045);
+}
+
+.engine-status-count {
+  display: inline-block;
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--bad);
+}
+
+.engine-status-bar ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+/* 长说明默认 2 行，hover 展开全文，避免每节底部堆一大段灰字 */
+.param-panel .kill-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.param-panel .kill-note:hover {
+  -webkit-line-clamp: unset;
+}
+
+/* 新增绑定表单：三控件网格对齐 */
+.param-head.binding-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.param-head.binding-form .kill-input {
+  min-width: 0;
+  width: 100%;
+}
+
+/* 列表行分隔 + 首列最小宽度，换行后仍可扫读 */
+.param-history li {
+  align-items: center;
+  gap: 6px 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(226, 240, 228, 0.05);
+}
+
+.param-history li > :first-child {
+  min-width: 110px;
+}
+
+@media (max-width: 760px) {
+  .param-head.binding-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .param-head {
   display: flex;
   align-items: center;
