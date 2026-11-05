@@ -1405,19 +1405,43 @@ class TestMultiPeriodSupport:
 
     def test_sync_once_covers_every_inst_and_bar(self) -> None:
         calls: list[tuple[str, str]] = []
+        first_sync_seen: list[int] = []
 
         class _Fetcher:
-            def sync(self, inst: str, bar: str, lookback_bars: int = 3) -> int:
+            def sync(
+                self,
+                inst: str,
+                bar: str,
+                lookback_bars: int = 3,
+                *,
+                first_sync_bars: int = 0,
+            ) -> int:
                 calls.append((inst, bar))
+                first_sync_seen.append(first_sync_bars)
                 return 1
 
-        total = _sync_once(_Fetcher(), ["A", "B"], ["1H", "6H"], 3, MagicMock())
+        total = _sync_once(
+            _Fetcher(),
+            ["A", "B"],
+            ["1H", "6H"],
+            3,
+            MagicMock(),
+            first_sync_bars=300,
+        )
         assert calls == [("A", "1H"), ("B", "1H"), ("A", "6H"), ("B", "6H")]
         assert total == 4
+        assert first_sync_seen == [300, 300, 300, 300]
 
     def test_sync_once_continues_after_one_failure(self) -> None:
         class _Fetcher:
-            def sync(self, inst: str, bar: str, lookback_bars: int = 3) -> int:
+            def sync(
+                self,
+                inst: str,
+                bar: str,
+                lookback_bars: int = 3,
+                *,
+                first_sync_bars: int = 0,
+            ) -> int:
                 if inst == "BAD":
                     raise RuntimeError("boom")
                 return 2

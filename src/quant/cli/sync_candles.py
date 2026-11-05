@@ -63,6 +63,7 @@ def _sync_once(
     log,
     reporter=None,
     window_bars: int = 5000,
+    first_sync_bars: int = 0,
 ) -> int:
     """同步一轮（insts × bars），返回净增根数合计。
 
@@ -73,7 +74,12 @@ def _sync_once(
     for bar in bars:
         for inst in insts:
             try:
-                total += fetcher.sync(inst, bar, lookback_bars=lookback_bars)
+                total += fetcher.sync(
+                    inst,
+                    bar,
+                    lookback_bars=lookback_bars,
+                    first_sync_bars=first_sync_bars,
+                )
             except Exception as e:  # noqa: BLE001
                 log.error(f"sync failed inst={inst} bar={bar}: {e}")
                 continue
@@ -125,6 +131,7 @@ def main(args) -> int:
         if args.lookback_bars is not None
         else settings.candles.lookback_bars
     )
+    first_sync_bars = settings.candles.first_sync_bars
 
     client = OKXClient(settings.okx)
     redis_client = None
@@ -138,7 +145,8 @@ def main(args) -> int:
         window_bars = settings.quality.window_bars
         if not args.loop:
             total = _sync_once(
-                fetcher, insts, bars, lookback, log, reporter, window_bars
+                fetcher, insts, bars, lookback, log, reporter, window_bars,
+                first_sync_bars,
             )
             log.info(f"sync done insts={insts} bars={bars} new={total}")
             return 0
@@ -154,7 +162,8 @@ def main(args) -> int:
         while True:
             started = time.monotonic()
             total = _sync_once(
-                fetcher, insts, bars, lookback, log, reporter, window_bars
+                fetcher, insts, bars, lookback, log, reporter, window_bars,
+                first_sync_bars,
             )
             _beat(redis_client, interval, log)
             log.info(f"sync round done insts={insts} bars={bars} new={total}")

@@ -104,5 +104,15 @@ def test_candle_sync_config_covers_all_periods() -> None:
     assert "bars = [" in text
     for bar in NINE_BARS:
         assert f'"{bar}"' in text, f"示例配置缺少周期 {bar}"
+    assert "first_sync_bars = 300" in text
+
+
+def test_chart_bar_width_cap_and_sparse_hint() -> None:
+    """本地数据少时柱宽有上限，并显式提示补历史（M2-12）。"""
+    options_ts = (SRC / "chart" / "options.ts").read_text(encoding="utf-8")
+    assert "MAX_BAR_WIDTH" in options_ts
+    assert options_ts.count("barMaxWidth: MAX_BAR_WIDTH") == 3
+    assert "SPARSE_BARS" in APP
+    assert "该周期本地仅" in APP
     # 组合管理确实还没做，保留 todo
     assert '{ key: "portfolio", label: "组合管理", status: "todo" }' in APP

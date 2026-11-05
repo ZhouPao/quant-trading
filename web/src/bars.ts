@@ -18,6 +18,9 @@ export const BAR_OPTIONS = [
 export type BarOption = (typeof BAR_OPTIONS)[number];
 export type BarDataState = "ready" | "missing" | "unknown";
 
+/** 少于这个根数时提示补历史：柱宽有上限，但指标仍需要足够样本。 */
+export const SPARSE_BARS = 30;
+
 /**
  * `available` 来自 `GET /api/candles` 的 `available_bars`（本地有 parquet 的周期）。
  * 接口还没返回、或读取降级时返回 unknown——不能把全部周期误标成「无数据」。

@@ -39,6 +39,9 @@ const MA_COLORS = ["#f2c14f", "#4fa3f2", "#c8f24f", "#e07be0", "#9aa7a0"];
 /** 默认展示最近约 120 根，避免 300 根挤在一起。 */
 export const VISIBLE_BARS = 120;
 
+/** 蜡烛/柱状最大像素宽度：本地只有几根数据时 ECharts 自适应会把它们撑满整屏。 */
+export const MAX_BAR_WIDTH = 12;
+
 export function defaultZoom(length: number): ZoomRange {
   if (length <= VISIBLE_BARS) return { start: 0, end: 100 };
   return { start: ((length - VISIBLE_BARS) / length) * 100, end: 100 };
@@ -123,6 +126,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
       type: "candlestick",
       xAxisIndex: 0,
       yAxisIndex: 0,
+      barMaxWidth: MAX_BAR_WIDTH,
       data: bars.map((item) => [item.open, item.close, item.low, item.high]),
       itemStyle: {
         color: COLOR.up,
@@ -192,6 +196,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
         xAxisIndex: gridIndex,
         yAxisIndex: gridIndex,
         barWidth: "60%",
+        barMaxWidth: MAX_BAR_WIDTH,
         data: bars.map((item) => ({
           value: item.vol,
           itemStyle: {
@@ -220,6 +225,7 @@ export function buildChartOption(input: BuildInput): EChartsOption {
         xAxisIndex: gridIndex,
         yAxisIndex: gridIndex,
         barWidth: "55%",
+        barMaxWidth: MAX_BAR_WIDTH,
         data: macdValues.hist.map((value) => ({
           value,
           itemStyle: {

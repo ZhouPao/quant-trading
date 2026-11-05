@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { atr, boll, ema, kdj, macd, pivotLevels, rma, sma, supertrend } from "./indicators";
-import { buildChartOption, defaultZoom, formatTime, toBars } from "./options";
+import { MAX_BAR_WIDTH, buildChartOption, defaultZoom, formatTime, toBars } from "./options";
 import { mergeSettings, parsePeriods, type Bar } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -173,6 +173,32 @@ describe("图表时间轴与缩放", () => {
       expect(dz.xAxisIndex).toEqual([0, 1, 2]);
       expect(dz.start).toBeCloseTo(zoom.start);
       expect(dz.end).toBeCloseTo(zoom.end);
+    }
+  });
+
+  it("蜡烛/VOL/MACD 柱宽有上限，数据少时不撑满整屏（M2-12）", () => {
+    const bars: Bar[] = [
+      { ts: 0, open: 1, high: 2, low: 0.5, close: 1.5, vol: 10 },
+      { ts: 3_600_000, open: 1.5, high: 2.5, low: 1, close: 2, vol: 12 },
+    ];
+    const option = buildChartOption({
+      bars,
+      settings: DEFAULT_SETTINGS,
+      fills: [],
+      position: null,
+      bar: "1H",
+      zoom: null,
+    }) as unknown as {
+      series: { type?: string; barMaxWidth?: number }[];
+    };
+
+    // 默认设置开 VOL + MACD：1 个蜡烛 + 2 个柱系列
+    const columnSeries = option.series.filter(
+      (item) => item.type === "candlestick" || item.type === "bar",
+    );
+    expect(columnSeries).toHaveLength(3);
+    for (const item of columnSeries) {
+      expect(item.barMaxWidth).toBe(MAX_BAR_WIDTH);
     }
   });
 

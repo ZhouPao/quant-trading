@@ -200,6 +200,8 @@ class CandleFetcher:
         bar_size: str,
         now_ts: int | None = None,
         lookback_bars: int = 3,
+        *,
+        first_sync_bars: int = 0,
     ) -> int:
         """增量同步到最近一根已收盘 K线，返回净增根数。
 
@@ -228,7 +230,11 @@ class CandleFetcher:
             # 把断点退到 start_ts 前一根，让 fetch 的 cursor 正好落在 start_ts
             self._save_checkpoint(inst_id, bar_size, start_ts - bar_ms)
         else:
-            start_ts = max(0, last_closed - lookback_bars * bar_ms)
+            # 首次同步（无断点）只拉 lookback_bars 根会让新周期图表只剩几根
+            # K 线（M2-12）；配置 first_sync_bars 时一次补够历史，之后
+            # 仍按 lookback_bars 增量，不会每轮重复拉全历史。
+            effective_lookback = max(lookback_bars, first_sync_bars)
+            start_ts = max(0, last_closed - effective_lookback * bar_ms)
 
         if start_ts > last_closed:
             _log.info(

@@ -179,6 +179,9 @@ class CandleSyncSettings(BaseModel):
     insts: list[str] = Field(default_factory=lambda: ["BTC-USDT"])
     bar: str = "1H"
     bars: list[str] = Field(default_factory=list)   # 为空时回落为 [bar]
+    #: 新周期首次同步补的历史根数（M2-12）；0 表示只拉 lookback_bars。
+    #: 否则新周期只有几根 K 线，图表会被自适应撑成巨粗蜡烛。
+    first_sync_bars: int = 300
     interval_seconds: int = 300             # 轮询间隔，0 表示跑一次即退出
     lookback_bars: int = 3                  # 每次回看几根，顺带补断点附近的洞
 

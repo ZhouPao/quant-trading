@@ -396,6 +396,31 @@ class TestSync:
         # 最近已收盘是 99h；回看 3 根 -> 起于 96h；首页 after=99h+1
         assert kwargs["after"] == 99 * self.HOUR + 1
 
+    def test_fresh_start_backfills_history_when_configured(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """首次同步按配置补历史，避免新周期只有几根 K 线（M2-12）。"""
+        fetcher = CandleFetcher(_make_client([[]]), tmp_path)
+        calls: list[tuple[int, int]] = []
+
+        def spy(
+            inst_id: str, bar_size: str, start_ts: int, end_ts: int
+        ) -> int:
+            calls.append((start_ts, end_ts))
+            return 0
+
+        monkeypatch.setattr(fetcher, "fetch", spy)
+        fetcher.sync(
+            "BTC-USDT",
+            "1H",
+            now_ts=self.NOW,
+            lookback_bars=3,
+            first_sync_bars=50,
+        )
+
+        # 最近已收盘 99h；首次补 50 根 -> 起始 49h
+        assert calls == [(49 * self.HOUR, 99 * self.HOUR)]
+
     def test_no_new_bars_returns_zero(self, tmp_path: Path) -> None:
         """最近几根已存在时净增为 0（重拉是覆盖，不新增）。"""
         fetcher = CandleFetcher(_make_client([]), tmp_path)

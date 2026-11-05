@@ -151,7 +151,7 @@ import {
   meanQuantileReturns,
   validateRange,
 } from "./factors";
-import { BAR_OPTIONS, barDataState } from "./bars";
+import { BAR_OPTIONS, SPARSE_BARS, barDataState } from "./bars";
 import { loadSettings, saveSettings } from "./chart/settings";
 import type { ChartSettings } from "./chart/types";
 import "./styles.css";
@@ -4565,6 +4565,12 @@ function ChartPanel() {
         <span>成交点来自 SQLite fills</span>
         {barStates.some((item) => item.state === "missing") && (
           <span>带 · 的周期本地暂无数据（仍可切换查看提示）</span>
+        )}
+        {data && data.bars.length > 0 && data.bars.length < SPARSE_BARS && (
+          <span className="chart-stale">
+            该周期本地仅 {data.bars.length} 根 K 线：柱宽已限制，指标可能不完整；
+            运行 quant sync-candles --bar {data.bar} --lookback-bars 320 补历史
+          </span>
         )}
         {data &&
           data.bars.length > 0 &&

@@ -3114,6 +3114,43 @@ CSS 类名缺失与网格跨度漏写，是上一批（8.96）的验收失职。
 
 **账本**：M2-12 说明更新为「9 档常驻 + 缺失标记」，完成度不变（仍 ✅）。
 
+### 8.100 M2 K 线周期联动修复：数据密度 + 柱宽上限（2026-11-05）
+
+**问题**：8.99 恢复 9 档按钮后，切到 4H/1D 等周期时 K 线极粗（5 根蜡烛铺满
+1136px，每根约 200px），指标也几乎全空，看起来像「联动坏了」。
+
+**排查**：联动链条本身是通的（`fetchCandles(bar)` →
+`service.candles(since = now - (limit+1)*bar_ms)` → `CandleChart` 按
+`data.bar` 重置 zoom 与 `formatTime`）。真实原因是：
+1. 8.99 用 `sync-candles`（lookback=3）只补了最近几根：实测 1m 19 根、
+   4H/1D 各 5 根，而 1H 有 73 根；
+2. `options.ts` 的 candlestick 没有 `barWidth/barMaxWidth`，VOL/MACD 用
+   `barWidth:"60%"/"55%"`，`defaultZoom(length<=120)` 又 100% 全显示 →
+   ECharts 自适应把每根撑到图宽/N；
+3. MA20/BOLL20/MACD(12,26,9)/KDJ(9) 在几根数据下算不出，加剧「像坏了」的观感。
+
+**修复（A → B → C）**
+- **A 数据**：跑 `quant sync-candles --bar 1m,...,1D --lookback-bars 320`
+  （`new=2766`），按周期回补最近约 320 根，不拉无用长历史；9 档经
+  `/api/candles` 实测均返回 294~300 根。
+- **B 图表**：`options.ts` 新增 `MAX_BAR_WIDTH=12`，蜡烛 / VOL / MACD 三个柱
+  系列都加 `barMaxWidth`；`bars.ts` 新增 `SPARSE_BARS=30`，根数不足时 K 线页
+  **显式提示**「该周期本地仅 N 根 + 可直接复制的补历史命令」（不静默降级）。
+- **C 防复发**：`CandleSyncSettings.first_sync_bars=300`；`CandleFetcher.sync`
+  新增可选 `first_sync_bars`（默认 0，旧行为不变），**无断点的新周期首次同步
+  一次补够历史**，之后仍按 `lookback_bars` 增量；`_sync_once` / `main` 透传。
+
+**验证**
+- `pytest` 全量 **1920 passed**（+2：首次补历史单测、柱宽/少数据文本契约；
+  另修 `test_cli.py` 两处假 Fetcher 签名并断言 `first_sync_bars` 透传——
+  宽泛 except 曾把签名不兼容吞成「同步失败」，测试先行发现）；
+- `vitest` **52 passed**（+1：三个柱系列都有 `barMaxWidth`）；
+  `tsc` / `build` / `ruff` 全过；
+- 浏览器实机：1H 与 1D 均显示 300 根、K 线密度正常、指标齐全；mock 仅
+  3 根时柱宽被限为 12px 且出现少数据提示；控制台 0 error。
+
+**账本**：M2-12 说明补注本次联动修复，完成度不变（仍 ✅）。
+
 ---
 
 ## 9. 相关文档
