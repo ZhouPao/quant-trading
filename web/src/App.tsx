@@ -259,6 +259,8 @@ type BacktestPreset = {
   bar?: string;
   runId?: string;
   pick?: string[];
+  // 从 M3 串到 M4 的研究模式：只切模式并预填，不自动提交任务
+  mode?: "optimize" | "batch" | "walkforward";
   nonce: number;
 };
 
@@ -3290,6 +3292,7 @@ function EnginePanel({
     bar?: string;
     runId?: string;
     pick?: string[];
+    mode?: "optimize" | "batch" | "walkforward";
   }) => void;
 }) {
   const [info, setInfo] = useState<StrategyInfo | null>(null);
@@ -3802,6 +3805,61 @@ function EnginePanel({
           open={sectionOpen.params}
           onToggle={toggleSection}
           summary={`${specs.length} 个可调参数`}
+          actions={
+            <>
+              <button
+                type="button"
+                className="kill-btn kill-btn-sm"
+                disabled={!strategyId}
+                title="在回测分析页用网格搜索检验参数是否过拟合"
+                onClick={() =>
+                  strategyId &&
+                  onOpenBacktest?.({
+                    strategy: strategyId,
+                    inst: engine?.inst,
+                    bar: engine?.bar,
+                    mode: "optimize",
+                  })
+                }
+              >
+                参数寻优
+              </button>
+              <button
+                type="button"
+                className="kill-btn kill-btn-sm"
+                disabled={!strategyId}
+                title="样本内选参、样本外验证（walk-forward）"
+                onClick={() =>
+                  strategyId &&
+                  onOpenBacktest?.({
+                    strategy: strategyId,
+                    inst: engine?.inst,
+                    bar: engine?.bar,
+                    mode: "walkforward",
+                  })
+                }
+              >
+                滚动窗口检验
+              </button>
+              <button
+                type="button"
+                className="kill-btn kill-btn-sm"
+                disabled={!strategyId}
+                title="跨品种 / 跨周期批量回测，看参数稳健性"
+                onClick={() =>
+                  strategyId &&
+                  onOpenBacktest?.({
+                    strategy: strategyId,
+                    inst: engine?.inst,
+                    bar: engine?.bar,
+                    mode: "batch",
+                  })
+                }
+              >
+                多样本回测
+              </button>
+            </>
+          }
         />
         <div className="param-head">
           <span className="card-note">
@@ -5143,7 +5201,7 @@ function BacktestPanel({
     if (!preset) return;
     if (consumedNonce.current === preset.nonce) return;
     consumedNonce.current = preset.nonce;
-    setMode("backtest");
+    setMode(preset.mode ?? "backtest");
     setStrategy(preset.strategy);
     if (preset.inst) setInst(preset.inst);
     if (preset.bar) setBar(preset.bar);
@@ -5155,6 +5213,9 @@ function BacktestPanel({
     } else if (preset.pick && preset.pick.length >= 2) {
       // M3-18：只把参数版本设为对比对象，不重复提交任务
       setPicked(preset.pick.slice(0, COMPARE_LIMIT));
+      setRun(null);
+    } else if (preset.mode) {
+      // M3 串联 M4：只切模式 + 预填策略/品种/周期，网格与区间由用户确认后再提交
       setRun(null);
     } else {
       void submit({

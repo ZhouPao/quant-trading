@@ -152,6 +152,15 @@ def test_m3_strategy_switcher() -> None:
     assert ".engine-strategy-chip" in CSS
 
 
+def test_m3_links_to_m4_research_modes() -> None:
+    """阶段4：M3 参数区串联 M4 三种稳健性检验，且不能自动提交任务。"""
+    assert 'mode?: "optimize" | "batch" | "walkforward"' in APP
+    assert 'setMode(preset.mode ?? "backtest")' in APP
+    assert "else if (preset.mode) {" in APP
+    for mode in ("optimize", "walkforward", "batch"):
+        assert f'mode: "{mode}"' in APP
+
+
 def test_sidebar_collapse_control() -> None:
     """左侧模块导航可收缩：DOM 状态、持久化与 CSS 都齐备。"""
     assert "NAV_COLLAPSED_KEY" in APP
