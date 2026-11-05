@@ -2117,6 +2117,72 @@ tbody tr.row-active td:first-child {
   padding-top: 12px;
 }
 
+/* M3 分节：真标题 + 折叠 + 摘要 + 动作。
+   折叠用 CSS 隐藏除分节头外的直接子元素，内容仍在 DOM 里，
+   轮询/懒加载不会因收起而中断。 */
+.engine-section-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.engine-section-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.engine-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.engine-section-toggle:hover {
+  color: var(--accent);
+}
+
+.engine-caret {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line-strong);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.engine-section-summary {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
+.engine-section-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.param-panel[data-collapsed="true"] {
+  padding-bottom: 2px;
+}
+
+.param-panel[data-collapsed="true"] > :not(.engine-section-head) {
+  display: none;
+}
+
 .param-head {
   display: flex;
   align-items: center;
@@ -3944,10 +4010,18 @@ tbody tr:hover {
   vertical-align: top;
 }
 
-/* 卡片标题右侧注记允许换行，避免长文案挤压标题 */
+/* 卡片标题右侧注记允许换行，避免长文案挤压标题。
+   text-align:right 只在卡片头生效：此前全局生效，把 M3 分区标题也压成右对齐。 */
 .card-note {
   white-space: normal;
+}
+
+.card-head .card-note {
   text-align: right;
+}
+
+.param-head .card-note {
+  text-align: left;
 }
 
 /* ---------------- empty & footer ---------------- */

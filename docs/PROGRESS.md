@@ -3291,6 +3291,54 @@ C 保持搁置，本轮只做导航收缩，未触及 K 线同步逻辑。
 **验证**：`pytest` 全量 **1927 passed**；`vitest` **54 passed**；
 `tsc` / `build` / `ruff` 全过。
 
+### 8.104 M3「策略研究」归位（一）：分节折叠与真标题（2026-11-05）
+
+**0-A 实机量测**（1440×1200，playwright）：单卡片 **914px**、6 个 `.param-panel`
+平铺、`h2=1 / h3=0`、7 条说明 + 1 条常驻红字；`docScroll == docClient`
+→ **无横向溢出**，排除上轮怀疑的 `tbody td{nowrap}` 溢出。PRD 4.3 声明
+「M3 不负责回测结果统计」，但 M3-15/17/18 把结果类信息整块塞进详情页，
+实现又没做「摘要 + 跳转」→ 定位跑偏是页面乱的业务根因。
+
+**0-B 账本纠偏**（`a5321e5`，独立提交）：合计 131/5/14/3 → **132/4/14/3**、
+87.3% → **88.0%**、剩余 19 → **18 条**；3.3/3.5 表头、4.1/4.2/4.3、
+里程碑对照、6 节不一致项、7 节顺序、8 节结论、早期总览全部刷新。
+
+**阶段 1 实现**
+- 新增 `web/src/engine/Section.tsx`：`ENGINE_SECTIONS` 6 节、
+  `useEngineSections`（按节 localStorage 持久化，默认只开 `params`/`bindings`）、
+  `EngineSectionHead`（真 `<h3>` + 折叠按钮 + `aria-expanded`/`aria-controls`
+  + 摘要 + 动作）。
+- `App.tsx` 6 个 `.param-panel` 加 `data-collapsed` 与分节头；折叠用 CSS
+  `:not(.engine-section-head)` 隐藏，内容仍在 DOM 中，轮询/懒加载不中断，
+  且**不用改写 6 个区块的结尾**（低风险）。
+- 结果类归位：`runs`/`compare` 收起时只留一行摘要 +「在回测页看最近结果 /
+  在回测页对比」按钮（复用 `onOpenBacktest` 的 `runId` / `pick`，
+  不新增接口）；完整内容展开后仍保留，M3-17/18 功能未删。
+- 修 8.98 引入的样式回归：`.card-note` 的 `text-align:right` 收进
+  `.card-head`，`.param-head .card-note` 显式左对齐。
+
+**实机验收**（8080）
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 卡片高 | 914 | **756**（−17%） |
+| `h3` 数量 | 0 | **6** |
+| 默认展开 | 全 6 块 | params + bindings |
+| 分区说明对齐 | right（被污染） | left |
+| 横向溢出 | 无 | 无 |
+
+折叠/展开、刷新持久化（`quant.engine.section.runs=1`）、跳 M4
+（tab 切到「04回测分析」且 `.backtest` 渲染）均通过；控制台 0 error。
+
+**范围说明（如实）**：本轮抽出的是**分节容器组件**；`EnginePanel` 主体
+（约 1200 行、30+ state）未整体拆分。一次拆分会把 6 组副作用与回调一并
+重构，风险高于收益，改为后续按节内精修时逐步抽取纯展示组件。
+
+**测试**：`Section.test.ts` +2（6 节 id/标题、默认展开策略）、
+`test_frontend_styles.py` +1（分节/真 h3/折叠规则/card-note 作用域）。
+**验证**：`pytest` 全量 **1928 passed**、`vitest` **56 passed**、
+`tsc` / `build` / `ruff` 全过。
+
 ---
 
 ## 9. 相关文档

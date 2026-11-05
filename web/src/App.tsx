@@ -152,6 +152,7 @@ import {
   validateRange,
 } from "./factors";
 import { BAR_OPTIONS, SPARSE_BARS, barDataState } from "./bars";
+import { EngineSectionHead, useEngineSections } from "./engine/Section";
 import { loadSettings, saveSettings } from "./chart/settings";
 import type { ChartSettings } from "./chart/types";
 import "./styles.css";
@@ -3332,6 +3333,8 @@ function EnginePanel({
     () => new Set()
   );
   const strategyId = engine?.strategy;
+  // M3 归位：6 个区块改分节折叠，默认只开参数与启停，偏好按节持久化
+  const { open: sectionOpen, toggle: toggleSection } = useEngineSections();
 
   const loadInfo = useCallback(
     async (signal?: AbortSignal) => {
@@ -3743,7 +3746,13 @@ function EnginePanel({
           </dd>
         </div>
       </dl>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.params}>
+        <EngineSectionHead
+          id="params"
+          open={sectionOpen.params}
+          onToggle={toggleSection}
+          summary={`${specs.length} 个可调参数`}
+        />
         <div className="param-head">
           <span className="card-note">
             {infoError
@@ -3846,10 +3855,16 @@ function EnginePanel({
           </div>
         )}
       </div>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.history}>
+        <EngineSectionHead
+          id="history"
+          open={sectionOpen.history}
+          onToggle={toggleSection}
+          summary={`${changes.length} 条变更`}
+        />
         <div className="param-head">
           <span className="card-note">
-            参数变更历史（最近 {changes.length} 条）· 回滚会追加新记录，不删历史
+            回滚会追加新记录，不删历史
           </span>
         </div>
         {changes.length === 0 ? (
@@ -3913,10 +3928,16 @@ function EnginePanel({
         {error && <div className="kill-msg kill-msg-bad">操作失败：{error}</div>}
         {!error && notice && <div className="kill-msg">{notice}</div>}
       </div>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.bindings}>
+        <EngineSectionHead
+          id="bindings"
+          open={sectionOpen.bindings}
+          onToggle={toggleSection}
+          summary={`${bindings.length} 个绑定`}
+        />
         <div className="param-head">
           <span className="card-note">
-            启停矩阵：停用只停止新开仓，已有持仓保留
+            停用只停止新开仓，已有持仓保留
           </span>
         </div>
         {!multiBinding && (
@@ -4005,10 +4026,16 @@ function EnginePanel({
           无需重启；同一组合改周期请先点「解绑」再重新绑定。
         </p>
       </div>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.evaluations}>
+        <EngineSectionHead
+          id="evaluations"
+          open={sectionOpen.evaluations}
+          onToggle={toggleSection}
+          summary={`${evaluations.length} 条评估`}
+        />
         <div className="param-head">
           <span className="card-note">
-            最近 {evaluations.length} 个评估状态（连续重复轮次已折叠）
+            连续重复轮次已折叠
           </span>
           <button
             type="button"
@@ -4066,11 +4093,33 @@ function EnginePanel({
           记录来自 engine 每轮心跳，最多保留 10 条；点上方按钮把该策略带入回测面板。
         </p>
       </div>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.runs}>
+        <EngineSectionHead
+          id="runs"
+          open={sectionOpen.runs}
+          onToggle={toggleSection}
+          summary={`${Math.min(recentRuns.length, RECENT_RUN_LIMIT)} 次回测`}
+          actions={
+            <button
+              type="button"
+              className="kill-btn kill-btn-sm"
+              disabled={!strategyId || recentRuns.length === 0}
+              onClick={() =>
+                strategyId &&
+                recentRuns[0] &&
+                onOpenBacktest?.({
+                  strategy: strategyId,
+                  runId: recentRuns[0].run_id,
+                })
+              }
+            >
+              在回测页看最近结果
+            </button>
+          }
+        />
         <div className="param-head">
           <span className="card-note">
-            最近 {Math.min(recentRuns.length, RECENT_RUN_LIMIT)} 次回测 ·
-            点「查看」载入曲线与成交
+            点「查看」载入曲线与成交；绩效明细归回测分析页
           </span>
         </div>
         {recentRuns.length === 0 ? (
@@ -4132,10 +4181,35 @@ function EnginePanel({
           结果来自 backtest_runs 持久化记录，点「查看」跳到回测页载入该次曲线与成交明细。
         </p>
       </div>
-      <div className="param-panel">
+      <div className="param-panel" data-collapsed={!sectionOpen.compare}>
+        <EngineSectionHead
+          id="compare"
+          open={sectionOpen.compare}
+          onToggle={toggleSection}
+          summary={`${paramGroups.length} 组可比版本`}
+          actions={
+            <button
+              type="button"
+              className="kill-btn kill-btn-sm"
+              disabled={!strategyId || paramGroups.length === 0}
+              onClick={() =>
+                strategyId &&
+                paramGroups[0] &&
+                onOpenBacktest?.({
+                  strategy: strategyId,
+                  pick: paramGroups[0].versions
+                    .slice(0, 4)
+                    .map((version) => version.run.run_id),
+                })
+              }
+            >
+              在回测页对比
+            </button>
+          }
+        />
         <div className="param-head">
           <span className="card-note">
-            参数版本对比 · 同品种/同周期/同区间下不同参数的回测结果
+            同品种/同周期/同区间下不同参数的回测结果
           </span>
         </div>
         {paramGroups.length === 0 ? (

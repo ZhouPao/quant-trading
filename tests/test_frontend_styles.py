@@ -115,6 +115,23 @@ def test_candles_page_labels_market_regime() -> None:
     assert 'data?.demo === false' in APP
 
 
+def test_m3_engine_sections_have_real_headings_and_collapse() -> None:
+    """M3 归位：6 个区块要有真 h3 标题、可折叠、偏好持久化。"""
+    section_ts = (SRC / "engine" / "Section.tsx").read_text(encoding="utf-8")
+    for sid in ("params", "history", "bindings", "evaluations", "runs", "compare"):
+        assert f"{sid}:" in section_ts, f"缺少分节 {sid}"
+        assert f'id="{sid}"' in APP, f"页面未接入分节 {sid}"
+    assert "<h3" in section_ts
+    assert "aria-expanded" in section_ts
+    assert "localStorage" in section_ts
+    assert APP.count("data-collapsed={!sectionOpen.") == 6
+    assert ".engine-section-head" in CSS
+    assert '[data-collapsed="true"] > :not(.engine-section-head)' in CSS
+    # card-note 的右对齐不能全局生效（会污染分区标题）
+    assert ".card-head .card-note" in CSS
+    assert ".param-head .card-note" in CSS
+
+
 def test_sidebar_collapse_control() -> None:
     """左侧模块导航可收缩：DOM 状态、持久化与 CSS 都齐备。"""
     assert "NAV_COLLAPSED_KEY" in APP
