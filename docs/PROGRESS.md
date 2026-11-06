@@ -3776,6 +3776,25 @@ M2-14（订单流足迹图）的第一批：建立全新的「市场逐笔成交
 
 ---
 
+### 8.118 M2-14 批3 聚合算法（2026-11-06）
+
+批3：把逐笔成交聚合为 footprint 矩阵（纯函数，无 IO，便于单测）。
+
+**新增** `src/quant/footprint.py`：
+- `FootprintLevel`（price/bid_vol/ask_vol/delta/total）、`FootprintBar`（ts/OHLCV/levels/POC/imbalance/cum_delta）
+- `aggregate_footprint(trades, bars, num_levels=20)`：每 bar 内按 [low,high] 均分 num_levels 档；trade.px 落档，buy→ask_vol、sell→bid_vol；POC=最大量档，imbalance=bar 净 delta，cum_delta 跨 bar 累加（含本 bar）；区间外成交跳过；high==low 退化单档
+- `bar_ms(bar_size)`（大小写归一，含 1m/1H/1D 等）
+
+**约定**：side='buy'(taker buy)→ask 量（绿/右），'sell'(taker sell)→bid 量（红/左）；delta=ask-bid。ATAS 惯例。
+
+**测试** `tests/test_footprint.py`：分档归属/买卖量/delta、POC、cum_delta 跨 bar、退化单档、区间外跳过、bar_size 大小写、空 bar；pytest 5 passed。
+
+**实机验证（BTC-USDT-SWAP）**：最新 500 笔成交 + 最近 100 根 1m bar 聚合 → POC=75802.85、poc_vol=927.93、imbalance=-156.79（净主动卖）、levels 各档买卖量合理。单测 + 实机均通过。
+
+**下一步**：批4 `GET /api/footprint` + service 接线 + `web/src/api.ts` 同步（硬规则 #6）。
+
+---
+
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）
