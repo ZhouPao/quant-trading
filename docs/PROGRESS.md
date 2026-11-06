@@ -3755,6 +3755,27 @@ M2-14（订单流足迹图）的第一批：建立全新的「市场逐笔成交
 
 ---
 
+### 8.117 M2-14 批2 回补增强（2026-11-06）
+
+批1 已含 after 游标翻页 + days 边界 + latest 续拉 + history 桶限速。批2 补全生产化。
+
+**改动**
+- `cli/supervisor.py`：`build_specs` 新增 `trades` 子进程（`quant sync-trades --loop`），`quant supervisor` 现常驻采集逐笔成交
+- `fetcher/trade_fetcher.py`：`backfill` 加进度/终止日志（start / 每 10 页 progress / done / cutoff / cursor-stuck / page-cap）
+- `cli/sync_trades.py`：`--days` clamp 到 1~90（OKX history-trades 约 3 个月，防误传大值拉爆）
+- 测试 `test_trade_fetcher.py::test_backfill_resume_dedup`：全量回补后再回补，新增应为 0（续拉去重）
+
+**实机验证（BTC-USDT-SWAP，模拟盘）**
+- 续拉起点 `from=<latest_trade_id>`，前 50 页（仍在 11-06 内）`total=0` —— 已存数据正确去重跳过
+- 回补进度日志正常输出；`--days` clamp 生效；`quant supervisor --dry-run` 确认 `trades` 子进程已注册
+- 跨日（翻到 11-05）受模拟盘 BTC 超活跃（~25 万笔/天）限制，单日翻完 11-06 需 ~8 分钟，未实机跑完；cutoff 边界逻辑已由 `test_backfill_pages_until_empty` 覆盖
+
+**注意**：模拟盘 BTC 极活跃，单日回补 ~25 万笔，受 history 限频（10/2s）需数分钟/天；属一次性后台回补，可接受。实时 WS 仍受环境 SOCKS 代理 + wspap reset 限制（批1 已记）。
+
+**下一步**：批3 聚合（bar × 自适应分档 → 买卖量/delta/POC/imbalance/cum_delta）。
+
+---
+
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）

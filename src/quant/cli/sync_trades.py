@@ -40,6 +40,8 @@ def main(args) -> int:
         return 1
 
     days = args.days if args.days is not None else 1
+    # 防护：OKX history-trades 约 3 个月，clamp 到 1~90 避免误传大值拉爆
+    days = max(1, min(days, 90))
 
     client = OKXClient(settings.okx)
     try:

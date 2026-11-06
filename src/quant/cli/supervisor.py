@@ -104,6 +104,8 @@ def build_specs(args, python: str | None = None) -> list[ProcessSpec]:
             ),
         ),
         ProcessSpec("monitor", (py, "-m", "quant", "monitor", "--config", cfg)),
+        # M2-14 订单流：逐笔成交回补 + 实时采集（常驻）
+        ProcessSpec("trades", (py, "-m", "quant", "sync-trades", "--loop", "--config", cfg)),
     ]
     if not args.no_dashboard:
         specs.append(

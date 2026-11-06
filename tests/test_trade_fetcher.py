@@ -86,3 +86,17 @@ def test_backfill_uses_latest_trade_id() -> None:
     saved = fetcher.backfill("BTC-USDT-SWAP", days=10_000)
     assert saved == 899  # t1..t899
     assert client.calls == 10  # 从 latest(t900) 起，9 页非空 + 1 空
+
+
+def test_backfill_resume_dedup() -> None:
+    """续拉去重：已全量回补后再次回补，应新增 0（不重拉）。"""
+    tmp = tempfile.mkdtemp()
+    storage = TradeStorage(Path(tmp))
+    client = _FakeClient()
+    fetcher = TradeFetcher(client, storage, demo=False)
+    first = fetcher.backfill("BTC-USDT-SWAP", days=10_000)  # 拉全量 t1..t1000
+    assert first == 1000
+    second = fetcher.backfill("BTC-USDT-SWAP", days=10_000)
+    assert second == 0  # 全部已存在，去重后无新增
+    assert client.calls >= 11  # 第二次仍完整翻页，但全去重（验证续拉而非空返回）
+

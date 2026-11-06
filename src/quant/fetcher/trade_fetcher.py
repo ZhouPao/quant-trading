@@ -51,23 +51,35 @@ class TradeFetcher:
         after = self._storage.latest_trade_id(inst_id)
         total = 0
         page = 0
+        self._log.info(
+            f"backfill start inst={inst_id} days={days} from={after or 'latest'}"
+        )
         while True:
             page += 1
             rows = self._client.get_history_trades(inst_id, after=after, limit=100)
             if not rows:
                 break
-            total += self._storage.save_trades(rows)
+            saved_page = self._storage.save_trades(rows)
+            total += saved_page
+            if page % 10 == 0:
+                self._log.info(
+                    f"backfill progress inst={inst_id} page={page} total={total}"
+                )
             oldest_ts = min(int(t.ts) for t in rows)
             # 已翻到 days 边界之前，本页可能含边界内数据已落盘，停止继续往旧
             if oldest_ts < cutoff_ms:
+                self._log.info(f"backfill hit days cutoff inst={inst_id} page={page}")
                 break
             prev_after = after
             after = rows[-1].trade_id
             # 游标未推进（异常时 OKX 返回相同页）—— 防止死循环
             if after == prev_after:
+                self._log.warning(f"backfill cursor stuck inst={inst_id}; stop")
                 break
             if page >= 10000:  # 安全上限，避免异常时死循环
+                self._log.warning(f"backfill page cap reached inst={inst_id}; stop")
                 break
+        self._log.info(f"backfill done inst={inst_id} days={days} new={total}")
         return total
 
     async def run(self, inst_id: str) -> None:
