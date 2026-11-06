@@ -3617,6 +3617,30 @@ CLI 评估入口、M8 留痕与失败回写均齐备；**仍未接进常驻进�
 快照需外部调度 `portfolio-tick`，引擎也未按组合的停用单元过滤信号。
 默认 `enabled=false`，未启用时系统行为与单策略完全一致。
 
+### 8.112 M8-12 订单来源筛选（2026-11-06）
+
+按用户确认的顺序（M8-12 → M4-8 → P0-2）开工。`orders.source` 列在
+8-3（v15 迁移）已具备，本轮补齐筛选入口：
+
+- 存储层：`get_recent_orders` 加 `source` 参数与 `WHERE o.source = ?`，
+  SELECT 返回 `o.source` 列；
+- service / `GET /api/orders` 透传 `source` 查询参数；
+- 前端：`OrdersQuery`/`OrderRow` 加 `source`，订单筛选栏加「来源」下拉
+  （策略信号 / 手工单 / 组合调仓），订单表加「来源」列（中文标签映射）。
+
+**实机验收**（8080）：表头含「来源」列；3 条演示订单
+（webhook/manual/portfolio）来源正确显示；下拉选「组合调仓」后表格
+过滤为 1 行、来源列「组合调仓」；接口层 `?source=` 三种来源各返回 1 条；
+控制台仅既有 favicon 404。演示订单仅写入本地演示库（gitignore）。
+
+**记账（如实）**：M8-12 仍 🟡——PRD 要求三张表筛选，本轮补齐订单来源
+筛选后，**剩余缺口只有「持仓列表筛选」**（成交列表本就无策略/来源列可筛）。
+
+**测试**：`test_sqlite_store.py` +1（来源筛选与组合条件、返回列）、
+`test_frontend_styles.py` +1（契约）。
+**验证**：`pytest` 全量 **2014 passed**（基线 2012）、`vitest` 56、
+`tsc` / `build` / `ruff` 全过；dashboard 已重启加载新参数。
+
 ---
 
 ## 9. 相关文档

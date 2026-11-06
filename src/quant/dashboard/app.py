@@ -304,10 +304,15 @@ def create_app(
         inst: str | None = Query(None),
         strategy: str | None = Query(None),
         status: str | None = Query(None),
+        source: str | None = Query(None),
     ) -> JSONResponse:
         return JSONResponse(
             await service.orders(
-                limit, inst_id=inst, strategy_id=strategy, status=status
+                limit,
+                inst_id=inst,
+                strategy_id=strategy,
+                status=status,
+                source=source,
             )
         )
 

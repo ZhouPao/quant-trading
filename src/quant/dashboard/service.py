@@ -1318,6 +1318,7 @@ class DashboardService:
         inst_id: str | None = None,
         strategy_id: str | None = None,
         status: str | None = None,
+        source: str | None = None,
     ) -> dict[str, object]:
         now = int(time.time() * 1000)
         try:
@@ -1327,6 +1328,7 @@ class DashboardService:
                 inst_id=inst_id,
                 strategy_id=strategy_id,
                 status=status,
+                source=source,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(f"orders sqlite read failed: {e}")

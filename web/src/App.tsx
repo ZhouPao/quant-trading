@@ -398,6 +398,7 @@ export default function App() {
     inst: "",
     strategy: "",
     status: "",
+    source: "",
   });
   const [fillFilter, setFillFilter] = useState({ inst: "" });
   const [filteredOrders, setFilteredOrders] = useState<OrderRow[] | null>(null);
@@ -431,7 +432,8 @@ export default function App() {
     const inst = orderFilter.inst.trim();
     const strategy = orderFilter.strategy.trim();
     const status = orderFilter.status;
-    if (!inst && !strategy && !status) {
+    const source = orderFilter.source;
+    if (!inst && !strategy && !status && !source) {
       setFilteredOrders(null);
       return;
     }
@@ -442,6 +444,7 @@ export default function App() {
         inst: inst || undefined,
         strategy: strategy || undefined,
         status: status || undefined,
+        source: source || undefined,
       })
         .then((res) => setFilteredOrders(res.orders))
         .catch((err) => {
@@ -1457,6 +1460,20 @@ export default function App() {
                     {ORDER_STATUS_LABELS[status] ?? status}
                   </option>
                 ))}
+              </select>
+            </label>
+            <label className="bt-field">
+              <span>来源</span>
+              <select
+                value={orderFilter.source}
+                onChange={(e) =>
+                  setOrderFilter({ ...orderFilter, source: e.target.value })
+                }
+              >
+                <option value="">全部</option>
+                <option value="webhook">策略信号</option>
+                <option value="manual">手工单</option>
+                <option value="portfolio">组合调仓</option>
               </select>
             </label>
           </div>
@@ -2739,7 +2756,7 @@ function OrdersPanel({
       <Table
         empty={rows.length === 0}
         emptyHint="暂无订单记录"
-        head={["时间", "品种", "方向", "类型", "数量", "价格", "状态", "操作"]}
+        head={["时间", "品种", "方向", "类型", "数量", "价格", "状态", "来源", "操作"]}
         rows={rows.map((item) => {
           const open = OPEN_ORDER_STATUSES.includes(item.status);
           return [
@@ -7767,6 +7784,12 @@ function positionCells(row: PositionRow): ReactNode[] {
 }
 
 function orderCells(row: OrderRow): ReactNode[] {
+  const SOURCE_LABELS: Record<string, string> = {
+    webhook: "策略信号",
+    manual: "手工单",
+    portfolio: "组合调仓",
+  };
+  const source = row.source ? (SOURCE_LABELS[row.source] ?? row.source) : null;
   return [
     <span key="ts" className="mono dim">{clock(row.created_ts)}</span>,
     <span key="inst" className="mono strong">{row.inst_id ?? "—"}</span>,
@@ -7779,6 +7802,7 @@ function orderCells(row: OrderRow): ReactNode[] {
       {num(row.filled_price ?? row.price, 2)}
     </span>,
     <StatusTag key="status" status={row.status} />,
+    <span key="source" className={source ? "dim" : "dim mono"}>{source ?? "—"}</span>,
   ];
 }
 

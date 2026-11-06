@@ -1105,6 +1105,50 @@ class TestOrderFillsFilters:
 
         assert {row["order_id"] for row in rows} == {"o0", "o1"}
 
+    def test_filter_by_source(self, store) -> None:
+        """M8-12：按来源筛选订单，且返回行带 source 列。"""
+        from types import SimpleNamespace
+
+        for idx, source in enumerate(("portfolio", "manual", "webhook")):
+            sig = SimpleNamespace(
+                signal_id=f"s-src-{idx}",
+                strategy_id="sma_cross",
+                side="buy",
+                order_type="market",
+                inst_id="BTC-USDT",
+                qty="1",
+                price=None,
+                ts=idx,
+                source=source,
+            )
+            store.save_signal(sig, "created", idx)
+            store.save_order(
+                SimpleNamespace(
+                    order_id=f"o-src-{idx}",
+                    signal=sig,
+                    status="live",
+                    created_ts=idx,
+                )
+            )
+
+        rows = store.get_recent_orders(10, source="portfolio")
+        assert [r["order_id"] for r in rows] == ["o-src-0"]
+        assert rows[0]["source"] == "portfolio"
+
+        # 与其它条件组合
+        mixed = store.get_recent_orders(
+            10, inst_id="ETH-USDT", source="portfolio"
+        )
+        assert mixed == []
+
+        all_rows = store.get_recent_orders(10)
+        assert len(all_rows) == 3
+        assert {r["source"] for r in all_rows} == {
+            "portfolio",
+            "manual",
+            "webhook",
+        }
+
     def test_trades_filter_by_inst(self, store) -> None:
         from quant.backtest.order import Fill
 

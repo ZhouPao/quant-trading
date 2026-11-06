@@ -325,6 +325,8 @@ export type OrderRow = {
   filled_price: string | null;
   filled_qty: string | null;
   fee: string | null;
+  /** webhook | manual | portfolio；与触发信号同源（M8-12） */
+  source: string | null;
   strategy_id: string | null;
   inst_id: string | null;
   side: string | null;
@@ -363,6 +365,8 @@ export type OrdersQuery = {
   inst?: string;
   strategy?: string;
   status?: string;
+  /** 按信号来源筛选：webhook | manual | portfolio（M8-12） */
+  source?: string;
 };
 
 /** M8-12：订单列表，支持品种/策略/状态筛选（空值不传）。 */

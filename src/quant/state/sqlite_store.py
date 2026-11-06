@@ -691,10 +691,12 @@ class SQLiteStore:
         inst_id: str | None = None,
         strategy_id: str | None = None,
         status: str | None = None,
+        source: str | None = None,
     ) -> list[dict]:
         """最近 n 笔订单（含信号上下文），按创建时间倒序。
 
-        M8-12：支持按品种/策略/状态筛选。列名硬编码、值全部参数化。
+        M8-12：支持按品种/策略/状态/来源筛选；来源取订单自身 source
+        （与触发信号同源落库）。列名硬编码、值全部参数化。
         """
         clauses: list[str] = []
         params: list[object] = []
@@ -707,11 +709,14 @@ class SQLiteStore:
         if status:
             clauses.append("o.status = ?")
             params.append(status)
+        if source:
+            clauses.append("o.source = ?")
+            params.append(source)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._query_all(
             f"""
             SELECT o.order_id, o.status, o.created_ts, o.filled_ts,
-                   o.filled_price, o.filled_qty, o.fee,
+                   o.filled_price, o.filled_qty, o.fee, o.source,
                    s.strategy_id, s.inst_id, s.side, s.order_type,
                    s.qty, s.price
             FROM orders o

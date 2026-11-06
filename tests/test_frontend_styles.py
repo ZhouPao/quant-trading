@@ -126,6 +126,17 @@ def test_m6_portfolio_page_wiring() -> None:
     assert ".pf-grid" in CSS
 
 
+def test_m812_order_source_filter() -> None:
+    """M8-12：订单支持按来源筛选并展示来源列。"""
+    api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
+    assert "source?: string" in api_ts
+    assert "source: string | null" in api_ts
+    assert '<option value="portfolio">组合调仓' in APP
+    assert '<option value="manual">手工单' in APP
+    assert "SOURCE_LABELS" in APP
+    assert '"来源"' in APP
+
+
 def test_candles_page_labels_market_regime() -> None:
     """K 线页必须标注行情口径，避免把模拟盘行情误判成数据错误。"""
     api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
