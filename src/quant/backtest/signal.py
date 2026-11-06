@@ -50,6 +50,8 @@ class Signal:
     price: Decimal | None = None
     signal_id: str = ""
     size_pct: Decimal | None = None
+    #: 信号来源：webhook（策略）/ manual（手工单）/ portfolio（组合调仓单）
+    source: str = "webhook"
 
     def __post_init__(self) -> None:
         """构造时校验：必填非空 + side/order_type 枚举 + qty 正数 + price 与 order_type 一致。"""
@@ -75,6 +77,8 @@ class Signal:
             raise ValueError("limit order must have price")
         if self.price is not None and self.price <= 0:
             raise ValueError(f"price must be positive, got {self.price}")
+        if self.source not in ("webhook", "manual", "portfolio"):
+            raise ValueError(f"unknown signal source {self.source!r}")
 
     def to_json(self) -> dict:
         """序列化为可 JSON 化的 dict（Decimal → str）。"""
@@ -90,6 +94,7 @@ class Signal:
             "size_pct": (
                 str(self.size_pct) if self.size_pct is not None else None
             ),
+            "source": self.source,
         }
 
     @classmethod
@@ -113,6 +118,7 @@ class Signal:
                 if data.get("size_pct") is not None
                 else None
             ),
+            source=data.get("source", "webhook"),
         )
 
 

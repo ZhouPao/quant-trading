@@ -102,12 +102,14 @@ def service(store, redis, tmp_path):
 
 class TestDeadLetterStore:
     def test_schema_version_bumped(self) -> None:
-        # v1 基线 + 12 段迁移 = 13；对账差异表是 v8，资金费率成本列是 v9，
+        # v1 基线 + 15 段迁移 = 16；对账差异表是 v8，资金费率成本列是 v9，
         # optimize_jobs 表（M4-13 寻优进度落库）是 v10，
         # app_meta 表（绑定初始化标记，P0 全量解绑复活修复）是 v11，
         # turnover 列（换手率原先被静默丢弃）是 v12，
-        # portfolio_state / portfolio_snapshots 两表（M6-10 组合快照）是 v13
-        assert SCHEMA_VERSION == 13
+        # portfolio_state / portfolio_snapshots 两表（M6-10 组合快照）是 v13，
+        # signals.source 是 v14、orders.source 是 v15（M6-8 调仓单留痕），
+        # portfolio_rebalance_attempts 表（M6-9 失败不追单）是 v16
+        assert SCHEMA_VERSION == 16
 
     def test_insert_and_get(self, store) -> None:
         _insert(store, "d-1", signal=_signal())

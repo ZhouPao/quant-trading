@@ -3510,6 +3510,57 @@ PRD 4.6.4 状态 + §10 补充 42；账本 3.6/4.1/4.2/5/7/8 节同步。
 `RebalancePlan` 调仓单（只经 M8、含 `source=portfolio` 留痕）、失败回滚；
 开工前需先定 `signals`/`orders` 的 `source` 列（追加迁移）。
 
+### 8.110 M6 组合管理（8-3）：组合风控、再平衡与调仓单（2026-11-06）
+
+**范围**：M6-5 组合层风控、M6-6 再平衡触发、M6-7 冷却期、
+M6-8 调仓单生成、M6-9 失败回滚；按上批约定先补 `source` 列。
+
+**实现**
+- **schema v14 ~ v16**：刻意拆成三段单语句迁移（`signals.source` /
+  `orders.source` / `portfolio_rebalance_attempts` 表）。原因：
+  `executescript` 中途失败时整段跳过且 `user_version` 不推进，合并多语句
+  会让后续 ALTER / CREATE 永远补不上；单语句 + `duplicate column` 幂等
+  跳过才安全。默认值 `webhook` 兼容存量数据，`SCHEMA_VERSION` 13→16。
+  `Signal` 新增 `source`（webhook/manual/portfolio）并同步
+  `to_json`/`from_json`（旧 JSON 缺省回落 webhook）；`save_signal` /
+  `save_order` 落库同源。
+- **组合级风控**（`risk.py`）：`PortfolioRisk.evaluate` 按总回撤、单元间
+  相关性、单单元贡献度产出降权/暂停建议；`apply()` 作用到目标权重后归一。
+  **只改调仓金额**，M7 checker 仍是唯一限额执行者（AGENTS #8/#14）。
+- **再平衡**（`rebalance.py`）：`Rebalancer.evaluate` 支持 calendar /
+  threshold / both，冷却期内不触发，权重漂移未超或无动作返回 `None`；
+  `RebalancePlan.deltas = (目标权重 − 当前权重) × 权益`，粉尘阈值过滤。
+  默认会把风控建议应用到目标权重（有回归验证）。
+- **调仓单**（`service.py`）：deltas 转标准 `Signal`——`qty=None` 由
+  M8-14 服务端算量、`size_pct = |delta|/equity`、`source=portfolio`、
+  `signal_id` 由计划 ts + 单元确定性派生（幂等）。
+  `PortfolioRebalanceService.submit` 先 `save_signal` 留痕，再经
+  **唯一 M8 `SignalQueue`** 入队；`[portfolio] enabled=false` 时拒绝提交。
+- **失败回滚**：`portfolio_rebalance_attempts` 同 `(组合, 计划 ts, 单元)`
+  只记一次；部分单元失败不追单、保留原因，下一周期新 `plan_ts` 重新评估。
+
+**边界（如实）**：本批**未接自动调度、快照生产者、worker 下单失败回写、
+组合页**，也不接 CLI；服务是显式调用入口，默认开关关闭。故 M6-8/9 记 🟡。
+`M8-12` 的 `source` 列已具备，前端来源筛选/持仓表筛选仍未做。
+
+**验证**：`tests/test_portfolio_rebalance.py` **19 条**（v13 存量库升级、
+source 往返与落库、风控三类建议、三种触发与冷却、粉尘过滤、Signal 契约、
+禁用拒绝、M8 队列与留痕、部分失败不追单、新周期重新评估）；
+`pytest` 全量 **2000 passed**（基线 1981）；`ruff` 改动文件全过；
+本批无前端改动。
+**过程问题**：全量第一次 3 个失败 —— `test_sqlite_store.py` 的
+`SimpleNamespace` 假信号缺 `source` 字段；选择给假对象补齐契约而非在
+生产代码用 `getattr` 掩盖字段缺失。另同步 `test_dead_letters.py` 的
+`SCHEMA_VERSION` 断言 13→16。
+
+**记账**：M6-5/6/7 → ✅，M6-8/9 → 🟡。
+总览 **137/7/6 → 140/9/1**，完成率 **91.3% → 93.3%**，剩余 10 条。
+PRD 4.6.4 状态 + §10 补充 43；账本 3.6/4.1/4.2/5/7/8 节同步。
+
+**下一批 8-4（M6 收官）**：M6-14 组合页（权重饼图、权益/回撤曲线、
+贡献瀑布、再平衡记录）+ 调度接线（快照生产者、自动再平衡、worker 失败
+回写），并补齐 M6-1/2/10 的 🟡 项。
+
 ---
 
 ## 9. 相关文档

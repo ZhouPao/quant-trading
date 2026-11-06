@@ -1072,6 +1072,7 @@ class TestOrderFillsFilters:
                 qty="1",
                 price=None,
                 ts=idx,
+                source="webhook",
             )
             store.save_signal(sig, "created", idx)
             store.save_order(

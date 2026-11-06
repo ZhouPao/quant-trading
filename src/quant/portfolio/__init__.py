@@ -33,6 +33,14 @@ from .models import (
     PortfolioUnit,
     RebalanceConfig,
 )
+from .rebalance import (
+    RebalanceDelta,
+    RebalanceError,
+    RebalancePlan,
+    Rebalancer,
+)
+from .risk import PortfolioRisk, RiskAction
+from .service import PortfolioRebalanceService, RebalanceAttemptResult
 from .state import PortfolioStore
 
 __all__ = [
@@ -49,9 +57,17 @@ __all__ = [
     "PortfolioConfigError",
     "PortfolioRiskConfig",
     "PortfolioSnapshot",
+    "PortfolioRebalanceService",
+    "PortfolioRisk",
     "PortfolioStore",
     "PortfolioUnit",
+    "RebalanceAttemptResult",
     "RebalanceConfig",
+    "RebalanceDelta",
+    "RebalanceError",
+    "RebalancePlan",
+    "Rebalancer",
+    "RiskAction",
     "allocate",
     "annualized_volatility",
     "load_portfolio",

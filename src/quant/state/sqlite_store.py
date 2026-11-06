@@ -383,6 +383,30 @@ _MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots
         ON portfolio_snapshots(portfolio_id, ts DESC);
     """,
+    # v13 -> v14：信号来源（webhook / manual / portfolio）。
+    # 拆成单语句迁移：executescript 中途失败会跳过整段且 user_version 不推进，
+    # 合并多语句会让后续 ALTER / CREATE 永远补不上。
+    """
+    ALTER TABLE signals ADD COLUMN source TEXT NOT NULL DEFAULT 'webhook';
+    """,
+    # v14 -> v15：订单来源，与信号同源，供调仓单留痕与来源筛选。
+    """
+    ALTER TABLE orders ADD COLUMN source TEXT NOT NULL DEFAULT 'webhook';
+    """,
+    # v15 -> v16：调仓单执行留痕（M6-9）。同一 (组合, 计划 ts, 单元) 只允许
+    # 一条：部分失败时不重复追单，下一周期用新 plan_ts 重新评估。
+    """
+    CREATE TABLE IF NOT EXISTS portfolio_rebalance_attempts (
+        portfolio_id TEXT NOT NULL,
+        plan_ts      INTEGER NOT NULL,
+        unit_key     TEXT NOT NULL,
+        signal_id    TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        reason       TEXT,
+        created_ts   INTEGER NOT NULL,
+        PRIMARY KEY (portfolio_id, plan_ts, unit_key)
+    );
+    """,
 ]
 
 #: 当前期望的 schema 版本，供启动自检与测试断言。
@@ -449,8 +473,8 @@ class SQLiteStore:
         """插入或更新信号状态。"""
         sql = """
         INSERT INTO signals (signal_id, strategy_id, side, order_type, inst_id,
-                             qty, price, ts, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             qty, price, ts, status, created_at, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(signal_id) DO UPDATE SET status=excluded.status
         """
         self._execute(
@@ -468,6 +492,7 @@ class SQLiteStore:
                 signal.ts,
                 status,
                 now_ms or signal.ts,
+                signal.source,
             ),
         )
 
@@ -496,14 +521,16 @@ class SQLiteStore:
         """
         self._execute(
             """
-            INSERT OR IGNORE INTO orders (order_id, signal_id, status, created_ts)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO orders
+                (order_id, signal_id, status, created_ts, source)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 order.order_id,
                 order.signal.signal_id,
                 order.status,
                 order.created_ts,
+                order.signal.source,
             ),
         )
         self.update_order_status(order.order_id, order.status)
@@ -2558,6 +2585,53 @@ class SQLiteStore:
             set(json.loads(row["enabled_units"])),
             int(row["updated_ts"]),
         )
+
+    def save_rebalance_attempt(
+        self,
+        portfolio_id: str,
+        plan_ts: int,
+        unit_key: str,
+        signal_id: str,
+        status: str,
+        reason: str | None,
+        created_ts: int,
+    ) -> None:
+        """调仓单执行留痕（M6-9）。
+
+        同一 (组合, 计划 ts, 单元) 只记一次：部分单元失败时**不重复追单**，
+        失败原因保留到下一周期用新 plan_ts 重新评估。
+        """
+        self._execute(
+            """
+            INSERT OR IGNORE INTO portfolio_rebalance_attempts
+                (portfolio_id, plan_ts, unit_key, signal_id, status,
+                 reason, created_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                portfolio_id,
+                plan_ts,
+                unit_key,
+                signal_id,
+                status,
+                reason,
+                created_ts,
+            ),
+        )
+
+    def get_rebalance_attempts(
+        self, portfolio_id: str, plan_ts: int
+    ) -> list[dict[str, object]]:
+        """读某次调仓计划的逐单元结果，供服务层跳过已处理单元。"""
+        rows = self._query_all(
+            """
+            SELECT * FROM portfolio_rebalance_attempts
+            WHERE portfolio_id = ? AND plan_ts = ?
+            ORDER BY unit_key
+            """,
+            (portfolio_id, plan_ts),
+        )
+        return [dict(row) for row in rows]
 
     def _execute(self, sql: str, params: tuple) -> int:
         """执行写语句，返回受影响行数（调用方不关心时可忽略）。"""
