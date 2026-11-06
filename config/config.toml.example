@@ -73,6 +73,7 @@ resolve_from_db = true                    # 策略参数是否合并在线覆盖
 enabled = false
 config_dir = "./config/portfolios"
 active = ""                              # 空=加载目录下全部组合；多组合时填 portfolio_id
+snapshot_every_bars = 1                  # 快照频率：每 N 根 bar 收盘写一次（M6-10）
 
 [state]
 db_path = "./data/state/quant.db"         # SQLite 状态库

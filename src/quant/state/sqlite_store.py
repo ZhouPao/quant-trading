@@ -19,7 +19,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -359,6 +359,29 @@ _MIGRATIONS: list[str] = [
     # `save_backtest_metrics` 会静默丢弃——正是 AGENTS.md 硬规则 #3 警告的坑。
     """
     ALTER TABLE backtest_metrics ADD COLUMN turnover TEXT;
+    """,
+    # v12 -> v13：组合管理运行时状态与权益快照（M6-10）。
+    # 金额一律 TEXT 存 Decimal 字符串（AGENTS #1）；每单元的权益/权重是可变
+    # 集合，用 JSON 文本存 {unit_key: "Decimal 字符串"}，不为单元单独建列。
+    # 建表/建索引都用 IF NOT EXISTS，存量库重放天然幂等。
+    """
+    CREATE TABLE IF NOT EXISTS portfolio_state (
+        portfolio_id  TEXT PRIMARY KEY,
+        weights       TEXT NOT NULL,
+        enabled_units TEXT NOT NULL,
+        updated_ts    INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        portfolio_id TEXT NOT NULL,
+        ts           INTEGER NOT NULL,
+        equity       TEXT NOT NULL,
+        unit_equity  TEXT NOT NULL,
+        weights      TEXT NOT NULL,
+        drawdown     TEXT NOT NULL,
+        PRIMARY KEY (portfolio_id, ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots
+        ON portfolio_snapshots(portfolio_id, ts DESC);
     """,
 ]
 
@@ -2420,6 +2443,121 @@ class SQLiteStore:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # portfolio snapshots / state (M6-10)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dump_decimal_map(values: Mapping[str, Decimal]) -> str:
+        """{unit_key: Decimal} → 稳定 JSON；值存字符串避免精度损失。"""
+        return json.dumps(
+            {key: str(value) for key, value in values.items()}, sort_keys=True
+        )
+
+    @staticmethod
+    def _load_decimal_map(raw: str) -> dict[str, Decimal]:
+        return {key: Decimal(str(value)) for key, value in json.loads(raw).items()}
+
+    def save_portfolio_snapshot(
+        self,
+        portfolio_id: str,
+        ts: int,
+        equity: Decimal,
+        unit_equity: Mapping[str, Decimal],
+        weights: Mapping[str, Decimal],
+        drawdown: Decimal,
+    ) -> None:
+        """写组合权益快照；同 (portfolio_id, ts) 覆盖。"""
+        if not portfolio_id:
+            raise ValueError("portfolio_id must not be empty")
+        self._execute(
+            """
+            INSERT INTO portfolio_snapshots
+                (portfolio_id, ts, equity, unit_equity, weights, drawdown)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(portfolio_id, ts) DO UPDATE SET
+                equity=excluded.equity,
+                unit_equity=excluded.unit_equity,
+                weights=excluded.weights,
+                drawdown=excluded.drawdown
+            """,
+            (
+                portfolio_id,
+                ts,
+                str(equity),
+                self._dump_decimal_map(unit_equity),
+                self._dump_decimal_map(weights),
+                str(drawdown),
+            ),
+        )
+
+    def get_portfolio_snapshots(
+        self, portfolio_id: str, limit: int = 1000
+    ) -> list[dict[str, object]]:
+        """按 ts 升序返回快照，Decimal 已还原，供 portfolio 层构造模型。"""
+        rows = self._query_all(
+            """
+            SELECT * FROM portfolio_snapshots WHERE portfolio_id = ?
+            ORDER BY ts DESC LIMIT ?
+            """,
+            (portfolio_id, limit),
+        )
+        return [
+            {
+                "portfolio_id": row["portfolio_id"],
+                "ts": int(row["ts"]),
+                "equity": Decimal(row["equity"]),
+                "unit_equity": self._load_decimal_map(row["unit_equity"]),
+                "weights": self._load_decimal_map(row["weights"]),
+                "drawdown": Decimal(row["drawdown"]),
+            }
+            for row in reversed(rows)
+        ]
+
+    def save_portfolio_state(
+        self,
+        portfolio_id: str,
+        weights: Mapping[str, Decimal],
+        enabled_units: Sequence[str],
+        ts: int,
+    ) -> None:
+        """写当前权重与启用单元（单行 upsert，避免多语句事务问题）。"""
+        if not portfolio_id:
+            raise ValueError("portfolio_id must not be empty")
+        self._execute(
+            """
+            INSERT INTO portfolio_state
+                (portfolio_id, weights, enabled_units, updated_ts)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(portfolio_id) DO UPDATE SET
+                weights=excluded.weights,
+                enabled_units=excluded.enabled_units,
+                updated_ts=excluded.updated_ts
+            """,
+            (
+                portfolio_id,
+                self._dump_decimal_map(weights),
+                json.dumps(sorted(enabled_units)),
+                ts,
+            ),
+        )
+
+    def get_portfolio_state(
+        self, portfolio_id: str
+    ) -> tuple[dict[str, Decimal], set[str], int] | None:
+        """读当前状态；不存在返回 None（由调用方显式降级，不静默当 0）。"""
+        row = self._query_one(
+            "SELECT * FROM portfolio_state WHERE portfolio_id = ?",
+            (portfolio_id,),
+        )
+        if row is None:
+            return None
+        return (
+            self._load_decimal_map(row["weights"]),
+            set(json.loads(row["enabled_units"])),
+            int(row["updated_ts"]),
+        )
 
     def _execute(self, sql: str, params: tuple) -> int:
         """执行写语句，返回受影响行数（调用方不关心时可忽略）。"""

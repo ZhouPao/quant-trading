@@ -3463,6 +3463,53 @@ tests/test_portfolio.py` 通过。本批无前端改动，故不跑 tsc/build。
 **下一批**：8-2（M6-10/11/12，两张表追加迁移 + 快照 + 归因 +
 `PortfolioBacktest`），与 8-3 相互独立，均以 8-1 为前置。
 
+### 8.109 M6 组合管理（8-2）：快照存储 + 绩效归因 + 组合回测（2026-11-06）
+
+**范围**：M6-10 快照与存储、M6-11 绩效归因、M6-12 组合回测。
+8-2 与 8-3 相互独立，均以 8-1 为前置；本批仍按 PRD 边界**不产出调仓单、
+不调用 OKX、不接引擎/worker**。
+
+**实现**
+- **schema v13**：`_MIGRATIONS` 末尾追加一段（AGENTS #2，不改历史 DDL），
+  建 `portfolio_state`（单行 JSON 存当前权重/启用单元）与
+  `portfolio_snapshots`（`ts`/`equity`/`unit_equity`/`weights`/`drawdown`）。
+  金额一律 TEXT 存 Decimal 字符串（AGENTS #1），`{unit_key: Decimal}` 用
+  `json.dumps(sort_keys=True)` 存字符串值；建表/索引都 `IF NOT EXISTS`，
+  存量库重放幂等。`SCHEMA_VERSION` 12→13。
+- `PortfolioSnapshot`（`__post_init__` 校验 ts/权益/回撤、两个映射键集合一致）
+  + `PortfolioStore` 门面（隔离 DB 与领域模型）+ `SQLiteStore` 六个读写方法；
+  同 `(portfolio_id, ts)` 覆盖、读回按 ts 升序。
+  `[portfolio] snapshot_every_bars=1`（默认每根 bar 收盘），校验 ≥1。
+- **`Attribution.report(snapshots, config) -> pd.DataFrame`**：Brinson-Fachler
+  等权基准简化，`base` 基准 / `allocation` 权重配置 / `selection` 单元自身，
+  恒等式 `Σtotal = 组合区间收益 R_p` 由测试锁定；精确 Decimal 见 `rows()`。
+- **`PortfolioBacktest`**：各单元权益曲线（可直接用 M4
+  `BacktestResult.equity_curve`）严格按同一时间轴对齐，按目标权重合成组合
+  权益，支持 `rebalance_every_bars` 周期再平衡；指标复用
+  `metrics.compute_metrics` 保证与 M4 同口径。买入持有时组合曲线等于
+  逐单元曲线加权和，对应 PRD 验收条款「组合回测与逐单元单独回测的加权
+  结果可对齐」。时间轴/曲线/bars 不完备一律显式报错，不对齐就静默跳过。
+
+**验证**
+- `tests/test_portfolio_data.py` **19 条**（快照模型、两表迁移与 v12 存量库、
+  Decimal 往返、状态往返、归因恒等式/DataFrame、回测加权对齐/再平衡/
+  错误分支/停用单元、频率配置）；
+- **真实状态库副本**：`v12 → v13`，`signals/orders/fills/backtest_runs`
+  行数不变（含 5 条回测记录），新表齐备；
+- `pytest` 全量 **1981 passed**（基线 1962）；`ruff` 改动文件全过。
+  本批无前端改动，故不跑 tsc/build。
+- **过程问题（如实）**：全量第一次 1 个失败 ——
+  `test_dead_letters.py::test_schema_version_bumped` 把版本号写死为 12，
+  迁移到 v13 后断言过时；已同步为 13 并补迁移说明，重跑 1981 全绿。
+
+**记账**：M6-11/12 → ✅，M6-10 → 🟡（快照生产者待 8-3 接线）。
+总览 **135/6/9 → 137/7/6**，完成率 **90.0% → 91.3%**，剩余 13 条。
+PRD 4.6.4 状态 + §10 补充 42；账本 3.6/4.1/4.2/5/7/8 节同步。
+
+**下一批 8-3**：M6-5/6/7/8/9 组合级风控建议、日历/阈值再平衡与冷却、
+`RebalancePlan` 调仓单（只经 M8、含 `source=portfolio` 留痕）、失败回滚；
+开工前需先定 `signals`/`orders` 的 `source` 列（追加迁移）。
+
 ---
 
 ## 9. 相关文档

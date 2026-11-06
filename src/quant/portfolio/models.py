@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -106,3 +107,32 @@ class PortfolioConfig:
     def unit_map(self) -> dict[str, PortfolioUnit]:
         """unit_key → 单元，供快照与归因按 key 回查。"""
         return {unit.unit_key: unit for unit in self.units}
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioSnapshot:
+    """组合权益快照（PRD §4.6.1 / M6-10）。
+
+    每次评估写一条，供归因、权益曲线与再平衡判断。金额一律 Decimal，
+    ``ts`` 为 UTC 毫秒（AGENTS #10）；``unit_equity`` / ``weights`` 以
+    ``unit_key`` 为键，两者键集合必须一致。
+    """
+
+    portfolio_id: str
+    ts: int
+    equity: Decimal
+    unit_equity: Mapping[str, Decimal]
+    weights: Mapping[str, Decimal]
+    drawdown: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if not self.portfolio_id:
+            raise ValueError("portfolio_id must not be empty")
+        if self.ts < 0:
+            raise ValueError("ts must be non-negative UTC ms")
+        if self.equity < 0:
+            raise ValueError("equity must be non-negative")
+        if not 0 <= self.drawdown <= 1:
+            raise ValueError("drawdown must be within [0, 1]")
+        if set(self.unit_equity) != set(self.weights):
+            raise ValueError("unit_equity and weights must have identical keys")

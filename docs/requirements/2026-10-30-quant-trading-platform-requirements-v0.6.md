@@ -468,7 +468,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 ---
 
-### 4.6 组合管理（M6）🟡 进行中（8-1 已交付模型与分配器）
+### 4.6 组合管理（M6）🟡 进行中（8-1 模型与分配、8-2 数据链与组合回测已交付）
 
 **职责**：当同时跑多个「策略 × 品种」单元时，决定「钱怎么分、仓位怎么控、什么时候调」。当前系统为单策略单品种，本节为完整设计，排 MS7+。
 
@@ -509,9 +509,9 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 | M6-7 | 再平衡冷却期 | 触发后 N 小时内不再触发，避免反复调仓吃掉收益 | 新增 | ⬜ |
 | M6-8 | 调仓单生成 | `RebalancePlan` 拆成各单元的目标增量，交由 M8 统一下单并审计 | 新增 | ⬜ |
 | M6-9 | 再平衡失败回滚 | 部分单元下单失败时不重复追单，记录失败原因，下一周期重新评估 | 新增 | ⬜ |
-| M6-10 | 快照与存储 | 每次评估写 `PortfolioSnapshot`；频率可配（默认每根 bar 收盘） | 新增 | ⬜ |
-| M6-11 | 绩效归因 | 组合收益拆到单元；区分「权重配置贡献」与「单元自身收益」 | 新增 | ⬜ |
-| M6-12 | 组合回测 | 用历史数据模拟多单元并行运行与再平衡，输出组合级绩效指标（与 M4 同口径） | 新增 | ⬜ |
+| M6-10 | 快照与存储 | 每次评估写 `PortfolioSnapshot`；频率可配（默认每根 bar 收盘） | 新增 | 🟡 |
+| M6-11 | 绩效归因 | 组合收益拆到单元；区分「权重配置贡献」与「单元自身收益」 | 新增 | ✅ |
+| M6-12 | 组合回测 | 用历史数据模拟多单元并行运行与再平衡，输出组合级绩效指标（与 M4 同口径） | 新增 | ✅ |
 | M6-13 | 与单策略模式兼容 | 未配置组合时系统行为与现在完全一致：单策略单品种直接跑，不经过组合层 | 新增 | ✅ |
 | M6-14 | 组合页展示 | 权重饼图、组合权益与回撤曲线、各单元贡献瀑布图、再平衡记录 | 新增 | ⬜ |
 
@@ -1057,3 +1057,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-11-01 | v0.6（补充 39，M4-15 资金费率成本落库与看板） | M4-15 收尾，把上一轮「暂不入库」的两项缺口补掉。①**schema v9**：新增一段迁移 `ALTER TABLE backtest_metrics ADD COLUMN funding_cost TEXT;`，`SCHEMA_VERSION` 8→9。刻意不改 v5 的建表语句——v5 早已在存量库里执行过，改它只会让老库永远缺列；版本闸门保证这段迁移只执行一次。②`_METRIC_COLUMNS` 增加 `funding_cost`，普通回测、寻优、walk-forward 三条路径的 `metrics` 都会原样落库（引擎早在 `compute_metrics` 之后写入该键），刷新页面或重启进程后从历史详情仍能读到。③前端 `METRIC_LABELS` 补「资金费率成本」，回测详情指标区新增该卡；`metricText` 新增金额口径（4 位小数，避免几分钱的资金费被四舍五入成 `0.00`），`metricTone` 按「正=付出 warn / 负=收取 good」着色。④批量回测的逐格 `metrics` 走 `batch.parquet`，同步受益，无需额外改动。测试补 4 条：v8 存量库升级后补列且不丢老数据、`funding_cost` 写入/读回、任务到 `done` 后详情带该指标（关闭时恒 0）；端到端核对（BTC-USDT 1H，2026-10-01~10-31，sma_cross，开启资金费率）：详情 `funding_cost = -20.750149421087215`，`backtest_metrics` 读回同一数值 |
 | 2026-11-02 | v0.6（补充 40，模块状态与代码对齐） | 按代码逐条核对 153 条需求后修正模块总览的滞后标记，不改需求内容。①**M1 首页总览** 🟡→✅：10 条全部落地（7 进程健康、今日事件流、数据新鲜度、今日盈亏、告警摘要与趋势、降级标注）。②**M8 交易执行** 🟡→✅：原注「缺仓位计算、状态机、死信重放、对账」四项早已补齐（M8-14/M8-15/M8-16/M8-18），仅 M8-7 实盘切 Key/IP 与 M8-8 公网反代属运维动作，不再影响模块状态。③**M9 日志告警** 🟡→✅：13 条落地、M9-6 明确不做。④**M7-17** 🟡→✅：`halt` 分支已由 worker 在拒单当场发布 `risk_halt` 告警（ERROR，同时启用 kill switch），发布失败只记日志不影响拒单；连同其余 16 条使 **M7 风险控制** 同步 🟡→✅。⑤仍存在的实现缺口不在本次修正范围：M4-6 缺看板提交入口、M8-12 缺订单/成交筛选、M3-5/M4-8/M4-13/M10-3 为部分完成，详见 `docs/requirements/2026-11-02-feature-inventory-and-completion.md` |
 | 2026-11-06 | v0.6（补充 41，M6 8-1 组合模型与资金分配） | M6 开工，8-1 覆盖 M6-1/2/3/4/13：M6-3/M6-4/M6-13 转 ✅，M6-1/M6-2 转 🟡（看板可读与停用接线留待 8-4/8-3）。①新建 `src/quant/portfolio/`：`models.py` 用 `dataclass(frozen=True, slots=True)` 定义 `PortfolioConfig`/`PortfolioUnit`/`RebalanceConfig`/`PortfolioRiskConfig`，`__post_init__` 校验分配法、重复 `unit_key`、权重上限与波动率窗口；`loader.py` 读 `config/portfolios/<id>.toml`，比例经 `Decimal(str(value))` 转换避免 TOML float 精度损失，目录不存在返回空列表、单文件非法显式抛 `PortfolioConfigError`。②`allocator.py` 实现 `Allocator.allocate(equity, config)` 四法互斥：equal 等权、fixed 用配置权重、inverse_vol 按 1/σ、vol_target 按目标波动缩放总敞口（Σw≤1，其余为现金；组合波动按单元不相关近似），并提供 `annualized_volatility()` 供后续从 `BarStorage` 估算 σ。③归一化与单单元上限：超限部分按比例回分给其余单元，上限不可行（cap×N<1）直接报错，不静默钳制。④`[portfolio] enabled=false` 默认关闭，`Settings.portfolio` 为纯新增字段，未配置时引擎/worker/风控完全不经过组合层；`config/portfolios/core.toml.example` 给双单元示例。⑤按 PRD 边界本批**不产出调仓单、不调用 OKX、不建表**，组合风控/再平衡/快照/归因/组合回测/组合页留 8-2 ~ 8-4。测试 31 条（模型校验/加载/四法/上限/波动率/兼容性），`pytest` 全量 1962 passed；详见 PROGRESS 8.108 |
+| 2026-11-06 | v0.6（补充 42，M6 8-2 快照存储、绩效归因与组合回测） | 8-2 覆盖 M6-10/11/12：M6-11/M6-12 转 ✅，M6-10 转 🟡（快照生产者待 8-3 接线）。①**schema v13**：在 `_MIGRATIONS` 末尾追加一段，建 `portfolio_state`（单行 JSON 存当前权重与启用单元）与 `portfolio_snapshots`（`ts`/`equity`/`unit_equity`/`weights`/`drawdown`），金额一律 TEXT 存 Decimal 字符串、`{unit_key: Decimal}` 用稳定 JSON 文本；建表与索引均 IF NOT EXISTS，不改历史 DDL。`SCHEMA_VERSION` 12→13，同步 `test_dead_letters.py` 的版本断言。②`PortfolioSnapshot` 模型（`__post_init__` 校验 ts/权益/回撤与两个映射键集合一致）+ `PortfolioStore` 门面（隔离 DB 与领域模型）+ `SQLiteStore` 六个读写方法；同 `(portfolio_id, ts)` 覆盖、快照按 ts 升序读回；`[portfolio] snapshot_every_bars=1` 频率可配且校验 ≥1。③`Attribution.report(snapshots, config) -> pd.DataFrame`：Brinson-Fachler 等权基准简化，把组合收益拆为 `base`（基准）/ `allocation`（权重配置）/ `selection`（单元自身），恒等式 `Σtotal = R_p` 有测试锁定；精确 Decimal 见 `rows()`。④`PortfolioBacktest`：各单元权益曲线按时间轴严格对齐后合成组合权益，支持 `rebalance_every_bars` 周期再平衡，指标复用 `backtest.metrics.compute_metrics` 保证与 M4 同口径；买入持有（`rebalance_every_bars=0`）时组合曲线等于逐单元曲线的加权和，对应 PRD 验收「组合回测与逐单元单独回测的加权结果可对齐」。⑤按边界仍未产出调仓单、不调用 OKX、不接引擎/worker；真实状态库副本验证 v12→v13 升级后 5 条 `backtest_runs` 不丢。测试 19 条，`pytest` 全量 1981 passed（基线 1962）；详见 PROGRESS 8.109 |

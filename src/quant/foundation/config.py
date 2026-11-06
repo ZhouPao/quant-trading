@@ -248,6 +248,15 @@ class PortfolioSettings(BaseModel):
     config_dir: Path = Path("./config/portfolios")
     #: 空=加载目录下全部组合；多组合时用 portfolio_id 指定生效组合
     active: str = ""
+    #: 快照写入频率（每 N 根 bar 收盘一次，默认每根；M6-10）
+    snapshot_every_bars: int = 1
+
+    @field_validator("snapshot_every_bars")
+    @classmethod
+    def _check_snapshot_every(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("snapshot_every_bars must be >= 1")
+        return value
 
 
 class DashboardSettings(BaseModel):
