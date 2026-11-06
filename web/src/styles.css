@@ -2246,6 +2246,102 @@ tbody tr.row-active td:first-child {
   min-width: 110px;
 }
 
+/* ---- P0-2 上线检查清单：绿/红/黄三态，只读不改行为 ---- */
+.ready-card {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+}
+
+.ready-card .card-head {
+  margin-bottom: 6px;
+}
+
+.ready-card h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ready-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border: 1px solid var(--line-strong);
+}
+
+.ready-badge.ready-ok {
+  color: var(--ok);
+  border-color: rgba(79, 227, 161, 0.4);
+}
+
+.ready-badge.ready-warn {
+  color: var(--warn);
+  border-color: rgba(255, 159, 64, 0.4);
+}
+
+.ready-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ready-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 11px;
+}
+
+.ready-item:last-child {
+  border-bottom: 0;
+}
+
+.ready-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dimmer);
+}
+
+.ready-pass .ready-dot {
+  background: var(--ok);
+}
+
+.ready-fail .ready-dot {
+  background: var(--bad);
+}
+
+.ready-unknown .ready-dot {
+  background: var(--warn);
+}
+
+.ready-title {
+  flex: none;
+  color: var(--ink);
+}
+
+.ready-detail {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.ready-degraded,
+.ready-note {
+  margin: 6px 0 0;
+  font-size: 10px;
+  color: var(--dimmer);
+  line-height: 1.6;
+}
+
+.ready-degraded {
+  color: var(--warn);
+}
+
 /* ---- M6-14 组合页：权重 / 权益回撤 / 贡献 / 再平衡记录 ---- */
 .pf-page {
   /* main.grid 是 12 列：不跨满会只占 1 列，整页被挤成窄竖条 */

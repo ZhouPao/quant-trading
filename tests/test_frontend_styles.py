@@ -126,6 +126,17 @@ def test_m6_portfolio_page_wiring() -> None:
     assert ".pf-grid" in CSS
 
 
+def test_p02_readiness_checklist() -> None:
+    """P0-2：上线检查清单接口与 M3 页卡片齐备。"""
+    api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
+    assert "ReadinessResponse" in api_ts
+    assert "fetchReadiness" in api_ts
+    assert "上线检查清单" in APP
+    assert "ready-item ready-${item.status}" in APP
+    assert ".ready-card" in CSS
+    assert ".ready-pass .ready-dot" in CSS
+
+
 def test_m812_order_source_filter() -> None:
     """M8-12：订单支持按来源筛选并展示来源列。"""
     api_ts = (SRC / "api.ts").read_text(encoding="utf-8")

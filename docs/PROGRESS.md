@@ -3666,6 +3666,38 @@ rule="daily_report_deviation", level="WARNING")`，消息带日期、偏离度�
 **96.0% → 96.7%**，剩余 5 条 🟡（M8-7/8/12、M6-2/10）。
 PRD M4-8 状态 + §10 补充 46；账本 M4 行/合计/4.1/5/7/8 节同步。
 
+### 8.114 P0-2 上线检查清单（2026-11-06）
+
+按用户确认顺序的第三项：把散落的「够不够格上实盘」风险信号汇成一张
+三态清单，**只做汇总提示、不改变任何行为**（启用绑定的 Pine 门禁
+由后端拦截，M4-16）。
+
+**实现**
+- 后端 `GET /api/readiness?strategy=<id>`（`dashboard/readiness.py`）：
+  ①双副本一致性——复用 `consistency.check()`，只统计**未登记**差异且
+  按策略归因；②Pine 交叉验证——复用启停矩阵同源的
+  `resolve_params` + `worst_pine_deviation`（阈值 5%）；③样本外检验
+  ——`list_backtest_runs(kind="walkforward", status="done")`；④模拟盘
+  连续运行——新增 `SQLiteStore.earliest_equity_ts()`，建议 ≥ 14 天。
+  任一项查询失败按 `unknown` 显式降级并写 `degraded`（AGENTS #7）。
+  `ready` 仅当四项全 `pass`。
+- 前端 M3「策略研究」页新增 `.ready-card`（在策略清单之后、参数分节
+  之前）：绿/红/黄圆点 + 标题 + 说明 + 徽标；随策略切换重新拉取；
+  `api.ts` 同步 `ReadinessResponse` 与 `fetchReadiness`（#6）。
+- 「不合格置灰启用」未做：M4-16 的后端门禁拦截已是更强保障（前端
+  置灰只是提示，后端拦截才是硬约束），避免重复实现。
+
+**实机验收**（8080）：接口四项判定符合真实数据
+（一致性 pass / Pine unknown / walk-forward unknown / 模拟盘 3.9 天 fail）；
+页面卡片三态渲染正确、徽标「有未通过项」、切换 rsi↔sma_cross 联动刷新；
+控制台仅既有 favicon 404。
+
+**测试**：`tests/test_readiness.py` **9 条**（全 pass / 三态各分支 /
+差异按策略归因不冤枉 / 降级显式 / 默认策略）+ 前端契约 1 条。
+**验证**：`pytest` 全量 **2026 passed**（基线 2017）、`vitest` 56、
+`tsc` / `build` / `ruff` 全过；dashboard 已重启加载新接口。
+**记账**：P0-2 属 PRD 外体验增强，需求完成度不变（145/150）。
+
 ---
 
 ## 9. 相关文档

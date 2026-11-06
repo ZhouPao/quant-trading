@@ -68,6 +68,7 @@ import {
   fetchBacktestCompare,
   fetchOrders,
   fetchFills,
+  fetchReadiness,
   cancelBacktest,
   rerunBacktest,
   importPine,
@@ -131,6 +132,7 @@ import {
   type StrategyInfo,
   type TimelineItem,
   type TimelineResponse,
+  type ReadinessResponse,
 } from "./api";
 import {
   bestValue,
@@ -3670,6 +3672,28 @@ function EnginePanel({
         : lag > (engine?.max_catchup_bars ?? 24)
           ? "tag-bad"
           : "tag-warn";
+  // P0-2 上线检查清单：只读汇总「够不够格上实盘」，切换策略时重新拉
+  const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
+  const [readinessError, setReadinessError] = useState(false);
+  useEffect(() => {
+    if (!strategyId) {
+      setReadiness(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetchReadiness(controller.signal, strategyId)
+      .then((res) => {
+        setReadiness(res);
+        setReadinessError(false);
+      })
+      .catch((err) => {
+        if ((err as Error).name === "AbortError") return;
+        setReadiness(null);
+        setReadinessError(true);
+      });
+    return () => controller.abort();
+  }, [strategyId]);
+
   // 三条常驻红字合并成一条状态条，避免同一区块里堆多块告警
   const bindingAlerts = [
     !multiBinding &&
@@ -3724,6 +3748,48 @@ function EnginePanel({
           {runningStrategy ?? "—"}，切换查看不影响引擎。
         </p>
       )}
+      <div className="ready-card">
+        <div className="card-head">
+          <h3>上线检查清单</h3>
+          <span
+            className={`ready-badge ${
+              readiness?.ready ? "ready-ok" : "ready-warn"
+            }`}
+          >
+            {readinessError
+              ? "接口不可用"
+              : readiness
+                ? readiness.ready
+                  ? "全部通过"
+                  : "有未通过项"
+                : "加载中…"}
+          </span>
+        </div>
+        {readiness && readiness.degraded.length > 0 && (
+          <p className="ready-degraded">
+            降级来源：{readiness.degraded.join("、")}（按未评估显示，不静默当通过）
+          </p>
+        )}
+        {readiness ? (
+          <ul className="ready-list">
+            {readiness.items.map((item) => (
+              <li key={item.key} className={`ready-item ready-${item.status}`}>
+                <span className="ready-dot" aria-hidden="true" />
+                <span className="ready-title">{item.title}</span>
+                <span className="ready-detail">{item.detail}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="ready-detail">
+            {readinessError ? "读取失败，切换策略或刷新后重试" : "加载中…"}
+          </p>
+        )}
+        <p className="ready-note">
+          {readiness?.note ??
+            "四项全过再考虑切实盘；启用绑定的 Pine 门禁由后端拦截"}
+        </p>
+      </div>
       <dl className="kv">
         <div>
           <dt>状态</dt>

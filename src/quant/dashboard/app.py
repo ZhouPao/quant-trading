@@ -24,6 +24,7 @@
 - GET /api/processes 7 个常驻进程健康
 - GET /api/equity    权益时序（默认近 24 小时）
 - GET /api/engine    策略引擎健康度（心跳/水位/补评估计数）
+- GET /api/readiness 上线检查清单（双副本一致性/Pine 偏离/样本外/模拟盘时长，P0-2）
 - GET /api/portfolio 组合页聚合（配置/权重/快照/归因/再平衡记录，M6-14）
 - GET /api/candles   K 线面板（本地 parquet + 成交 + 持仓均价）
 - GET /api/strategies 可用策略清单（含 param_spec / 生效来源 / 可编辑字段）
@@ -100,6 +101,7 @@ from quant.dashboard.factors import (
 )
 from quant.dashboard.manual import ManualTradeError, ManualTrader
 from quant.dashboard.portfolio_view import PortfolioView
+from quant.dashboard.readiness import ReadinessView
 from quant.dashboard.service import DashboardService, ProcessControlError
 from quant.dashboard.tasks import ARTIFACT_KINDS, RunNotFound, TaskRunner
 from quant.foundation.errors import QuantError
@@ -239,6 +241,7 @@ def create_app(
     backtests = BacktestService(service.settings, service.store, service.redis)
     factor_service = FactorService(service.settings)
     portfolio_view = PortfolioView(service.store, service.settings)
+    readiness_view = ReadinessView(service.store, service.settings)
     # 回测失败要发邮件（M9-11）：这里用真实 SMTP 配置，而不是 service 里
     # 那个「只查不发」的 no-op alerter
     backtest_alerts = AlertService(
@@ -520,6 +523,15 @@ def create_app(
     ) -> JSONResponse:
         _guard_write(request, service.settings.dashboard.token)
         return JSONResponse(await service.resolve_reconciliation(rec_id))
+
+    @app.get("/api/readiness")
+    async def readiness(
+        strategy: str | None = Query(None),
+    ) -> JSONResponse:
+        """P0-2 上线检查清单：双副本一致性 / Pine 偏离 / 样本外 / 模拟盘时长。"""
+        return JSONResponse(
+            await asyncio.to_thread(readiness_view.snapshot, strategy)
+        )
 
     @app.get("/api/portfolio")
     async def portfolio(

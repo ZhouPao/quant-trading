@@ -1177,6 +1177,32 @@ export async function fetchPortfolio(signal: AbortSignal) {
   return getJson<PortfolioResponse>("/api/portfolio", signal);
 }
 
+/** P0-2 上线检查清单：判断策略够不够格切实盘（只读，不改变行为）。 */
+export type ReadinessItem = {
+  key: string;
+  title: string;
+  status: "pass" | "fail" | "unknown";
+  detail: string;
+};
+
+export type ReadinessResponse = {
+  ts: number;
+  strategy: string;
+  items: ReadinessItem[];
+  ready: boolean;
+  degraded: string[];
+  note: string;
+};
+
+/** P0-2：按策略读取上线检查清单。 */
+export async function fetchReadiness(
+  signal: AbortSignal,
+  strategy?: string,
+) {
+  const qs = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return getJson<ReadinessResponse>(`/api/readiness${qs}`, signal);
+}
+
 /** M5-15：已注册因子列表。 */
 export async function fetchFactors(signal: AbortSignal) {
   const data = await getJson<{ factors: FactorSummary[] }>(

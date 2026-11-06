@@ -2674,6 +2674,11 @@ class SQLiteStore:
             (status, reason, signal_id),
         )
 
+    def earliest_equity_ts(self) -> int | None:
+        """权益快照最早时间（P0-2 上线检查：估算模拟盘连续运行时长）。"""
+        row = self._query_one("SELECT MIN(ts) AS t FROM equity_snapshots", ())
+        return row["t"] if row is not None and row["t"] is not None else None
+
     def _execute(self, sql: str, params: tuple) -> int:
         """执行写语句，返回受影响行数（调用方不关心时可忽略）。"""
         with self._lock:
