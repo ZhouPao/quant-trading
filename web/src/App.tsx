@@ -140,6 +140,7 @@ import {
 } from "./compare";
 import { CandleChart } from "./chart/CandleChart";
 import { EChart } from "./chart/EChart";
+import { PortfolioPanel } from "./portfolio/PortfolioPanel";
 import { IndicatorBar } from "./chart/IndicatorBar";
 import type { EChartsOption } from "echarts";
 import {
@@ -239,7 +240,7 @@ const TABS = [
   { key: "strategy", label: "策略研究", status: "live" },
   { key: "backtest", label: "回测分析", status: "live" },
   { key: "factors", label: "因子库", status: "live" },
-  { key: "portfolio", label: "组合管理", status: "todo" },
+  { key: "portfolio", label: "组合管理", status: "live" },
   { key: "risk", label: "风险控制", status: "live" },
   { key: "execution", label: "交易执行", status: "live" },
   { key: "logs", label: "日志告警", status: "live" },
@@ -247,8 +248,6 @@ const TABS = [
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
-type PendingTab = "factors" | "portfolio" | "settings";
-
 // M3-16 策略一键回测：详情页把当前组合与策略带进回测面板，
 // M3-17 另可带 `runId` 直接打开一条历史结果；
 // M3-18 带 `pick` 时把若干参数版本设为对比对象；
@@ -308,30 +307,6 @@ function loadNavCollapsed(): boolean {
 }
 
 // 尚未实现的模块只展示范围说明，避免空白页让人误以为功能已就绪
-const PENDING_MODULES: Record<
-  PendingTab,
-  { title: string; code: string; detail: string; items: string[] }
-> = {
-  factors: {
-    title: "因子库",
-    code: "M5",
-    detail: "因子注册、时序/横截面计算与缓存、有效性检验。",
-    items: ["因子注册表与元数据", "时序 / 横截面双范围计算", "IC / 分层回测等有效性检验"],
-  },
-  portfolio: {
-    title: "组合管理",
-    code: "M6",
-    detail: "多策略 × 多品种的权重、资金分配、再平衡与归因。",
-    items: ["equal / fixed / inverse_vol / vol_target 四种分配法", "再平衡冷却期", "收益归因"],
-  },
-  settings: {
-    title: "系统设置",
-    code: "M10",
-    detail: "配置只读与白名单热改、凭证健康、保留分档、进程控制、备份自检。",
-    items: ["配置视图与白名单热改", "凭证健康检查", "数据保留与备份自检"],
-  },
-};
-
 // 回测历史改由后端 backtest_runs 持久化（M4-9/M4-10），前端只做展示与筛选
 const HISTORY_LIMIT = 20;
 const COMPARE_LIMIT = 4;
@@ -917,7 +892,6 @@ export default function App() {
                   >
                     <span className="nav-idx">{String(index + 1).padStart(2, "0")}</span>
                     <span className="nav-label">{item.label}</span>
-                    {item.status === "todo" && <span className="nav-tag">未开始</span>}
                   </button>
                 </li>
               ))}
@@ -1520,7 +1494,7 @@ export default function App() {
 
         {tab === "factors" && <FactorPanel />}
 
-        {tab === "portfolio" && <ModulePlaceholder tab={tab} />}
+        {tab === "portfolio" && <PortfolioPanel />}
       </main>
       </div>
 
@@ -2124,25 +2098,6 @@ function formatConfigValue(value: unknown): string {
   if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "—";
   if (typeof value === "boolean") return value ? "true" : "false";
   return String(value);
-}
-
-/** 未开始模块的占位卡：只说明范围，不提供任何写操作。 */
-function ModulePlaceholder({ tab }: { tab: PendingTab }) {
-  const meta = PENDING_MODULES[tab];
-  return (
-    <section className="card placeholder reveal">
-      <div className="card-head">
-        <h2>{meta.title}</h2>
-        <span className="card-note">PRD {meta.code} · 未开始</span>
-      </div>
-      <p className="placeholder-text">{meta.detail}</p>
-      <ul className="placeholder-list">
-        {meta.items.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
-    </section>
-  );
 }
 
 /** 风控限额：上限是 worker 发布的生效值，已用额度由后端现算。 */

@@ -107,6 +107,25 @@ def test_candle_sync_config_covers_all_periods() -> None:
     assert "first_sync_bars = 300" in text
 
 
+def test_m6_portfolio_page_wiring() -> None:
+    """M6-14 组合页：前后端契约同步、占位卡移除、四个视图齐备。"""
+    api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
+    panel_ts = (SRC / "portfolio" / "PortfolioPanel.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert '"/api/portfolio"' in api_ts
+    assert "export type PortfolioResponse" in api_ts
+    assert "fetchPortfolio" in api_ts
+    assert "PortfolioPanel" in APP
+    assert "ModulePlaceholder" not in APP
+    for keyword in ("目标权重", "组合权益与回撤", "各单元贡献", "再平衡记录"):
+        assert keyword in panel_ts
+    assert "PieChart" in (SRC / "chart" / "EChart.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert ".pf-grid" in CSS
+
+
 def test_candles_page_labels_market_regime() -> None:
     """K 线页必须标注行情口径，避免把模拟盘行情误判成数据错误。"""
     api_ts = (SRC / "api.ts").read_text(encoding="utf-8")
@@ -193,5 +212,5 @@ def test_chart_bar_width_cap_and_sparse_hint() -> None:
     assert options_ts.count("barMaxWidth: MAX_BAR_WIDTH") == 3
     assert "SPARSE_BARS" in APP
     assert "该周期本地仅" in APP
-    # 组合管理确实还没做，保留 todo
-    assert '{ key: "portfolio", label: "组合管理", status: "todo" }' in APP
+    # M6-14 组合页已上线（8-4），导航不再是 todo
+    assert '{ key: "portfolio", label: "组合管理", status: "live" }' in APP

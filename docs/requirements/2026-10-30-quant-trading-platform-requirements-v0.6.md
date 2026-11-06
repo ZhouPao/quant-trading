@@ -468,7 +468,7 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 ---
 
-### 4.6 组合管理（M6）🟡 进行中（8-1 ~ 8-3 领域层已交付，余组合页与调度接线）
+### 4.6 组合管理（M6）✅ 已交付（8-1 ~ 8-4 收官，余 2 条自动运行类 🟡）
 
 **职责**：当同时跑多个「策略 × 品种」单元时，决定「钱怎么分、仓位怎么控、什么时候调」。当前系统为单策略单品种，本节为完整设计，排 MS7+。
 
@@ -500,20 +500,20 @@ data/factors/{factor}/{bar_size}/{year}.parquet
 
 | 编号 | 功能项 | 详细要求 | 来源 | 状态 |
 |---|---|---|---|---|
-| M6-1 | 组合配置 | 组合 = 若干「策略 × 品种」单元 + 权重 + 分配方法 + 再平衡策略；独立 toml，看板可读 | 新增 | 🟡 |
+| M6-1 | 组合配置 | 组合 = 若干「策略 × 品种」单元 + 权重 + 分配方法 + 再平衡策略；独立 toml，看板可读 | 新增 | ✅ |
 | M6-2 | 单元管理 | 单元可单独启用/停用；停用时保留持仓与历史，仅停止新信号 | 新增 | 🟡 |
 | M6-3 | 资金分配 | 四种方法：等权、固定权重、波动率倒数、目标波动；单一组合只用一种，不做混合 | F3.4/F4.3 局部 | ✅ |
 | M6-4 | 权重归一与上限 | 权重归一后总和为 1；单单元上限可配；组合总仓位仍受 M7 `max_total_pct` 约束 | 新增 | ✅ |
 | M6-5 | 组合层风控 | 组合总回撤上限、单元间相关性上限、单单元最大贡献度；触发时降权或暂停该单元 | 新增 | ✅ |
 | M6-6 | 再平衡触发 | 支持日历（固定周期）与阈值（权重漂移超 `drift_pct`）两种，可同时开启 | 新增 | ✅ |
 | M6-7 | 再平衡冷却期 | 触发后 N 小时内不再触发，避免反复调仓吃掉收益 | 新增 | ✅ |
-| M6-8 | 调仓单生成 | `RebalancePlan` 拆成各单元的目标增量，交由 M8 统一下单并审计 | 新增 | 🟡 |
-| M6-9 | 再平衡失败回滚 | 部分单元下单失败时不重复追单，记录失败原因，下一周期重新评估 | 新增 | 🟡 |
+| M6-8 | 调仓单生成 | `RebalancePlan` 拆成各单元的目标增量，交由 M8 统一下单并审计 | 新增 | ✅ |
+| M6-9 | 再平衡失败回滚 | 部分单元下单失败时不重复追单，记录失败原因，下一周期重新评估 | 新增 | ✅ |
 | M6-10 | 快照与存储 | 每次评估写 `PortfolioSnapshot`；频率可配（默认每根 bar 收盘） | 新增 | 🟡 |
 | M6-11 | 绩效归因 | 组合收益拆到单元；区分「权重配置贡献」与「单元自身收益」 | 新增 | ✅ |
 | M6-12 | 组合回测 | 用历史数据模拟多单元并行运行与再平衡，输出组合级绩效指标（与 M4 同口径） | 新增 | ✅ |
 | M6-13 | 与单策略模式兼容 | 未配置组合时系统行为与现在完全一致：单策略单品种直接跑，不经过组合层 | 新增 | ✅ |
-| M6-14 | 组合页展示 | 权重饼图、组合权益与回撤曲线、各单元贡献瀑布图、再平衡记录 | 新增 | ⬜ |
+| M6-14 | 组合页展示 | 权重饼图、组合权益与回撤曲线、各单元贡献瀑布图、再平衡记录 | 新增 | ✅ |
 
 **不做**：动态择时切换权重、机器学习权重优化、跨交易所组合、组合内对冲配对。
 
@@ -1059,3 +1059,4 @@ MS1–MS3 的逐条验收已达成，标准保留在 v0.5 第 3.7 节。MS4 起�
 | 2026-11-06 | v0.6（补充 41，M6 8-1 组合模型与资金分配） | M6 开工，8-1 覆盖 M6-1/2/3/4/13：M6-3/M6-4/M6-13 转 ✅，M6-1/M6-2 转 🟡（看板可读与停用接线留待 8-4/8-3）。①新建 `src/quant/portfolio/`：`models.py` 用 `dataclass(frozen=True, slots=True)` 定义 `PortfolioConfig`/`PortfolioUnit`/`RebalanceConfig`/`PortfolioRiskConfig`，`__post_init__` 校验分配法、重复 `unit_key`、权重上限与波动率窗口；`loader.py` 读 `config/portfolios/<id>.toml`，比例经 `Decimal(str(value))` 转换避免 TOML float 精度损失，目录不存在返回空列表、单文件非法显式抛 `PortfolioConfigError`。②`allocator.py` 实现 `Allocator.allocate(equity, config)` 四法互斥：equal 等权、fixed 用配置权重、inverse_vol 按 1/σ、vol_target 按目标波动缩放总敞口（Σw≤1，其余为现金；组合波动按单元不相关近似），并提供 `annualized_volatility()` 供后续从 `BarStorage` 估算 σ。③归一化与单单元上限：超限部分按比例回分给其余单元，上限不可行（cap×N<1）直接报错，不静默钳制。④`[portfolio] enabled=false` 默认关闭，`Settings.portfolio` 为纯新增字段，未配置时引擎/worker/风控完全不经过组合层；`config/portfolios/core.toml.example` 给双单元示例。⑤按 PRD 边界本批**不产出调仓单、不调用 OKX、不建表**，组合风控/再平衡/快照/归因/组合回测/组合页留 8-2 ~ 8-4。测试 31 条（模型校验/加载/四法/上限/波动率/兼容性），`pytest` 全量 1962 passed；详见 PROGRESS 8.108 |
 | 2026-11-06 | v0.6（补充 42，M6 8-2 快照存储、绩效归因与组合回测） | 8-2 覆盖 M6-10/11/12：M6-11/M6-12 转 ✅，M6-10 转 🟡（快照生产者待 8-3 接线）。①**schema v13**：在 `_MIGRATIONS` 末尾追加一段，建 `portfolio_state`（单行 JSON 存当前权重与启用单元）与 `portfolio_snapshots`（`ts`/`equity`/`unit_equity`/`weights`/`drawdown`），金额一律 TEXT 存 Decimal 字符串、`{unit_key: Decimal}` 用稳定 JSON 文本；建表与索引均 IF NOT EXISTS，不改历史 DDL。`SCHEMA_VERSION` 12→13，同步 `test_dead_letters.py` 的版本断言。②`PortfolioSnapshot` 模型（`__post_init__` 校验 ts/权益/回撤与两个映射键集合一致）+ `PortfolioStore` 门面（隔离 DB 与领域模型）+ `SQLiteStore` 六个读写方法；同 `(portfolio_id, ts)` 覆盖、快照按 ts 升序读回；`[portfolio] snapshot_every_bars=1` 频率可配且校验 ≥1。③`Attribution.report(snapshots, config) -> pd.DataFrame`：Brinson-Fachler 等权基准简化，把组合收益拆为 `base`（基准）/ `allocation`（权重配置）/ `selection`（单元自身），恒等式 `Σtotal = R_p` 有测试锁定；精确 Decimal 见 `rows()`。④`PortfolioBacktest`：各单元权益曲线按时间轴严格对齐后合成组合权益，支持 `rebalance_every_bars` 周期再平衡，指标复用 `backtest.metrics.compute_metrics` 保证与 M4 同口径；买入持有（`rebalance_every_bars=0`）时组合曲线等于逐单元曲线的加权和，对应 PRD 验收「组合回测与逐单元单独回测的加权结果可对齐」。⑤按边界仍未产出调仓单、不调用 OKX、不接引擎/worker；真实状态库副本验证 v12→v13 升级后 5 条 `backtest_runs` 不丢。测试 19 条，`pytest` 全量 1981 passed（基线 1962）；详见 PROGRESS 8.109 |
 | 2026-11-06 | v0.6（补充 43，M6 8-3 组合风控、再平衡与调仓单） | 8-3 覆盖 M6-5/6/7/8/9：M6-5/6/7 转 ✅，M6-8/9 转 🟡（自动调度与 worker 失败回写待 8-4）。①**schema v14~v16**：为避免 `executescript` 中途失败导致 user_version 不推进、后续语句永远补不上，拆成三段单语句迁移——`signals.source`（v14）、`orders.source`（v15）、`portfolio_rebalance_attempts` 表（v16）；默认值 `webhook` 兼容存量数据，`SCHEMA_VERSION` 13→16。`Signal` 加 `source` 字段（枚举 webhook/manual/portfolio）并同步 `to_json`/`from_json`（旧 JSON 缺省回落 webhook）；`save_signal`/`save_order` 落库同源 source。②**组合层风控**：`PortfolioRisk` 按总回撤/单元相关性/单单元贡献度产出降权或暂停建议，`apply()` 作用到目标权重后归一；只改调仓金额，M7 checker 仍是唯一限额执行者。③**再平衡**：`Rebalancer.evaluate` 支持 calendar / threshold / both + 冷却期，权重漂移未超或无动作返回 `None`；`RebalancePlan.deltas` 按 `(目标权重 − 当前权重) × 权益` 计算金额增量，粉尘阈值过滤。④**调仓单**：deltas 转标准 `Signal`（`qty=None` 由 M8-14 服务端算量、`size_pct=abs(delta)/equity`、`source=portfolio`、signal_id 由计划 ts+单元确定性派生），`PortfolioRebalanceService` 先 `save_signal` 留痕再经**唯一 M8 `SignalQueue`** 入队；`enabled=false` 时拒绝提交。⑤**失败回滚**：同 `(组合, 计划 ts, 单元)` 只记一次，部分失败不追单、保留原因，下一周期新 plan_ts 重新评估。⑥按边界仍未接自动调度/快照生产者/组合页。测试 19 条，`pytest` 全量 2000 passed（基线 1981；另同步 `test_dead_letters` 版本断言与 `test_sqlite_store` 假信号字段）；详见 PROGRESS 8.110 |
+| 2026-11-06 | v0.6（补充 44，M6 8-4 组合页与调度入口，M6 收官） | 8-4 覆盖 M6-14 并补 M6-1/8/9 的收口：四条转 ✅，M6-2/M6-10 保留 🟡（自动运行接线）。①**只读聚合接口** `GET /api/portfolio`（`dashboard/portfolio_view.py`）：把配置/目标权重/快照/归因/再平衡记录拼成一次响应，金额与比例一律以 Decimal 字符串出网；配置损坏、SQLite 读取失败、分配不可行分别写进 `degraded`，不静默渲染 0（AGENTS #7）。`api.ts` 同步类型与 `fetchPortfolio`（#6）。②**组合页** `web/src/portfolio/PortfolioPanel.tsx`：权重饼图、权益/回撤双轴曲线、各单元贡献（权重配置 + 单元自身堆叠柱 + 合计散点）、单元清单与再平衡记录表；`TABS` 组合管理 todo→live，删除已无引用的 `ModulePlaceholder`/`PENDING_MODULES`；`EChart` 注册 Pie/Legend/Scatter。③**布局修复（实机发现）**：`main.grid` 是 12 列，`.pf-page` 未声明跨列导致整页被挤成约 1 列宽的竖条；补 `grid-column: 1/-1` 后实测页面宽 1138px、双列各 563px。④**调度入口** `quant portfolio-tick`：默认 dry-run 写 `PortfolioSnapshot` + 评估 `RebalancePlan`；`--execute` 才经 `PortfolioRebalanceService` → 唯一 M8 `SignalQueue` 提交，且要求 `enabled=true`。单元权益按目标权重分摊总权益（非逐单元真实持仓），响应里显式标注。⑤**worker 终态回写**：`SQLiteStore.save_signal` 在 `source=portfolio` 且状态为 executed/rejected 时自动 `UPDATE portfolio_rebalance_attempts`，避免改 worker 的 5 条拒单分支；另补 `list_rebalance_attempts`。⑥**示例配置修正**：原示例只启用 1 个单元却设 `max_unit_weight=0.6`，`cap×N<1` 判定不可行导致组合页 `degraded=allocator`；改为双单元启用并加注释。⑦边界如实：CLI 需外部 cron/timer 调度，非常驻自动写快照；引擎按组合停用单元的接线未做。测试 12 条，`pytest` 全量 **2012 passed**（基线 2000），`vitest` 56、`tsc`/`build`/`ruff` 全过；浏览器实机（8080）：3 图表、5 分区、单元表 2 行、无横向溢出、控制台仅既有 favicon 404。详见 PROGRESS 8.111 |

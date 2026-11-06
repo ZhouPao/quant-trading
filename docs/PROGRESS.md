@@ -3561,6 +3561,62 @@ PRD 4.6.4 状态 + §10 补充 43；账本 3.6/4.1/4.2/5/7/8 节同步。
 贡献瀑布、再平衡记录）+ 调度接线（快照生产者、自动再平衡、worker 失败
 回写），并补齐 M6-1/2/10 的 🟡 项。
 
+### 8.111 M6 组合管理（8-4）：组合页 + 调度入口，M6 收官（2026-11-06）
+
+**范围**：M6-14 组合页；补齐 M6-1 的「看板可读」、M6-8 的提交入口、
+M6-9 的 worker 终态回写，并提供 M6-10 的快照生产者入口。
+
+**实现**
+- **只读聚合** `GET /api/portfolio`（`dashboard/portfolio_view.py`）：
+  一次响应给出配置、目标权重、单元清单、快照序列、归因、再平衡记录、
+  当前状态与再平衡/风控阈值。金额与比例以 Decimal 字符串出网；
+  配置损坏 / SQLite 失败 / 分配不可行分别写入 `degraded`（AGENTS #7），
+  `api.ts` 同步 `PortfolioResponse` 与 `fetchPortfolio`（#6）。
+- **组合页** `web/src/portfolio/PortfolioPanel.tsx`：权重饼图、
+  权益/回撤双轴曲线、各单元贡献（权重配置 + 单元自身堆叠柱 + 合计散点）、
+  单元清单、再平衡记录表；空态给出可直接复制的 `quant portfolio-tick`
+  命令，降级来源显式提示。`TABS` 组合管理 todo→live，删除已无引用的
+  `ModulePlaceholder` / `PENDING_MODULES` / `PendingTab`。
+  `EChart` 按需注册 Pie/Legend/Scatter。
+- **调度入口** `quant portfolio-tick`（默认 dry-run）：读总权益 → 写
+  `PortfolioSnapshot` 与 `portfolio_state` → 评估 `RebalancePlan`；
+  `--execute` 才经 `PortfolioRebalanceService` → **唯一 M8 SignalQueue**
+  提交，并要求 `[portfolio] enabled=true`。单元权益按目标权重分摊总权益
+  （不是逐单元真实持仓估值），响应里显式标注，避免误读。
+  接自动调度用外部 cron/systemd timer，supervisor 的 7 进程清单不变。
+- **worker 终态回写**：`SQLiteStore.save_signal` 在 `source=portfolio`
+  且状态 executed/rejected 时自动更新 `portfolio_rebalance_attempts`，
+  无需改 worker 的 5 条拒单分支；另补 `list_rebalance_attempts` 供页面展示。
+
+**实机发现并修复的两个问题（如实）**
+1. **组合页被挤成窄竖条**：`main.grid` 是 12 列网格，`.pf-page` 没声明
+   跨列，只占 1 列。首次截图发现后补 `grid-column: 1/-1`；重建后实测
+   页面宽 **1138px**、双列各 563px，三个图表画布齐全。
+2. **示例配置不可行**：`core.toml.example` 只启用 1 个单元却设
+   `max_unit_weight=0.60`，`cap×N<1` 触发 `AllocationError`，接口返回
+   `degraded=["allocator"]`。改为双单元启用并加注释；修正后
+   `weights=0.5/0.5`、`degraded=[]`。
+
+**验收**：浏览器（8080，1440×1200）组合页显示 3 个图表、5 个分区、
+单元表 2 行、3 条快照、2 条归因、再平衡记录空态、`docScroll==docClient`、
+控制台仅既有 favicon 404；截图 `/tmp/m6_portfolio_fixed.png`。
+`pytest` 全量 **2012 passed**（基线 2000）、`vitest` **56 passed**、
+`tsc` / `build` / `ruff` 全过。
+**过程问题**：全量第一次 2 个 CLI 测试失败——其它测试把日志改到 stdout，
+`json.loads(capsys.out)` 吃到多余行；改用 `JSONDecoder.raw_decode` 只取
+首个 JSON 对象后全绿。另同步 `test_frontend_styles.py` 里
+「组合管理仍 todo」的过时断言。
+
+**记账**：M6-1/8/9/14 → ✅；M6-2（引擎停用接线）、M6-10（常驻每根 bar
+自动写快照）保持 🟡。总览 **140/9/1 → 144/6/0**，完成率
+**93.3% → 96.0%**，**无未开始（⬜）条目**。
+PRD 4.6.4 状态 + §10 补充 44；账本 3.6/4.1/4.2/5/7/8 节同步。
+
+**M6 收官边界**：8-1 ~ 8-4 共 12 ✅ / 2 🟡。领域层、组合页、聚合接口、
+CLI 评估入口、M8 留痕与失败回写均齐备；**仍未接进常驻进程自动运行**——
+快照需外部调度 `portfolio-tick`，引擎也未按组合的停用单元过滤信号。
+默认 `enabled=false`，未启用时系统行为与单策略完全一致。
+
 ---
 
 ## 9. 相关文档

@@ -31,4 +31,5 @@ strategy_id = "rsi"
 inst_id = "ETH-USDT"         # 本地需先有该品种 K 线（quant sync-candles --inst ETH-USDT）
 params_ref = "rsi"
 weight = "0.40"
-enabled = false              # 停用：保留配置/持仓/历史，仅停止新信号（M6-2）
+enabled = true               # 改 false 可停用：保留配置/持仓/历史，仅停止新信号（M6-2）
+# 注意：只启用 1 个单元时 max_unit_weight 必须 >= 1，否则 cap×N<1 会判定配置不可行

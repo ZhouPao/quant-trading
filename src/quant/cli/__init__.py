@@ -29,6 +29,7 @@ from quant.cli.kill_switch import main as kill_switch_main
 from quant.cli.monitor import main as monitor_main
 from quant.cli.optimize import main as optimize_main
 from quant.cli.paper_report import main as paper_report_main
+from quant.cli.portfolio_tick import main as portfolio_tick_main
 from quant.cli.prune import main as prune_main
 from quant.cli.research import main as research_main
 from quant.cli.restore import main as restore_main
@@ -531,6 +532,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # portfolio-tick
+    p_pf = sub.add_parser(
+        "portfolio-tick",
+        help="组合评估：写快照 + 再平衡计划（默认 dry-run，不提交调仓单）",
+    )
+    p_pf.add_argument(
+        "--equity",
+        default=None,
+        help="总权益覆盖；不传则读 equity_snapshots 最新一条",
+    )
+    p_pf.add_argument(
+        "--execute",
+        action="store_true",
+        help="真正把调仓单提交到 M8 队列（要求 [portfolio] enabled=true）",
+    )
+    p_pf.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     # test-email
     p_email = sub.add_parser(
         "test-email",
@@ -795,6 +815,8 @@ def main(argv: list[str] | None = None) -> int:
         return supervisor_main(args)
     elif args.command == "sync-candles":
         return sync_candles_main(args)
+    elif args.command == "portfolio-tick":
+        return portfolio_tick_main(args)
     elif args.command == "test-email":
         return test_email_main(args)
     else:  # pragma: no cover

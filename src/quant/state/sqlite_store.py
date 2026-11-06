@@ -495,6 +495,16 @@ class SQLiteStore:
                 signal.source,
             ),
         )
+        # M6-9：worker 把组合调仓单判为终态时同步回写留痕，避免改 worker
+        # 的 5 条拒单分支。只更新已有记录，不新建（计划去重不受影响）。
+        if signal.source == "portfolio" and status in ("executed", "rejected"):
+            self._execute(
+                """
+                UPDATE portfolio_rebalance_attempts
+                SET status = ?, reason = ? WHERE signal_id = ?
+                """,
+                (status, f"worker signal {status}", signal.signal_id),
+            )
 
     def get_signal(self, signal_id: str) -> dict | None:
         row = self._query_one(
@@ -2632,6 +2642,32 @@ class SQLiteStore:
             (portfolio_id, plan_ts),
         )
         return [dict(row) for row in rows]
+
+    def list_rebalance_attempts(
+        self, portfolio_id: str, limit: int = 50
+    ) -> list[dict[str, object]]:
+        """组合页用：跨计划的再平衡记录，按时间倒序。"""
+        rows = self._query_all(
+            """
+            SELECT * FROM portfolio_rebalance_attempts
+            WHERE portfolio_id = ?
+            ORDER BY created_ts DESC, unit_key LIMIT ?
+            """,
+            (portfolio_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def mark_rebalance_attempt(
+        self, signal_id: str, status: str, reason: str | None = None
+    ) -> None:
+        """worker 终态回写（M6-9）：只更新已有记录，不新建，避免绕过计划去重。"""
+        self._execute(
+            """
+            UPDATE portfolio_rebalance_attempts
+            SET status = ?, reason = ? WHERE signal_id = ?
+            """,
+            (status, reason, signal_id),
+        )
 
     def _execute(self, sql: str, params: tuple) -> int:
         """执行写语句，返回受影响行数（调用方不关心时可忽略）。"""

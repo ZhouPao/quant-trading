@@ -1106,6 +1106,73 @@ export type FactorSummary = {
   aliases: string[];
 };
 
+/** M6-14 组合页：单元、快照、归因与再平衡留痕（金额/比例均为 Decimal 字符串）。 */
+export type PortfolioUnitView = {
+  unit_key: string;
+  strategy_id: string;
+  inst_id: string;
+  enabled: boolean;
+  weight: string;
+};
+
+export type PortfolioSnapshotView = {
+  ts: number;
+  equity: string;
+  drawdown: string;
+  unit_equity: Record<string, string>;
+  weights: Record<string, string>;
+};
+
+export type RebalanceAttemptView = {
+  portfolio_id: string;
+  plan_ts: number;
+  unit_key: string;
+  signal_id: string;
+  status: string;
+  reason: string | null;
+  created_ts: number;
+};
+
+export type PortfolioResponse = {
+  enabled: boolean;
+  portfolio_id: string | null;
+  available: string[];
+  degraded: string[];
+  reason: string | null;
+  units: PortfolioUnitView[];
+  weights: Record<string, string>;
+  snapshots: PortfolioSnapshotView[];
+  attribution: {
+    unit_key: string;
+    allocation: string;
+    selection: string;
+    total: string;
+  }[];
+  rebalance_attempts: RebalanceAttemptView[];
+  allocator: string | null;
+  rebalance: {
+    mode: string;
+    interval_hours: number;
+    drift_pct: string;
+    cooldown_hours: number;
+  } | null;
+  risk: {
+    max_drawdown_pct: string;
+    max_correlation: string;
+    max_unit_contribution_pct: string;
+  } | null;
+  state: {
+    weights: Record<string, string>;
+    enabled_units: string[];
+    updated_ts: number;
+  } | null;
+};
+
+/** M6-14：组合页聚合（配置/权重/快照/归因/再平衡记录）。 */
+export async function fetchPortfolio(signal: AbortSignal) {
+  return getJson<PortfolioResponse>("/api/portfolio", signal);
+}
+
 /** M5-15：已注册因子列表。 */
 export async function fetchFactors(signal: AbortSignal) {
   const data = await getJson<{ factors: FactorSummary[] }>(

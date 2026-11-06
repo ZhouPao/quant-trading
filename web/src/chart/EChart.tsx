@@ -1,8 +1,15 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts/core";
-import { BarChart, HeatmapChart, LineChart } from "echarts/charts";
+import {
+  BarChart,
+  HeatmapChart,
+  LineChart,
+  PieChart,
+  ScatterChart,
+} from "echarts/charts";
 import {
   GridComponent,
+  LegendComponent,
   TooltipComponent,
   VisualMapComponent,
 } from "echarts/components";
@@ -13,7 +20,10 @@ echarts.use([
   LineChart,
   BarChart,
   HeatmapChart,
+  PieChart,
+  ScatterChart,
   GridComponent,
+  LegendComponent,
   TooltipComponent,
   VisualMapComponent,
   CanvasRenderer,

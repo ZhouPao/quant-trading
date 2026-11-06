@@ -2246,6 +2246,113 @@ tbody tr.row-active td:first-child {
   min-width: 110px;
 }
 
+/* ---- M6-14 组合页：权重 / 权益回撤 / 贡献 / 再平衡记录 ---- */
+.pf-page {
+  /* main.grid 是 12 列：不跨满会只占 1 列，整页被挤成窄竖条 */
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.pf-note {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dimmer);
+}
+
+.pf-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pf-card {
+  min-width: 0;
+}
+
+.pf-wide {
+  grid-column: 1 / -1;
+}
+
+.pf-chart {
+  width: 100%;
+}
+
+.pf-empty {
+  padding: 24px 12px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--dim);
+}
+
+.pf-alert,
+.pf-reason {
+  margin: 6px 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.pf-alert {
+  border-left: 2px solid var(--bad);
+  background: rgba(255, 95, 95, 0.045);
+}
+
+.pf-kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.pf-kv span {
+  color: var(--dimmer);
+}
+
+.pf-kv strong {
+  font-weight: 500;
+}
+
+.pf-ok {
+  color: var(--ok);
+}
+
+.pf-off {
+  color: var(--warn);
+}
+
+.pf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.pf-table th,
+.pf-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.pf-table th {
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--dimmer);
+}
+
+.pf-table td.mono {
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+@media (max-width: 900px) {
+  .pf-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---- M3 策略清单：一屏内既是选择器也是概览 ---- */
 .engine-strategy-bar {
   display: flex;
