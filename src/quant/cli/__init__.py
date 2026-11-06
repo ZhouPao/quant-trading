@@ -39,6 +39,7 @@ from quant.cli.serve_webhook import main as serve_webhook_main
 from quant.cli.simulate_alert import main as simulate_alert_main
 from quant.cli.supervisor import main as supervisor_main
 from quant.cli.sync_candles import main as sync_candles_main
+from quant.cli.sync_trades import main as sync_trades_main
 from quant.cli.test_email import main as test_email_main
 from quant.cli.validate_data import main as validate_data_main
 from quant.cli.walkforward import main as walk_forward_main
@@ -532,6 +533,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default="config/config.toml", help="配置文件路径"
     )
 
+    # sync-trades
+    p_trades = sub.add_parser(
+        "sync-trades",
+        help="采集 OKX 逐笔成交（M2-14 订单流足迹图）：回补 + 实时",
+    )
+    p_trades.add_argument(
+        "--inst",
+        default=None,
+        help="逗号分隔的 instId；默认取 config [candles] insts",
+    )
+    p_trades.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        help="回补天数（默认 1，建议 1~7）",
+    )
+    p_trades.add_argument(
+        "--loop", action="store_true", help="回补后常驻实时采集（供 supervisor 托管）"
+    )
+    p_trades.add_argument(
+        "--config", default="config/config.toml", help="配置文件路径"
+    )
+
     # portfolio-tick
     p_pf = sub.add_parser(
         "portfolio-tick",
@@ -815,6 +839,8 @@ def main(argv: list[str] | None = None) -> int:
         return supervisor_main(args)
     elif args.command == "sync-candles":
         return sync_candles_main(args)
+    elif args.command == "sync-trades":
+        return sync_trades_main(args)
     elif args.command == "portfolio-tick":
         return portfolio_tick_main(args)
     elif args.command == "test-email":

@@ -12,5 +12,6 @@ from quant.models.funding_rate import FundingRate
 from quant.models.instrument import Instrument
 from quant.models.open_interest import OpenInterest
 from quant.models.tick import Tick
+from quant.models.trade import Trade
 
-__all__ = ["Bar", "Tick", "Instrument", "FundingRate", "OpenInterest"]
+__all__ = ["Bar", "Tick", "Instrument", "FundingRate", "OpenInterest", "Trade"]

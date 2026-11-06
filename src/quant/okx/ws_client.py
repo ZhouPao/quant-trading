@@ -26,6 +26,7 @@ from typing import Any
 
 from quant.foundation.logger import get_logger
 from quant.models import Tick
+from quant.models.trade import Trade
 
 Callback = Callable[[dict[str, Any]], Awaitable[None]]
 ConnectFn = Callable[..., Any]
@@ -330,4 +331,22 @@ def _default_connect(*args: Any, **kwargs: Any) -> Any:
     return websockets.connect(*args, **kwargs)
 
 
-__all__ = ["WSClient", "parse_ticker", "ws_status_key"]
+def parse_trade(item: dict[str, Any]) -> Trade | None:
+    """OKX trades 频道单条数据 → Trade。
+
+    字段缺失或非法时返回 None，不抛错（与 parse_ticker 一致）。
+    """
+    try:
+        return Trade(
+            ts=int(item["ts"]),
+            inst_id=str(item["instId"]),
+            trade_id=str(item["tradeId"]),
+            px=Decimal(str(item["px"])),
+            sz=Decimal(str(item["sz"])),
+            side=str(item["side"]),
+        )
+    except (KeyError, InvalidOperation, TypeError, ValueError):
+        return None
+
+
+__all__ = ["WSClient", "parse_ticker", "parse_trade", "ws_status_key"]

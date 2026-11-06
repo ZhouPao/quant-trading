@@ -37,12 +37,13 @@ from quant.foundation.errors import (
     ServerError,
 )
 from quant.foundation.logger import get_logger
-from quant.models import Bar, FundingRate, Instrument
+from quant.models import Bar, FundingRate, Instrument, Trade
 from quant.okx.rate_limiter import RateLimiter
 from quant.okx.signer import sign
 
 # 端点路径 → 限频组映射（spec §4.2）
 PATH_TO_GROUP: list[tuple[str, str]] = [
+    (r"^/api/v5/market/history-trades", "history"),
     (r"^/api/v5/market/", "public"),
     (r"^/api/v5/public/", "public"),
     (r"^/api/v5/account/", "account"),
@@ -186,6 +187,47 @@ class OKXClient:
         if not isinstance(data, list):
             return []
         return [Bar.from_okx_raw(raw, inst_id=inst_id, bar_size=bar) for raw in data]
+
+    def get_recent_trades(self, inst_id: str, limit: int = 100) -> list[Trade]:
+        """最近成交（含未回补增量）。
+
+        端点：GET /api/v5/market/trades
+        - limit: 1-500，默认 100（OKX 上限 500）
+        """
+        params = {"instId": inst_id, "limit": str(min(limit, 500))}
+        data = self.get("/api/v5/market/trades", params)
+        if not isinstance(data, list):
+            return []
+        trades = [_trade_from_raw(r, inst_id) for r in data]
+        self._log.info(
+            f"GET /api/v5/market/trades 200, {len(trades)} trades for {inst_id}"
+        )
+        return trades
+
+    def get_history_trades(
+        self,
+        inst_id: str,
+        after: str | None = None,
+        limit: int = 100,
+    ) -> list[Trade]:
+        """历史成交（往旧翻页）。
+
+        端点：GET /api/v5/market/history-trades
+        - after: 上次最旧 tradeId，返回它之前的数据（更旧）；None 从最新开始
+        - limit: 1-100，默认 100（OKX 上限 100）
+        """
+        params = {"instId": inst_id, "limit": str(min(limit, 100))}
+        if after is not None:
+            params["after"] = str(after)
+        data = self.get("/api/v5/market/history-trades", params)
+        if not isinstance(data, list):
+            return []
+        trades = [_trade_from_raw(r, inst_id) for r in data]
+        self._log.info(
+            f"GET /api/v5/market/history-trades 200, {len(trades)} trades "
+            f"for {inst_id}"
+        )
+        return trades
 
     def get_instruments(self, inst_type: str = "SPOT") -> list[Instrument]:
         """拉取产品配置列表。
@@ -443,6 +485,22 @@ class OKXClient:
 
 
 # -------------------- 响应 → 模型 转换函数 --------------------
+
+
+def _trade_from_raw(raw: dict, inst_id: str) -> Trade:
+    """从 OKX /market/trades 或 /market/history-trades 响应项构造 Trade。
+
+    返回顺序：[instId, tradeId, px, sz, side, ts]
+    side: 'buy'（主动买，taker buy）/ 'sell'（主动卖，taker sell）
+    """
+    return Trade(
+        ts=int(raw["ts"]),
+        inst_id=inst_id,
+        trade_id=str(raw["tradeId"]),
+        px=Decimal(str(raw["px"])),
+        sz=Decimal(str(raw["sz"])),
+        side=str(raw["side"]),
+    )
 
 
 def _instrument_from_raw(raw: dict) -> Instrument:

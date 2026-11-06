@@ -3730,6 +3730,31 @@ PRD M8-12 保持 ✅ + §10 补充 48；账本 M8 行/合计/4.1/5/7/8 节同步
 
 ---
 
+### 8.116 M2-14 订单流足迹图 · 批1 数据采集与落盘（2026-11-06）
+
+M2-14（订单流足迹图）的第一批：建立全新的「市场逐笔成交」数据源与落盘层，让数据从启用当天开始积累。
+
+**新增**
+- `models/trade.py`：`Trade`（frozen/slots/Decimal，ts/inst_id/trade_id/px/sz/side），side 仅 'buy'/'sell'（taker 方向）
+- `storage/trade_storage.py`：`TradeStorage` 按 UTC **日**分区落 parquet（trades 量大），trade_id 去重 + 原子写，提供 save/load/latest_trade_id
+- `fetcher/trade_fetcher.py`：`TradeFetcher` — `backfill`（history-trades 往旧翻页，after 游标，days 边界 + 游标未推进双终止条件，防死循环）+ `run`（WS trades 订阅，内存缓冲 500/1s 批量落盘，严禁每笔写）
+- `cli/sync_trades.py` + 注册：`quant sync-trades --inst BTC-USDT-SWAP --days 1 [--loop]`
+
+**改动**
+- `okx/client.py`：`get_recent_trades` / `get_history_trades` + `_trade_from_raw`；`PATH_TO_GROUP` 把 `history-trades` 置于 `public` 通配前，走独立 `history` 限频桶
+- `okx/ws_client.py`：`parse_trade` 解析 trades 频道，导出 `__all__`
+- `models/__init__.py`：导出 `Trade`
+
+**实机验证（BTC-USDT-SWAP，模拟盘）**
+- 回补：`quant sync-trades --days 1` 落 `data/trades/swap/BTC-USDT-SWAP/2026-11-06.parquet`，**25 万+ 笔**（模拟盘成交活跃）；REST 管道端到端通顺
+- 实时 WS：当前开发机连接模拟盘 `wspap` 被对端 reset（根因：macOS 系统级 SOCKS 代理 + 直连 wspap 亦 reset，**非代码缺陷**）；实时订阅/缓冲/落盘与回补共用 `TradeStorage.save_trades`，逻辑完整，待环境网络恢复或实盘（真实 `ws.okx.com`）即生效
+
+**测试**：`test_trade_storage.py`（save/load/去重/日分区/latest/路径安全）、`test_trade_fetcher.py`（回补翻页终止、续拉起点）；pytest 全量 **2036 passed**（基线 2026）、ruff 全过；前端无改动。
+
+**下一步（批2–批5）**：批2 回补增强（断点续拉/可配天数）；批3 聚合（bar×自适应分档 → 买卖量/delta/POC/imbalance/cum_delta）；批4 `GET /api/footprint` + api.ts；批5 前端 K线/足迹开关 + ATAS 风格 SVG 渲染；批6 PRD M2-14 + 详设 `docs/design/footprint.md` + 账本同步。
+
+---
+
 ## 9. 相关文档
 
 - [PRD v0.6](requirements/2026-10-30-quant-trading-platform-requirements-v0.6.md)（[v0.5 历史版](requirements/2026-10-17-quant-trading-platform-requirements.md)）
