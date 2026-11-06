@@ -67,6 +67,13 @@ funding_rate_enabled = false              # 计入永续资金费率成本（需
 [params]
 resolve_from_db = true                    # 策略参数是否合并在线覆盖；false=只看 toml（回滚开关）
 
+# 组合管理（M6）：默认关闭，关闭时系统行为与单策略单品种完全一致。
+# 启用前复制 config/portfolios/core.toml.example 为 core.toml 并按需改单元。
+[portfolio]
+enabled = false
+config_dir = "./config/portfolios"
+active = ""                              # 空=加载目录下全部组合；多组合时填 portfolio_id
+
 [state]
 db_path = "./data/state/quant.db"         # SQLite 状态库
 

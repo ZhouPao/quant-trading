@@ -236,6 +236,20 @@ class EngineSettings(BaseModel):
     bindings_key: str = "quant:strategy:bindings"
 
 
+class PortfolioSettings(BaseModel):
+    """组合层总开关（PRD §4.6 / M6-13）。
+
+    ``enabled=False`` 是兼容开关：关闭时系统行为与单策略单品种完全一致，
+    引擎/worker/风控都不经过组合层。8-1 只落配置模型与分配器，
+    **不接线运行链路**；后续批次也只在 enabled=True 时启用新路径。
+    """
+
+    enabled: bool = False
+    config_dir: Path = Path("./config/portfolios")
+    #: 空=加载目录下全部组合；多组合时用 portfolio_id 指定生效组合
+    active: str = ""
+
+
 class DashboardSettings(BaseModel):
     """只读运维看板（M4 扩展）。默认只监听本机。"""
 
@@ -400,6 +414,7 @@ class Settings(BaseModel):
     candles: CandleSyncSettings = Field(default_factory=CandleSyncSettings)
     quality: QualitySettings = Field(default_factory=QualitySettings)
     engine: EngineSettings = Field(default_factory=EngineSettings)
+    portfolio: PortfolioSettings = Field(default_factory=PortfolioSettings)
     smtp: SmtpSettings = Field(default_factory=SmtpSettings)
     monitor: MonitorSettings = Field(default_factory=MonitorSettings)
     dashboard: DashboardSettings = Field(default_factory=DashboardSettings)

@@ -3407,6 +3407,62 @@ P0-2 上线检查清单（需后端聚合接口）、P2 实验备注、
 4 类列表完整表格化、M2 第 3 项（VOL y 轴量程）、M6 等任何新功能。
 M3 的 18 条需求完成度不变（仍 18 ✅），本轮只动前台体验与决策辅助。
 
+### 8.108 M6 组合管理开工（8-1）：配置模型 + 四种资金分配（2026-11-06）
+
+**决策**：用户确认开始 M6，按上一轮对齐的 8-1 → 8-2 → 8-3 → 8-4 顺序分批做。
+5 个拍板点采用建议默认值（未反对），其中只有 #5 属 8-1 范围；#1 `source`
+列属 M6-8（8-3），8-1 不提前动 schema，避免无调用方的空列。
+
+**范围**：M6-1 组合配置、M6-2 单元管理、M6-3 四种分配、
+M6-4 归一与上限、M6-13 单策略兼容。
+
+**实现**
+- 新建 `src/quant/portfolio/`（此前全仓 0 个 portfolio 文件）：
+  - `models.py`：`dataclass(frozen=True, slots=True)` 的 `PortfolioConfig` /
+    `PortfolioUnit` / `RebalanceConfig` / `PortfolioRiskConfig`；
+    `__post_init__` 校验分配法、重复 `unit_key`、权重/波动率边界；
+    `enabled=False` 的单元**仍留在配置中**（权重记 0），对应 M6-2
+    「保留持仓与历史」。
+  - `loader.py`：读 `config/portfolios/<id>.toml`；比例一律
+    `Decimal(str(value))` 避免 TOML float 进金额链（AGENTS #1）；
+    目录不存在返回空列表（兼容 M6-13），单文件非法抛
+    `PortfolioConfigError`，不静默跳过。
+  - `allocator.py`：`Allocator.allocate(equity, config)` 与 `weights()`，
+    四法互斥——`equal` 等权 / `fixed` 配置权重 / `inverse_vol` 按 `1/σ` /
+    `vol_target` 按目标波动缩放总敞口（Σw≤1，其余为现金；组合波动按
+    「单元间不相关」近似 `sqrt(Σ(wᵢσᵢ)²)`）。`annualized_volatility()` 由
+    对数收益样本标准差 × √每年 bar 数估算 σ，供 8-2 接 `BarStorage`。
+  - 归一与上限：超限部分按比例回分给其余单元并迭代收敛；
+    `cap × N < 1` 时直接报错，不做静默钳制。
+- `[portfolio] enabled=false` **默认关闭**：`Settings.portfolio` 是纯新增
+  字段，未配置时引擎 / worker / 风控完全不经过组合层。本地 `config.toml`
+  与 `config.toml.example` 同步加段；`config/portfolios/core.toml.example`
+  给双单元示例；`.gitignore` 忽略真实组合配置。
+- **按 PRD 边界本批不接线**：不产出调仓单、不调用 OKX、不建两张表、
+  不加 HTTP 接口、不做组合页。下单仍只有 M8 worker 一条路径（AGENTS #14）。
+
+**拍板点落实**
+
+| # | 状态 |
+|---|---|
+| 1 `source` 列 | 属 M6-8 / 8-3，8-1 未动 schema；开工 8-3 前再定 |
+| 2 组合级风控 | 只落 `PortfolioRiskConfig` 阈值模型，8-3 产出降权/暂停建议，限额仍由 M7 checker 执行 |
+| 3 波动率数据源 | 8-1 提供纯函数 `annualized_volatility`，8-2 接 `BarStorage` 近 N 根收盘 |
+| 4 组合回测 | 8-2，指标复用 `compute_metrics` 保证与 M4 同口径 |
+| 5 单策略兼容 | ✅ 已实现并有回归（无 `[portfolio]` 段时 `Settings`/引擎默认值不变） |
+
+**测试**：`tests/test_portfolio.py` **31 条**（模型校验 8、加载 5、
+四法与上限 11、波动率 5、兼容性 2）；`pytest` 全量 **1962 passed**
+（基线 1931）；`ruff check src/quant/portfolio src/quant/foundation/config.py
+tests/test_portfolio.py` 通过。本批无前端改动，故不跑 tsc/build。
+
+**文档**：PRD 4.6.4 状态（M6-3/4/13 → ✅，M6-1/2 → 🟡）+ §10 补充 41；
+账本总览 132/4/14 → **135/6/9**、完成率 **90.0%**、剩余 15 条，
+3.6 明细逐条记账，4.1/4.2/5/7/8 节同步。
+
+**下一批**：8-2（M6-10/11/12，两张表追加迁移 + 快照 + 归因 +
+`PortfolioBacktest`），与 8-3 相互独立，均以 8-1 为前置。
+
 ---
 
 ## 9. 相关文档

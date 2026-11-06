@@ -30,6 +30,7 @@ env/
 .env
 config/config.toml
 config/strategies/*.toml
+config/portfolios/*.toml
 
 # Runtime data
 data/
