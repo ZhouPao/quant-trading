@@ -32,11 +32,6 @@ async def _run(args, settings: Settings) -> int:
     redis = Redis.from_url(settings.redis.url, decode_responses=True)
     store = SQLiteStore(settings.state.db_path)
     alerter = EmailAlerter(settings.smtp)
-    daily = (
-        DailyReporter(settings, store, redis, alerter)
-        if settings.report.enabled
-        else None
-    )
     # engine 状态键带 :{strategy}:{inst} 后缀，与 engine.publish_status 保持一致
     engine_key = (
         f"{settings.engine.status_key}:"
@@ -50,6 +45,15 @@ async def _run(args, settings: Settings) -> int:
             "engine_timeout_seconds": settings.engine.status_timeout_seconds,
         }
     )
+    # 日报 FAIL 也走同一告警体系（M4-8）：与 Monitor 共用同一个 AlertService
+    alert_service = AlertService(store, redis, alerter, monitor_settings)
+    daily = (
+        DailyReporter(
+            settings, store, redis, alerter, alert_service=alert_service
+        )
+        if settings.report.enabled
+        else None
+    )
     monitor = Monitor(
         client,
         redis,
@@ -60,7 +64,7 @@ async def _run(args, settings: Settings) -> int:
         store=store,
         daily=daily,
         retention=RetentionPurger(settings, store, redis),
-        alert_service=AlertService(store, redis, alerter, monitor_settings),
+        alert_service=alert_service,
         quality=(
             QualityReporter(settings.storage.data_dir)
             if settings.quality.enabled

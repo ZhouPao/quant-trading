@@ -16,8 +16,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from redis.asyncio import Redis
+
+if TYPE_CHECKING:
+    # 运行时在 maybe_run 内延迟导入：monitor 包 __init__ 会连带 import 本模块，
+    # 顶层导入会形成循环
+    from quant.monitor.alert_service import AlertService
 
 from quant.analysis.deviation import (
     DEFAULT_THRESHOLD,
@@ -238,12 +244,15 @@ class DailyReporter:
         redis: Redis,
         alerter: EmailAlerter | None = None,
         config_dir: Path | str | None = None,
+        alert_service: AlertService | None = None,
     ) -> None:
         self._settings = settings
         self._cfg = settings.report
         self._store = store
         self._redis = redis
         self._alerter = alerter or EmailAlerter(settings.smtp)
+        # M4-8：FAIL 时进 alerts 告警体系（复用 M9 静音与冷却），邮件之外的看板通道
+        self._alert_service = alert_service
         self._config_dir = Path(config_dir or self._cfg.config_dir)
         self._at_minutes = parse_at(self._cfg.at)
         if self._cfg.enabled and self._at_minutes is None:
@@ -278,9 +287,33 @@ class DailyReporter:
             f"daily report {date_str} {result.status} "
             f"max_dev={result.report.max_deviation:.2%} -> {result.csv_path}"
         )
+        if result.status == "FAIL" and self._alert_service is not None:
+            await self._alert_daily_fail(now_ms, date_str, result)
         if self._cfg.email:
             await asyncio.to_thread(self._notify, date_str, result)
         return result
+
+    async def _alert_daily_fail(
+        self, now_ms: int, date_str: str, result: DailyResult
+    ) -> None:
+        """FAIL 时发布告警（M4-8）：发布失败只记日志，不影响日报主流程。"""
+        from quant.monitor.alert_service import AlertEvent  # 运行时延迟导入避免循环
+
+        try:
+            await self._alert_service.publish(
+                AlertEvent(
+                    rule="daily_report_deviation",
+                    level="WARNING",
+                    message=(
+                        f"模拟盘日报 {date_str} FAIL：偏离度 "
+                        f"{result.report.max_deviation:.2%} 超过阈值 "
+                        f"{self._cfg.threshold:.2%}，详见 {result.csv_path}"
+                    ),
+                    ts=now_ms,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - 告警失败不拖垮日报
+            log.warning(f"daily report alert publish failed: {e}")
 
     # internal
 

@@ -151,6 +151,24 @@ def _backtest_fills() -> list[Fill]:
     return result.trades
 
 
+class _FakeAlertService:
+    """M4-8：记录 publish 调用的假告警服务。"""
+
+    def __init__(self) -> None:
+        self.events = []
+
+    async def publish(self, event) -> str:
+        self.events.append(event)
+        return "alert-test-1"
+
+
+class _BrokenAlertService:
+    """publish 总是抛错：验证日报主流程不被拖垮。"""
+
+    async def publish(self, event) -> str:
+        raise RuntimeError("alert backend down")
+
+
 class FakeAlerter:
     """记录 send 调用的假邮件发送器。"""
 
@@ -360,6 +378,82 @@ class TestDailyReporter:
 
         assert result is not None
         assert alerter.sent == []
+
+    async def test_fail_publishes_alert(self, workspace) -> None:
+        """M4-8：偏离超阈值（FAIL）时进 alerts 告警体系。"""
+        settings, store = workspace
+        # 追加一笔模拟盘成交制造数量偏离，阈值压到 0 -> FAIL
+        first = _backtest_fills()[0]
+        store.save_fill(
+            Fill(
+                order_id="extra-1",
+                inst_id=first.inst_id,
+                side=first.side,
+                qty=first.qty,
+                price=first.price,
+                fee=first.fee,
+                ts=first.ts,
+            )
+        )
+        settings.report.threshold = 0.0
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        alerts = _FakeAlertService()
+        reporter = DailyReporter(
+            settings, store, redis, FakeAlerter(), alert_service=alerts
+        )
+
+        result = await reporter.maybe_run(_local_ts(12, 0))
+
+        assert result is not None and result.status == "FAIL"
+        assert len(alerts.events) == 1
+        event = alerts.events[0]
+        assert event.rule == "daily_report_deviation"
+        assert event.level == "WARNING"
+        assert "FAIL" in event.message and "阈值" in event.message
+
+    async def test_pass_does_not_publish_alert(self, workspace) -> None:
+        settings, store = workspace
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        alerts = _FakeAlertService()
+        reporter = DailyReporter(
+            settings, store, redis, FakeAlerter(), alert_service=alerts
+        )
+
+        result = await reporter.maybe_run(_local_ts(12, 0))
+
+        assert result is not None and result.status == "PASS"
+        assert alerts.events == []
+
+    async def test_alert_publish_failure_does_not_break_report(
+        self, workspace
+    ) -> None:
+        """告警发布异常只记日志，日报仍正常返回。"""
+        settings, store = workspace
+        first = _backtest_fills()[0]
+        store.save_fill(
+            Fill(
+                order_id="extra-1",
+                inst_id=first.inst_id,
+                side=first.side,
+                qty=first.qty,
+                price=first.price,
+                fee=first.fee,
+                ts=first.ts,
+            )
+        )
+        settings.report.threshold = 0.0
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        reporter = DailyReporter(
+            settings,
+            store,
+            redis,
+            FakeAlerter(),
+            alert_service=_BrokenAlertService(),
+        )
+
+        result = await reporter.maybe_run(_local_ts(12, 0))
+
+        assert result is not None and result.status == "FAIL"
 
     async def test_no_fills_marks_day_without_result(self, tmp_path) -> None:
         settings = _settings(tmp_path)

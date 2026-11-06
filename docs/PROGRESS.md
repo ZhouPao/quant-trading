@@ -3641,6 +3641,31 @@ CLI 评估入口、M8 留痕与失败回写均齐备；**仍未接进常驻进�
 **验证**：`pytest` 全量 **2014 passed**（基线 2012）、`vitest` 56、
 `tsc` / `build` / `ruff` 全过；dashboard 已重启加载新参数。
 
+### 8.113 M4-8 日报 FAIL 接入告警体系（2026-11-06）
+
+**实现**：`DailyReporter.__init__` 新增 `alert_service` 参数；
+`maybe_run` 在 `status == "FAIL"` 时发布 `AlertEvent(
+rule="daily_report_deviation", level="WARNING")`，消息带日期、偏离度、
+阈值与 CSV 路径。发布失败只记日志，不拖垮日报主流程。
+`cli/monitor.py` 把 `AlertService` 的创建提前，与 `Monitor` 共用同一实例
+（原 `daily` 先于 `alert_service` 构造，需调换顺序）。
+
+**循环导入规避（如实）**：`quant/monitor/__init__.py` 会连带 import
+`monitor.py` → `report/daily.py`，故 `report/daily.py` 顶层只做
+`TYPE_CHECKING` 导入，运行时在发布函数内延迟 `import AlertEvent`。
+
+**验证**：`test_daily_report.py` +3（FAIL 发布告警、PASS 不发布、
+发布异常不拖垮日报；用「追加一笔成交 + threshold=0」构造 FAIL，
+负阈值会被 `deviation.py` 的 [0,1] 校验拒绝）。`pytest` 全量
+**2017 passed**（基线 2014）；`ruff` 改动文件全过。monitor 进程已重启
+加载新接线（本地 `[report] enabled=false`，启用日报后生效）；
+本批无前端改动。**实机端到端**（真实 FAIL 告警出现在看板）需用户
+启用 `[report] enabled` 并产生真实偏离，属运行时行为，以单元测试为准。
+
+**记账**：M4-8 🟡 → ✅。总览 **144/6/0 → 145/5/0**，完成率
+**96.0% → 96.7%**，剩余 5 条 🟡（M8-7/8/12、M6-2/10）。
+PRD M4-8 状态 + §10 补充 46；账本 M4 行/合计/4.1/5/7/8 节同步。
+
 ---
 
 ## 9. 相关文档
