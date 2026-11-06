@@ -137,6 +137,15 @@ def test_p02_readiness_checklist() -> None:
     assert ".ready-pass .ready-dot" in CSS
 
 
+def test_m812_position_filter() -> None:
+    """M8-12：持仓列表按品种 + 方向本地过滤（后端无需参数）。"""
+    assert "filterInst" in APP
+    assert 'setFilterSide(e.target.value as "" | "long" | "short")' in APP
+    assert "filtered.findIndex" in APP
+    assert "没有匹配当前筛选的持仓" in APP
+    assert ".pos-filter" in CSS
+
+
 def test_m812_order_source_filter() -> None:
     """M8-12：订单支持按来源筛选并展示来源列。"""
     api_ts = (SRC / "api.ts").read_text(encoding="utf-8")

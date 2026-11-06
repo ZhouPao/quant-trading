@@ -2870,6 +2870,20 @@ function PositionsPanel({ rows }: { rows: PositionRow[] }) {
   const [flattenWord, setFlattenWord] = useState("");
   const [flattenReason, setFlattenReason] = useState("");
   const [flattenReport, setFlattenReport] = useState<string[]>([]);
+  // M8-12：持仓筛选（品种 + 方向）。持仓每品种一行、总量小，
+  // /api/positions 一次全量返回，本地过滤即可，不给后端加参数。
+  const [filterInst, setFilterInst] = useState("");
+  const [filterSide, setFilterSide] = useState<"" | "long" | "short">("");
+  const filtered = useMemo(() => {
+    const inst = filterInst.trim().toLowerCase();
+    return rows.filter((item) => {
+      if (inst && !item.inst_id.toLowerCase().includes(inst)) return false;
+      const accountQty = Number(item.qty ?? item.local_qty ?? 0);
+      if (filterSide === "long" && accountQty < 0) return false;
+      if (filterSide === "short" && accountQty >= 0) return false;
+      return true;
+    });
+  }, [rows, filterInst, filterSide]);
 
   const row = rows.find((item) => item.inst_id === selected) ?? null;
   const holding = row ? holdingOf(row) : 0;
@@ -2977,7 +2991,9 @@ function PositionsPanel({ rows }: { rows: PositionRow[] }) {
       <div className="card-head pos-head">
         <h2>持仓</h2>
         <span className="card-note">
-          {rows.length} 条 · 点选一行可减仓
+          {filtered.length === rows.length
+            ? `${rows.length} 条 · 点选一行可减仓`
+            : `${filtered.length} / ${rows.length} 条 · 点选一行可减仓`}
         </span>
         <button
           className="pos-flat"
@@ -3015,9 +3031,33 @@ function PositionsPanel({ rows }: { rows: PositionRow[] }) {
         </div>
       )}
 
+      <div className="pos-filter">
+        <input
+          className="pos-input"
+          value={filterInst}
+          placeholder="品种筛选，如 BTC"
+          onChange={(e) => setFilterInst(e.target.value)}
+        />
+        <select
+          className="pos-input"
+          value={filterSide}
+          onChange={(e) =>
+            setFilterSide(e.target.value as "" | "long" | "short")
+          }
+        >
+          <option value="">全部方向</option>
+          <option value="long">多头</option>
+          <option value="short">空头</option>
+        </select>
+      </div>
+
       <Table
-        empty={rows.length === 0}
-        emptyHint="暂无持仓：本地无记录，monitor 也未回报合约持仓"
+        empty={filtered.length === 0}
+        emptyHint={
+          rows.length === 0
+            ? "暂无持仓：本地无记录，monitor 也未回报合约持仓"
+            : "没有匹配当前筛选的持仓"
+        }
         head={[
           "品种",
           "账户数量",
@@ -3030,13 +3070,13 @@ function PositionsPanel({ rows }: { rows: PositionRow[] }) {
           "强平价",
           "距离",
         ]}
-        rows={rows.map((item) => positionCells(item))}
+        rows={filtered.map((item) => positionCells(item))}
         activeIndex={
           selected === null
             ? -1
-            : rows.findIndex((item) => item.inst_id === selected)
+            : filtered.findIndex((item) => item.inst_id === selected)
         }
-        onRowClick={(index) => pick(rows[index].inst_id)}
+        onRowClick={(index) => pick(filtered[index].inst_id)}
       />
 
       {row && (

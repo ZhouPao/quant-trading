@@ -1599,6 +1599,22 @@ code {
   background: rgba(255, 95, 95, 0.06);
 }
 
+/* M8-12：持仓筛选条（品种 + 方向），风格与全平确认条一致 */
+.pos-filter {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.pos-filter .pos-input {
+  width: 140px;
+}
+
+.pos-filter select.pos-input {
+  width: auto;
+  padding-right: 20px;
+}
+
 .pos-flat-warn {
   color: var(--bad);
   font-family: var(--mono);
